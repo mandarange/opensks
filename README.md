@@ -74,8 +74,10 @@ writing, automation-loop planning, capability planning, Voxel TriWiki seeding,
 and PRD coverage accounting. Goal runs also write local scheduler, QA/security,
 worktree-isolation, and patch-gate artifacts. `qa run` executes local Rust
 checks when a Cargo workspace is present and always runs the built-in secret
-scan; it also writes `secret-leak-rate.json` and `secret-leak-gate.json` so the
-current workspace release scan has an explicit zero-leak gate. `cache warm`
+scan; it also writes `secret-leak-rate.json`, `secret-leak-gate.json`, and
+`secret-leak-release-history.json` so the current workspace release scan has an
+explicit local release-history zero-leak denominator. Live external production
+telemetry remains false. `cache warm`
 hashes local cache segments and writes `cache-hit-report.json` plus
 `cache-layout-improvement.json`, comparing the current stable prefix with the
 previous warm snapshot. The cache-layout gate only passes for the Voxel TriWiki

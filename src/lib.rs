@@ -411,6 +411,37 @@ struct SecurityScanSummary {
     critical_or_warning_findings: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct SecretLeakReleaseHistory {
+    release_scan_count: usize,
+    total_scanned_artifact_count: usize,
+    total_secret_finding_count: usize,
+}
+
+impl SecretLeakReleaseHistory {
+    fn with_current_scan(self, scanned_artifact_count: usize, secret_finding_count: usize) -> Self {
+        Self {
+            release_scan_count: self.release_scan_count + 1,
+            total_scanned_artifact_count: self.total_scanned_artifact_count
+                + scanned_artifact_count,
+            total_secret_finding_count: self.total_secret_finding_count + secret_finding_count,
+        }
+    }
+
+    fn artifact_rate(self) -> f64 {
+        secret_leak_artifact_rate(
+            self.total_scanned_artifact_count,
+            self.total_secret_finding_count,
+        )
+    }
+
+    fn gate_passed(self) -> bool {
+        self.release_scan_count > 0
+            && self.total_scanned_artifact_count > 0
+            && self.total_secret_finding_count == 0
+    }
+}
+
 struct FinalSealVerification<'a> {
     checks: &'a [CommandCheck],
     security_summary: &'a SecurityScanSummary,
@@ -918,6 +949,18 @@ fn run_qa_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError
     let secret_findings = scan_workspace_for_secrets(cwd)?;
     let secret_scan_targets = count_secret_scan_targets(cwd)?;
     let security_findings = scan_workspace_for_security_findings(cwd)?;
+    let secret_history_path = dir.join("secret-leak-release-history.jsonl");
+    let secret_history = read_secret_leak_release_history(&secret_history_path)?
+        .with_current_scan(secret_scan_targets, secret_findings.len());
+    append_text(
+        &secret_history_path,
+        &render_secret_leak_release_history_event(
+            &stamp,
+            "qa",
+            secret_scan_targets,
+            &secret_findings,
+        ),
+    )?;
     write_text_atomic(
         &dir.join("qa-report.json"),
         &render_qa_report(&stamp, &checks),
@@ -937,6 +980,7 @@ fn run_qa_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError
             "qa",
             secret_scan_targets,
             &secret_findings,
+            secret_history,
             &["security-audit.json", "security-findings.jsonl"],
         ),
     )?;
@@ -946,12 +990,19 @@ fn run_qa_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError
             &stamp,
             "qa",
             &secret_findings,
+            secret_history,
             &[
                 "secret-leak-rate.json",
+                "secret-leak-release-history.json",
+                "secret-leak-release-history.jsonl",
                 "security-audit.json",
                 "security-findings.jsonl",
             ],
         ),
+    )?;
+    write_text_atomic(
+        &dir.join("secret-leak-release-history.json"),
+        &render_secret_leak_release_history_report(&stamp, "qa", secret_history),
     )?;
     Ok(CliOutput {
         stdout: format!(
@@ -972,6 +1023,18 @@ fn run_security_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSk
     let secret_findings = scan_workspace_for_secrets(cwd)?;
     let secret_scan_targets = count_secret_scan_targets(cwd)?;
     let security_findings = scan_workspace_for_security_findings(cwd)?;
+    let secret_history_path = dir.join("secret-leak-release-history.jsonl");
+    let secret_history = read_secret_leak_release_history(&secret_history_path)?
+        .with_current_scan(secret_scan_targets, secret_findings.len());
+    append_text(
+        &secret_history_path,
+        &render_secret_leak_release_history_event(
+            &stamp,
+            "security",
+            secret_scan_targets,
+            &secret_findings,
+        ),
+    )?;
     write_text_atomic(
         &dir.join("security-audit.json"),
         &render_security_audit(&stamp, &secret_findings, &security_findings),
@@ -987,6 +1050,7 @@ fn run_security_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSk
             "security",
             secret_scan_targets,
             &secret_findings,
+            secret_history,
             &["security-audit.json", "security-findings.jsonl"],
         ),
     )?;
@@ -996,12 +1060,19 @@ fn run_security_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSk
             &stamp,
             "security",
             &secret_findings,
+            secret_history,
             &[
                 "secret-leak-rate.json",
+                "secret-leak-release-history.json",
+                "secret-leak-release-history.jsonl",
                 "security-audit.json",
                 "security-findings.jsonl",
             ],
         ),
+    )?;
+    write_text_atomic(
+        &dir.join("secret-leak-release-history.json"),
+        &render_secret_leak_release_history_report(&stamp, "security", secret_history),
     )?;
     write_text_atomic(&dir.join("threat-model.json"), &render_threat_model(&stamp))?;
     Ok(CliOutput {
@@ -5736,10 +5807,11 @@ fn render_secret_leak_rate_report(
     source_command: &str,
     scanned_artifact_count: usize,
     secret_findings: &[SecretFinding],
+    release_history: SecretLeakReleaseHistory,
     evidence_refs: &[&str],
 ) -> String {
     let secret_finding_count = secret_findings.len();
-    let rate = secret_leak_artifact_rate(scanned_artifact_count, secret_findings);
+    let rate = secret_leak_artifact_rate(scanned_artifact_count, secret_finding_count);
     let gate_passed = secret_leak_gate_passed(secret_findings);
     format!(
         concat!(
@@ -5754,7 +5826,16 @@ fn render_secret_leak_rate_report(
             "  \"secret_leak_artifact_rate\": {:.6},\n",
             "  \"target_rate\": 0.0,\n",
             "  \"gate_passed\": {},\n",
+            "  \"release_history_available\": {},\n",
+            "  \"release_history_ref\": \"secret-leak-release-history.json\",\n",
+            "  \"release_history_events_ref\": \"secret-leak-release-history.jsonl\",\n",
+            "  \"release_history_scan_count\": {},\n",
+            "  \"release_history_denominator\": {},\n",
+            "  \"release_history_secret_finding_count\": {},\n",
+            "  \"release_history_secret_leak_artifact_rate\": {:.6},\n",
+            "  \"release_history_gate_passed\": {},\n",
             "  \"live_external_production_telemetry\": false,\n",
+            "  \"telemetry_source\": \"local_workspace_release_history\",\n",
             "  \"evidence_refs\": {},\n",
             "  \"secret_findings\": {}\n",
             "}}\n"
@@ -5766,6 +5847,12 @@ fn render_secret_leak_rate_report(
         secret_finding_count,
         rate,
         gate_passed,
+        release_history.release_scan_count > 0,
+        release_history.release_scan_count,
+        release_history.total_scanned_artifact_count,
+        release_history.total_secret_finding_count,
+        release_history.artifact_rate(),
+        release_history.gate_passed(),
         json_array(evidence_refs),
         render_secret_findings_json(secret_findings)
     )
@@ -5775,9 +5862,11 @@ fn render_secret_leak_gate_report(
     stamp: &ClockStamp,
     source_command: &str,
     secret_findings: &[SecretFinding],
+    release_history: SecretLeakReleaseHistory,
     evidence_refs: &[&str],
 ) -> String {
-    let gate_passed = secret_leak_gate_passed(secret_findings);
+    let current_scan_gate_passed = secret_leak_gate_passed(secret_findings);
+    let gate_passed = current_scan_gate_passed && release_history.gate_passed();
     format!(
         concat!(
             "{{\n",
@@ -5789,7 +5878,17 @@ fn render_secret_leak_gate_report(
             "  \"gate_passed\": {},\n",
             "  \"target_rate\": 0.0,\n",
             "  \"secret_finding_count\": {},\n",
+            "  \"current_workspace_gate_passed\": {},\n",
+            "  \"release_history_available\": {},\n",
+            "  \"release_history_ref\": \"secret-leak-release-history.json\",\n",
+            "  \"release_history_events_ref\": \"secret-leak-release-history.jsonl\",\n",
+            "  \"release_history_scan_count\": {},\n",
+            "  \"release_history_denominator\": {},\n",
+            "  \"release_history_secret_finding_count\": {},\n",
+            "  \"release_history_secret_leak_artifact_rate\": {:.6},\n",
+            "  \"release_history_gate_passed\": {},\n",
             "  \"live_external_production_telemetry\": false,\n",
+            "  \"telemetry_source\": \"local_workspace_release_history\",\n",
             "  \"evidence_refs\": {},\n",
             "  \"secret_findings\": {}\n",
             "}}\n"
@@ -5799,24 +5898,107 @@ fn render_secret_leak_gate_report(
         json_string(if gate_passed { "passed" } else { "blocked" }),
         gate_passed,
         secret_findings.len(),
+        current_scan_gate_passed,
+        release_history.release_scan_count > 0,
+        release_history.release_scan_count,
+        release_history.total_scanned_artifact_count,
+        release_history.total_secret_finding_count,
+        release_history.artifact_rate(),
+        release_history.gate_passed(),
         json_array(evidence_refs),
         render_secret_findings_json(secret_findings)
     )
 }
 
-fn secret_leak_artifact_rate(
-    scanned_artifact_count: usize,
-    secret_findings: &[SecretFinding],
-) -> f64 {
+fn secret_leak_artifact_rate(scanned_artifact_count: usize, secret_finding_count: usize) -> f64 {
     if scanned_artifact_count == 0 {
         0.0
     } else {
-        secret_findings.len() as f64 / scanned_artifact_count as f64
+        secret_finding_count as f64 / scanned_artifact_count as f64
     }
 }
 
 fn secret_leak_gate_passed(secret_findings: &[SecretFinding]) -> bool {
     secret_findings.is_empty()
+}
+
+fn read_secret_leak_release_history(path: &Path) -> Result<SecretLeakReleaseHistory, OpenSksError> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(SecretLeakReleaseHistory::default());
+        }
+        Err(error) => return Err(OpenSksError::Io(error)),
+    };
+    let mut history = SecretLeakReleaseHistory::default();
+    for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+        let scanned_artifacts =
+            extract_json_number_field(line, "scanned_artifact_count").unwrap_or(0);
+        let secret_findings = extract_json_number_field(line, "secret_finding_count").unwrap_or(0);
+        history = history.with_current_scan(scanned_artifacts, secret_findings);
+    }
+    Ok(history)
+}
+
+fn render_secret_leak_release_history_event(
+    stamp: &ClockStamp,
+    source_command: &str,
+    scanned_artifact_count: usize,
+    secret_findings: &[SecretFinding],
+) -> String {
+    format!(
+        concat!(
+            "{{\"schema\":\"opensks.secret-leak-release-history-event.v1\",",
+            "\"release_id\":{},\"generated_at\":{},\"source_command\":{},",
+            "\"scope\":\"local_workspace_release_history\",",
+            "\"scanned_artifact_count\":{},\"secret_finding_count\":{},",
+            "\"gate_passed\":{},\"secret_findings\":{}}}\n"
+        ),
+        json_string(&format!("{source_command}-{}", stamp.compact_id())),
+        stamp.json(),
+        json_string(source_command),
+        scanned_artifact_count,
+        secret_findings.len(),
+        secret_findings.is_empty() && scanned_artifact_count > 0,
+        render_secret_findings_json(secret_findings)
+    )
+}
+
+fn render_secret_leak_release_history_report(
+    stamp: &ClockStamp,
+    source_command: &str,
+    release_history: SecretLeakReleaseHistory,
+) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.secret-leak-release-history.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"source_command\": {},\n",
+            "  \"scope\": \"local_workspace_release_history\",\n",
+            "  \"release_history_available\": {},\n",
+            "  \"release_scan_count\": {},\n",
+            "  \"release_history_denominator\": {},\n",
+            "  \"total_scanned_artifact_count\": {},\n",
+            "  \"total_secret_finding_count\": {},\n",
+            "  \"secret_leak_artifact_rate\": {:.6},\n",
+            "  \"target_rate\": 0.0,\n",
+            "  \"gate_passed\": {},\n",
+            "  \"live_external_production_telemetry\": false,\n",
+            "  \"telemetry_source\": \"local_workspace_release_history\",\n",
+            "  \"events_ref\": \"secret-leak-release-history.jsonl\"\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_string(source_command),
+        release_history.release_scan_count > 0,
+        release_history.release_scan_count,
+        release_history.total_scanned_artifact_count,
+        release_history.total_scanned_artifact_count,
+        release_history.total_secret_finding_count,
+        release_history.artifact_rate(),
+        release_history.gate_passed()
+    )
 }
 
 fn render_security_category_summary_json(findings: &[SecurityFinding]) -> String {
@@ -7074,6 +7256,18 @@ fn beta_acceptance_items() -> Vec<AcceptanceItem> {
 }
 
 fn production_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
+    let prod_004_passed = prod004_secret_leak_release_history_gate_passed(cwd);
+    let (prod_004_status, prod_004_evidence) = if prod_004_passed {
+        (
+            "passed",
+            "qa and security artifacts both report zero secret findings for the current workspace release scan and a local release-history denominator with release_history_gate_passed=true; live external production telemetry remains explicitly false.",
+        )
+    } else {
+        (
+            "partial",
+            "prod-004 requires qa run and security audit artifacts with zero current secret findings plus a local release-history denominator; missing, malformed, leaky, or zero-denominator artifacts keep this partial. Live external production telemetry remains explicitly false.",
+        )
+    };
     let final_seal_trust_passed = latest_final_seal_artifact_integrity_passed(cwd);
     let (prod_005_status, prod_005_evidence) = if final_seal_trust_passed {
         (
@@ -7108,8 +7302,8 @@ fn production_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
         acceptance_item(
             "prod-004",
             "secret leak artifact rate = 0",
-            "partial",
-            "qa run and security audit write secret-leak-rate.json and secret-leak-gate.json for the current workspace release scan; cross-release production telemetry and a release-history denominator are not implemented.",
+            prod_004_status,
+            prod_004_evidence,
         ),
         acceptance_item(
             "prod-005",
@@ -7124,6 +7318,69 @@ fn production_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
             "updater plan writes local signature/channel/rollback artifacts; production crypto/notarized apply is not live.",
         ),
     ]
+}
+
+fn prod004_secret_leak_release_history_gate_passed(cwd: &Path) -> bool {
+    ["qa", "security"]
+        .iter()
+        .all(|surface| secret_leak_surface_gate_passed(cwd, surface))
+}
+
+fn secret_leak_surface_gate_passed(cwd: &Path, surface: &str) -> bool {
+    let surface_dir = cwd.join(OPEN_SKSDIR).join(surface);
+    let Ok(rate) = fs::read_to_string(surface_dir.join("secret-leak-rate.json")) else {
+        return false;
+    };
+    let Ok(gate) = fs::read_to_string(surface_dir.join("secret-leak-gate.json")) else {
+        return false;
+    };
+    let Ok(history) = fs::read_to_string(surface_dir.join("secret-leak-release-history.json"))
+    else {
+        return false;
+    };
+    let Ok(audit) = fs::read_to_string(surface_dir.join("security-audit.json")) else {
+        return false;
+    };
+
+    rate.contains("\"schema\": \"opensks.secret-leak-rate.v1\"")
+        && gate.contains("\"schema\": \"opensks.secret-leak-gate.v1\"")
+        && history.contains("\"schema\": \"opensks.secret-leak-release-history.v1\"")
+        && audit.contains("\"schema\": \"opensks.security-audit.v1\"")
+        && json_string_field_equals(&rate, "scope", "current_workspace_release_scan")
+        && json_string_field_equals(&gate, "scope", "current_workspace_release_scan")
+        && json_number_field_positive(&rate, "scanned_artifact_count")
+        && json_number_field_positive(&rate, "release_history_denominator")
+        && json_number_field_positive(&history, "release_history_denominator")
+        && json_number_field_equals(&rate, "secret_finding_count", 0)
+        && json_number_field_equals(&gate, "secret_finding_count", 0)
+        && json_number_field_equals(&rate, "release_history_secret_finding_count", 0)
+        && json_number_field_equals(&gate, "release_history_secret_finding_count", 0)
+        && json_number_field_equals(&history, "total_secret_finding_count", 0)
+        && json_bool_field_equals(&rate, "gate_passed", true)
+        && json_bool_field_equals(&gate, "gate_passed", true)
+        && json_bool_field_equals(&history, "gate_passed", true)
+        && json_bool_field_equals(&rate, "release_history_gate_passed", true)
+        && json_bool_field_equals(&gate, "release_history_gate_passed", true)
+        && json_bool_field_equals(&rate, "live_external_production_telemetry", false)
+        && json_bool_field_equals(&gate, "live_external_production_telemetry", false)
+        && json_bool_field_equals(&history, "live_external_production_telemetry", false)
+        && json_string_field_equals(&gate, "status", "passed")
+}
+
+fn json_string_field_equals(input: &str, key: &str, expected: &str) -> bool {
+    extract_json_string_field(input, key).as_deref() == Some(expected)
+}
+
+fn json_bool_field_equals(input: &str, key: &str, expected: bool) -> bool {
+    extract_json_raw_field(input, key).as_deref() == Some(if expected { "true" } else { "false" })
+}
+
+fn json_number_field_equals(input: &str, key: &str, expected: usize) -> bool {
+    extract_json_number_field(input, key) == Some(expected)
+}
+
+fn json_number_field_positive(input: &str, key: &str) -> bool {
+    extract_json_number_field(input, key).is_some_and(|value| value > 0)
 }
 
 fn latest_final_seal_artifact_integrity_passed(cwd: &Path) -> bool {
@@ -10338,10 +10595,14 @@ mod tests {
             "qa/security-findings.jsonl",
             "qa/secret-leak-rate.json",
             "qa/secret-leak-gate.json",
+            "qa/secret-leak-release-history.json",
+            "qa/secret-leak-release-history.jsonl",
             "security/security-audit.json",
             "security/security-findings.jsonl",
             "security/secret-leak-rate.json",
             "security/secret-leak-gate.json",
+            "security/secret-leak-release-history.json",
+            "security/secret-leak-release-history.jsonl",
             "security/threat-model.json",
             "design/design-qa-report.json",
             "design/design-surface-inventory.json",
@@ -10453,8 +10714,8 @@ mod tests {
         let acceptance = fs::read_to_string(open.join("acceptance/acceptance-summary.json"))
             .expect("acceptance");
         assert!(acceptance.contains("\"schema\": \"opensks.acceptance-summary.v1\""));
-        assert!(acceptance.contains("\"passed\":11"));
-        assert!(acceptance.contains("\"partial\":12"));
+        assert!(acceptance.contains("\"passed\":12"));
+        assert!(acceptance.contains("\"partial\":11"));
         assert!(acceptance.contains("\"goal_complete\": false"));
         let mvp = fs::read_to_string(open.join("acceptance/mvp-acceptance.json")).expect("mvp");
         assert!(mvp.contains("OpenRouter/OpenAI provider adapters work."));
@@ -10463,8 +10724,8 @@ mod tests {
         assert!(mvp.contains("\"status\":\"partial\""));
         let production = fs::read_to_string(open.join("acceptance/production-acceptance.json"))
             .expect("production");
-        assert!(production.contains("\"passed\":2"));
-        assert!(production.contains("\"partial\":4"));
+        assert!(production.contains("\"passed\":3"));
+        assert!(production.contains("\"partial\":3"));
         assert!(production.contains("\"all_passed\": false"));
         assert!(production.contains("requirement coverage >= 95%"));
         assert!(production.contains(
@@ -10472,8 +10733,10 @@ mod tests {
         ));
         assert!(production.contains("requirement-coverage-gate.json"));
         assert!(production.contains("secret leak artifact rate = 0"));
-        assert!(production.contains("secret-leak-rate.json"));
-        assert!(production.contains("secret-leak-gate.json"));
+        assert!(production.contains(
+            "\"id\":\"prod-004\",\"criterion\":\"secret leak artifact rate = 0\",\"status\":\"passed\""
+        ));
+        assert!(production.contains("local release-history denominator"));
         assert!(production.contains("final seal trustworthy"));
         assert!(production.contains(
             "\"id\":\"prod-005\",\"criterion\":\"final seal trustworthy\",\"status\":\"passed\""
@@ -10483,7 +10746,7 @@ mod tests {
         let findings = fs::read_to_string(open.join("acceptance/acceptance-findings.jsonl"))
             .expect("findings");
         assert!(!findings.contains("\"id\":\"prod-005\""));
-        assert!(findings.contains("\"id\":\"prod-004\""));
+        assert!(!findings.contains("\"id\":\"prod-004\""));
         assert!(findings.contains("\"id\":\"prod-006\""));
         let qa_secret_rate =
             fs::read_to_string(open.join("qa/secret-leak-rate.json")).expect("qa leak rate");
@@ -10491,18 +10754,36 @@ mod tests {
         assert!(qa_secret_rate.contains("\"scope\": \"current_workspace_release_scan\""));
         assert!(qa_secret_rate.contains("\"gate_passed\": true"));
         assert!(qa_secret_rate.contains("\"secret_leak_artifact_rate\": 0.000000"));
+        assert!(qa_secret_rate.contains("\"release_history_denominator\":"));
+        assert!(qa_secret_rate.contains("\"release_history_gate_passed\": true"));
         let qa_secret_gate =
             fs::read_to_string(open.join("qa/secret-leak-gate.json")).expect("qa leak gate");
         assert!(qa_secret_gate.contains("\"schema\": \"opensks.secret-leak-gate.v1\""));
         assert!(qa_secret_gate.contains("\"status\": \"passed\""));
+        let qa_secret_history =
+            fs::read_to_string(open.join("qa/secret-leak-release-history.json"))
+                .expect("qa leak history");
+        assert!(
+            qa_secret_history.contains("\"schema\": \"opensks.secret-leak-release-history.v1\"")
+        );
+        assert!(qa_secret_history.contains("\"gate_passed\": true"));
         let security_secret_rate = fs::read_to_string(open.join("security/secret-leak-rate.json"))
             .expect("security leak rate");
         assert!(security_secret_rate.contains("\"schema\": \"opensks.secret-leak-rate.v1\""));
         assert!(security_secret_rate.contains("\"gate_passed\": true"));
+        assert!(security_secret_rate.contains("\"release_history_gate_passed\": true"));
         let security_secret_gate = fs::read_to_string(open.join("security/secret-leak-gate.json"))
             .expect("security leak gate");
         assert!(security_secret_gate.contains("\"schema\": \"opensks.secret-leak-gate.v1\""));
         assert!(security_secret_gate.contains("\"status\": \"passed\""));
+        let security_secret_history =
+            fs::read_to_string(open.join("security/secret-leak-release-history.json"))
+                .expect("security leak history");
+        assert!(
+            security_secret_history
+                .contains("\"schema\": \"opensks.secret-leak-release-history.v1\"")
+        );
+        assert!(security_secret_history.contains("\"gate_passed\": true"));
         let platform =
             fs::read_to_string(open.join("app/platform-manifest.json")).expect("platform");
         assert!(platform.contains("\"primary_platform\": \"macOS\""));
@@ -10932,6 +11213,116 @@ mod tests {
         assert!(leak_gate.contains("\"status\": \"blocked\""));
         assert!(leak_gate.contains("\"gate_passed\": false"));
         assert!(leak_gate.contains("secret-leak-rate.json"));
+    }
+
+    #[test]
+    fn prod004_requires_artifact_bound_secret_leak_history_gate() {
+        let root = temp_workspace("prod004-secret-history");
+        run_cli(["acceptance", "audit"], &root).expect("initial acceptance audit");
+        let production_without_artifacts = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production acceptance without artifacts");
+        assert!(production_without_artifacts.contains(
+            "\"id\":\"prod-004\",\"criterion\":\"secret leak artifact rate = 0\",\"status\":\"partial\""
+        ));
+
+        fs::write(root.join("README.md"), "safe release notes\n").expect("safe text");
+        run_cli(["qa", "run"], &root).expect("qa run");
+        run_cli(["security", "audit"], &root).expect("security audit");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance audit");
+        let production_with_artifacts = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production acceptance with artifacts");
+        assert!(production_with_artifacts.contains(
+            "\"id\":\"prod-004\",\"criterion\":\"secret leak artifact rate = 0\",\"status\":\"passed\""
+        ));
+
+        let security_history = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("security")
+                .join("secret-leak-release-history.json"),
+        )
+        .expect("security release history");
+        assert!(security_history.contains("\"release_history_denominator\": 1"));
+        assert!(security_history.contains("\"total_secret_finding_count\": 0"));
+        assert!(security_history.contains("\"gate_passed\": true"));
+    }
+
+    #[test]
+    fn prod004_stays_partial_for_leaky_or_malformed_secret_artifacts() {
+        let root = temp_workspace("prod004-leaky-history");
+        let secret_assignment = ["OPENAI", "_API_KEY=fake-test-value"].concat();
+        fs::write(root.join("leaky.txt"), format!("{secret_assignment}\n"))
+            .expect("write leaky fixture");
+
+        run_cli(["qa", "run"], &root).expect("qa run");
+        run_cli(["security", "audit"], &root).expect("security audit");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance audit");
+        let production_leaky = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production leaky");
+        assert!(production_leaky.contains(
+            "\"id\":\"prod-004\",\"criterion\":\"secret leak artifact rate = 0\",\"status\":\"partial\""
+        ));
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings");
+        assert!(findings.contains("\"id\":\"prod-004\""));
+
+        fs::write(
+            root.join(OPEN_SKSDIR)
+                .join("security")
+                .join("secret-leak-release-history.json"),
+            "{}\n",
+        )
+        .expect("malform history");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance audit malformed");
+        let production_malformed = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production malformed");
+        assert!(production_malformed.contains(
+            "\"id\":\"prod-004\",\"criterion\":\"secret leak artifact rate = 0\",\"status\":\"partial\""
+        ));
+    }
+
+    #[test]
+    fn prod004_stays_partial_when_secret_scan_denominator_is_zero() {
+        let root = temp_workspace("prod004-zero-denominator");
+        run_cli(["qa", "run"], &root).expect("qa run");
+        run_cli(["security", "audit"], &root).expect("security audit");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance audit");
+        let production = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production");
+        assert!(production.contains(
+            "\"id\":\"prod-004\",\"criterion\":\"secret leak artifact rate = 0\",\"status\":\"partial\""
+        ));
+        let security_history = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("security")
+                .join("secret-leak-release-history.json"),
+        )
+        .expect("history");
+        assert!(security_history.contains("\"release_history_denominator\": 0"));
+        assert!(security_history.contains("\"gate_passed\": false"));
     }
 
     #[test]
