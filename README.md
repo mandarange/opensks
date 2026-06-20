@@ -101,9 +101,13 @@ pass is also scoped to local artifact evidence only:
 and estimated cached tokens. Live provider cached-token metrics remain
 unavailable/not connected, so these dashboard fields must not be read as live
 provider telemetry.
-`bench` records timed local runtime checks plus explicit multi-LLM roster,
-role-assignment, disagreement, quorum, and collaboration preflight artifacts
-with hidden fallback disabled. `auth` discovers configured provider environment variables without
+`bench` records timed local runtime checks plus scoped local/native
+multi-session collaboration evidence artifacts: it can write
+`native-collaboration-execution.json` and
+`native-collaboration-events.jsonl` from `.sneakoscope` native agent session
+evidence. This does not satisfy `beta-006` without independently verifiable
+native-session provenance, and it does not claim live remote multi-provider API
+worker collaboration, provider credentials, hidden fallback, or final apply. `auth` discovers configured provider environment variables without
 exposing values and writes auth policy plus audit artifacts for Keychain-first
 storage posture, OAuth candidates, API keys, and local endpoints. `provider list|probe|usage` writes provider
 profiles, first-class/optional adapter capabilities, local endpoint

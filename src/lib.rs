@@ -379,6 +379,36 @@ struct ProviderStatus {
 }
 
 #[derive(Debug, Clone)]
+struct NativeCollaborationEvidence {
+    available: bool,
+    mission_id: String,
+    agent_session_ref: String,
+    agent_session_hash: String,
+    agent_consensus_ref: String,
+    agent_consensus_hash: String,
+    session_count: usize,
+    completed_session_count: usize,
+    worker_lane_count: usize,
+    reviewer_lane_count: usize,
+    mapper_lane_count: usize,
+    roles: Vec<String>,
+    status: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeCollaborationEventExpectations<'a> {
+    source_mission_id: &'a str,
+    native_session_count: usize,
+    completed_session_count: usize,
+    worker_lane_count: usize,
+    reviewer_lane_count: usize,
+    mapper_lane_count: usize,
+    agent_consensus_ref: &'a str,
+    agent_consensus_hash: &'a str,
+}
+
+#[derive(Debug, Clone)]
 struct ProviderProbe {
     name: String,
     attempted: bool,
@@ -1231,6 +1261,7 @@ fn run_bench_command(_args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksE
         .join("providers")
         .join("provider-adapter-check.json")
         .exists();
+    let native_collaboration = discover_native_collaboration_evidence(cwd);
     write_text_atomic(
         &dir.join("benchmark-report.json"),
         &render_benchmark_report(&stamp, &checks),
@@ -1254,6 +1285,14 @@ fn run_bench_command(_args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksE
     write_text_atomic(
         &dir.join("collaboration-preflight.json"),
         &render_collaboration_preflight(&stamp, &statuses, adapter_check_present),
+    )?;
+    write_text_atomic(
+        &dir.join("native-collaboration-execution.json"),
+        &render_native_collaboration_execution(&stamp, &native_collaboration),
+    )?;
+    write_text_atomic(
+        &dir.join("native-collaboration-events.jsonl"),
+        &render_native_collaboration_events_jsonl(&stamp, &native_collaboration),
     )?;
     Ok(CliOutput {
         stdout: format!(
@@ -7526,7 +7565,9 @@ fn render_benchmark_report(stamp: &ClockStamp, checks: &[CommandCheck]) -> Strin
             "role-assignments.json",
             "disagreement-report.json",
             "quorum-report.json",
-            "collaboration-preflight.json"
+            "collaboration-preflight.json",
+            "native-collaboration-execution.json",
+            "native-collaboration-events.jsonl"
         ]),
         render_checks_json(checks)
     )
@@ -7727,6 +7768,8 @@ fn render_collaboration_preflight(
             "role-assignments.json",
             "disagreement-report.json",
             "quorum-report.json",
+            "native-collaboration-execution.json",
+            "native-collaboration-events.jsonl",
             "../auth/auth-policy.json",
             "../providers/provider-adapter-check.json"
         ]),
@@ -7757,6 +7800,269 @@ fn render_collaboration_provider_readiness(statuses: &[ProviderStatus]) -> Strin
         .collect::<Vec<_>>()
         .join(",");
     format!("[{rows}]")
+}
+
+fn discover_native_collaboration_evidence(cwd: &Path) -> NativeCollaborationEvidence {
+    let unavailable = |reason: &str| NativeCollaborationEvidence {
+        available: false,
+        mission_id: String::new(),
+        agent_session_ref: String::new(),
+        agent_session_hash: String::new(),
+        agent_consensus_ref: String::new(),
+        agent_consensus_hash: String::new(),
+        session_count: 0,
+        completed_session_count: 0,
+        worker_lane_count: 0,
+        reviewer_lane_count: 0,
+        mapper_lane_count: 0,
+        roles: Vec::new(),
+        status: "native_session_evidence_missing".to_string(),
+        reason: reason.to_string(),
+    };
+
+    let missions_dir = cwd.join(".sneakoscope").join("missions");
+    let Ok(entries) = fs::read_dir(&missions_dir) else {
+        return unavailable(".sneakoscope/missions is missing");
+    };
+    let mut mission_dirs = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    mission_dirs.sort();
+
+    for mission_dir in mission_dirs.into_iter().rev() {
+        let Some(mission_id) = mission_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let agents_dir = mission_dir.join("agents");
+        let sessions_path = agents_dir.join("agent-sessions.json");
+        let consensus_path = agents_dir.join("agent-consensus.json");
+        let Ok(sessions) = fs::read_to_string(&sessions_path) else {
+            continue;
+        };
+        let Ok(consensus) = fs::read_to_string(&consensus_path) else {
+            continue;
+        };
+        let Some((
+            session_count,
+            completed_session_count,
+            worker_count,
+            reviewer_count,
+            mapper_count,
+            roles,
+        )) = native_agent_sessions_summary(&sessions, &mission_id)
+        else {
+            continue;
+        };
+        if !native_agent_consensus_valid(&consensus, &mission_id) {
+            continue;
+        }
+
+        let role_lane_count = [worker_count, reviewer_count, mapper_count]
+            .into_iter()
+            .filter(|count| *count > 0)
+            .count();
+        if session_count < 2 || completed_session_count < 2 || role_lane_count < 2 {
+            continue;
+        }
+
+        return NativeCollaborationEvidence {
+            available: true,
+            mission_id: mission_id.clone(),
+            agent_session_ref: format!(
+                ".sneakoscope/missions/{mission_id}/agents/agent-sessions.json"
+            ),
+            agent_session_hash: stable_content_hash(&sessions),
+            agent_consensus_ref: format!(
+                ".sneakoscope/missions/{mission_id}/agents/agent-consensus.json"
+            ),
+            agent_consensus_hash: stable_content_hash(&consensus),
+            session_count,
+            completed_session_count,
+            worker_lane_count: worker_count,
+            reviewer_lane_count: reviewer_count,
+            mapper_lane_count: mapper_count,
+            roles,
+            status: "native_multi_session_collaboration_recorded".to_string(),
+            reason: "native agent session and consensus artifacts prove multi-session collaboration; live remote multi-provider worker collaboration is not claimed".to_string(),
+        };
+    }
+
+    unavailable("no valid native agent session plus consensus evidence found")
+}
+
+fn native_agent_sessions_summary(
+    sessions: &str,
+    mission_id: &str,
+) -> Option<(usize, usize, usize, usize, usize, Vec<String>)> {
+    if !json_top_level_string_field_equals(sessions, "schema", "sks.agent-sessions.v1")
+        || !json_top_level_string_field_equals(sessions, "mission_id", mission_id)
+        || !json_top_level_bool_field_equals(sessions, "native_sessions_required", true)
+    {
+        return None;
+    }
+    let session_rows = extract_json_top_level_array_objects(sessions, "sessions");
+    if session_rows.is_empty() {
+        return None;
+    }
+    let mut completed = 0usize;
+    let mut worker_count = 0usize;
+    let mut reviewer_count = 0usize;
+    let mut mapper_count = 0usize;
+    let mut roles = Vec::new();
+    for row in &session_rows {
+        let role = extract_json_top_level_string_field(row, "role")?;
+        let status = extract_json_top_level_string_field(row, "status")?;
+        if status.starts_with("completed") {
+            completed += 1;
+        }
+        if !roles.iter().any(|existing| existing == &role) {
+            roles.push(role.clone());
+        }
+        match role.as_str() {
+            "implementation_worker" | "worker" | "sks-implementer" => worker_count += 1,
+            "qa_reviewer" | "reviewer" | "sks-release-verifier" => reviewer_count += 1,
+            "native_agent" | "analysis_scout" | "explorer" | "sks-explorer" => mapper_count += 1,
+            _ => {}
+        }
+    }
+    roles.sort();
+    Some((
+        session_rows.len(),
+        completed,
+        worker_count,
+        reviewer_count,
+        mapper_count,
+        roles,
+    ))
+}
+
+fn native_agent_consensus_valid(consensus: &str, mission_id: &str) -> bool {
+    json_top_level_string_field_equals(consensus, "schema", "sks.agent-consensus.v1")
+        && json_top_level_string_field_equals(consensus, "mission_id", mission_id)
+        && extract_json_top_level_string_field(consensus, "consensus")
+            .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn render_native_collaboration_execution(
+    stamp: &ClockStamp,
+    evidence: &NativeCollaborationEvidence,
+) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.native-collaboration-execution.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"scope\": \"native_multi_session_llm_collaboration\",\n",
+            "  \"status\": {},\n",
+            "  \"native_multi_session_llm_collaboration\": {},\n",
+            "  \"native_agent_provenance_verified\": false,\n",
+            "  \"native_session_count\": {},\n",
+            "  \"completed_session_count\": {},\n",
+            "  \"worker_lane_count\": {},\n",
+            "  \"reviewer_lane_count\": {},\n",
+            "  \"mapper_lane_count\": {},\n",
+            "  \"roles\": {},\n",
+            "  \"source_mission_id\": {},\n",
+            "  \"agent_session_ref\": {},\n",
+            "  \"agent_session_hash\": {},\n",
+            "  \"agent_consensus_ref\": {},\n",
+            "  \"agent_consensus_hash\": {},\n",
+            "  \"no_hidden_fallback\": true,\n",
+            "  \"live_multi_provider_worker_collaboration\": false,\n",
+            "  \"live_remote_provider_api_calls\": false,\n",
+            "  \"provider_credentials_required\": false,\n",
+            "  \"final_apply_executed\": false,\n",
+            "  \"secret_value_exposed\": false,\n",
+            "  \"reason\": {}\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_string(&evidence.status),
+        evidence.available,
+        evidence.session_count,
+        evidence.completed_session_count,
+        evidence.worker_lane_count,
+        evidence.reviewer_lane_count,
+        evidence.mapper_lane_count,
+        json_vec(&evidence.roles),
+        if evidence.mission_id.is_empty() {
+            "null".to_string()
+        } else {
+            json_string(&evidence.mission_id)
+        },
+        if evidence.agent_session_ref.is_empty() {
+            "null".to_string()
+        } else {
+            json_string(&evidence.agent_session_ref)
+        },
+        if evidence.agent_session_hash.is_empty() {
+            "null".to_string()
+        } else {
+            json_string(&evidence.agent_session_hash)
+        },
+        if evidence.agent_consensus_ref.is_empty() {
+            "null".to_string()
+        } else {
+            json_string(&evidence.agent_consensus_ref)
+        },
+        if evidence.agent_consensus_hash.is_empty() {
+            "null".to_string()
+        } else {
+            json_string(&evidence.agent_consensus_hash)
+        },
+        json_string(&evidence.reason)
+    )
+}
+
+fn render_native_collaboration_events_jsonl(
+    stamp: &ClockStamp,
+    evidence: &NativeCollaborationEvidence,
+) -> String {
+    if !evidence.available {
+        return format!(
+            "{{\"schema\":\"opensks.native-collaboration-event.v1\",\"generated_at\":{},\"event\":\"native_sessions_missing\",\"executed\":false,\"reason\":{}}}\n",
+            stamp.json(),
+            json_string(&evidence.reason)
+        );
+    }
+    [
+        format!(
+            "{{\"schema\":\"opensks.native-collaboration-event.v1\",\"generated_at\":{},\"event\":\"native_sessions_discovered\",\"source_mission_id\":{},\"session_count\":{},\"completed_session_count\":{},\"executed\":true}}",
+            stamp.json(),
+            json_string(&evidence.mission_id),
+            evidence.session_count,
+            evidence.completed_session_count
+        ),
+        format!(
+            "{{\"schema\":\"opensks.native-collaboration-event.v1\",\"generated_at\":{},\"event\":\"worker_lane_completed\",\"worker_lane_count\":{},\"executed\":true}}",
+            stamp.json(),
+            evidence.worker_lane_count
+        ),
+        format!(
+            "{{\"schema\":\"opensks.native-collaboration-event.v1\",\"generated_at\":{},\"event\":\"review_or_mapping_lane_completed\",\"reviewer_lane_count\":{},\"mapper_lane_count\":{},\"executed\":true}}",
+            stamp.json(),
+            evidence.reviewer_lane_count,
+            evidence.mapper_lane_count
+        ),
+        format!(
+            "{{\"schema\":\"opensks.native-collaboration-event.v1\",\"generated_at\":{},\"event\":\"consensus_recorded\",\"agent_consensus_ref\":{},\"agent_consensus_hash\":{},\"executed\":true}}",
+            stamp.json(),
+            json_string(&evidence.agent_consensus_ref),
+            json_string(&evidence.agent_consensus_hash)
+        ),
+        format!(
+            "{{\"schema\":\"opensks.native-collaboration-event.v1\",\"generated_at\":{},\"event\":\"remote_provider_collaboration_not_claimed\",\"live_multi_provider_worker_collaboration\":false,\"live_remote_provider_api_calls\":false,\"executed\":true}}",
+            stamp.json()
+        ),
+    ]
+    .join("\n")
+        + "\n"
 }
 
 fn render_auth_registry(stamp: &ClockStamp, statuses: &[ProviderStatus]) -> String {
@@ -9572,6 +9878,18 @@ fn beta_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
             "beta-005 requires cache warm to establish local cache-hit evidence plus provider/cache dashboards that explicitly track provider cache-hit fields, null live provider percentages/tokens, cache-hit source/status, and provider_metrics_status=not_connected.",
         )
     };
+    let beta_006_passed = beta006_native_collaboration_gate_passed(cwd);
+    let (beta_006_status, beta_006_evidence) = if beta_006_passed {
+        (
+            "passed",
+            "native-collaboration-execution.json and native-collaboration-events.jsonl bind bench collaboration evidence to independently verified native agent provenance, with multiple completed native roles, no hidden fallback, and live remote multi-provider API worker collaboration/final apply explicitly false.",
+        )
+    } else {
+        (
+            "partial",
+            "beta-006 requires independently verifiable native multi-session provenance, not just locally self-consistent .sneakoscope session/consensus files. Current bench artifacts can record scoped native collaboration evidence, but live remote multi-provider API worker collaboration and signed/proven native session provenance remain unverified.",
+        )
+    };
     vec![
         acceptance_item(
             "beta-001",
@@ -9606,8 +9924,8 @@ fn beta_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
         acceptance_item(
             "beta-006",
             "Multi-LLM collaboration works.",
-            "partial",
-            "collaboration-preflight.json joins roster, role, provider, auth, adapter, disagreement, and quorum readiness; live multi-provider worker collaboration is not executed.",
+            beta_006_status,
+            beta_006_evidence,
         ),
     ]
 }
@@ -9819,6 +10137,315 @@ fn token_provider_usage_dashboard_gate_passed(dashboard: &str) -> bool {
         )
         && json_top_level_null_field_equals(dashboard, "provider_cached_tokens")
         && json_top_level_null_field_equals(dashboard, "provider_cache_write_tokens")
+}
+
+fn beta006_native_collaboration_gate_passed(cwd: &Path) -> bool {
+    let bench_dir = cwd.join(OPEN_SKSDIR).join("bench");
+    let Ok(roster) = fs::read_to_string(bench_dir.join("multi-llm-roster.json")) else {
+        return false;
+    };
+    let Ok(role_assignments) = fs::read_to_string(bench_dir.join("role-assignments.json")) else {
+        return false;
+    };
+    let Ok(disagreement) = fs::read_to_string(bench_dir.join("disagreement-report.json")) else {
+        return false;
+    };
+    let Ok(quorum) = fs::read_to_string(bench_dir.join("quorum-report.json")) else {
+        return false;
+    };
+    let Ok(preflight) = fs::read_to_string(bench_dir.join("collaboration-preflight.json")) else {
+        return false;
+    };
+    let Ok(execution) = fs::read_to_string(bench_dir.join("native-collaboration-execution.json"))
+    else {
+        return false;
+    };
+    let Ok(events) = fs::read_to_string(bench_dir.join("native-collaboration-events.jsonl")) else {
+        return false;
+    };
+
+    let Some(source_mission_id) =
+        extract_json_top_level_string_field(&execution, "source_mission_id")
+    else {
+        return false;
+    };
+    let Some(agent_session_ref) =
+        extract_json_top_level_string_field(&execution, "agent_session_ref")
+    else {
+        return false;
+    };
+    let Some(agent_session_hash) =
+        extract_json_top_level_string_field(&execution, "agent_session_hash")
+    else {
+        return false;
+    };
+    let Some(agent_consensus_ref) =
+        extract_json_top_level_string_field(&execution, "agent_consensus_ref")
+    else {
+        return false;
+    };
+    let Some(agent_consensus_hash) =
+        extract_json_top_level_string_field(&execution, "agent_consensus_hash")
+    else {
+        return false;
+    };
+    let Some(native_session_count) =
+        extract_json_top_level_number_field(&execution, "native_session_count")
+    else {
+        return false;
+    };
+    let Some(completed_session_count) =
+        extract_json_top_level_number_field(&execution, "completed_session_count")
+    else {
+        return false;
+    };
+    let Some(worker_lane_count) =
+        extract_json_top_level_number_field(&execution, "worker_lane_count")
+    else {
+        return false;
+    };
+    let Some(reviewer_lane_count) =
+        extract_json_top_level_number_field(&execution, "reviewer_lane_count")
+    else {
+        return false;
+    };
+    let Some(mapper_lane_count) =
+        extract_json_top_level_number_field(&execution, "mapper_lane_count")
+    else {
+        return false;
+    };
+    let role_lane_count = [worker_lane_count, reviewer_lane_count, mapper_lane_count]
+        .into_iter()
+        .filter(|count| *count > 0)
+        .count();
+
+    let Some(agent_sessions) =
+        read_native_collaboration_source(cwd, &agent_session_ref, &agent_session_hash)
+    else {
+        return false;
+    };
+    let Some(agent_consensus) =
+        read_native_collaboration_source(cwd, &agent_consensus_ref, &agent_consensus_hash)
+    else {
+        return false;
+    };
+    let Some((
+        source_session_count,
+        source_completed_count,
+        source_worker_count,
+        source_reviewer_count,
+        source_mapper_count,
+        _source_roles,
+    )) = native_agent_sessions_summary(&agent_sessions, &source_mission_id)
+    else {
+        return false;
+    };
+    if !native_agent_consensus_valid(&agent_consensus, &source_mission_id) {
+        return false;
+    }
+
+    json_top_level_string_field_equals(&roster, "schema", "opensks.multi-llm-roster.v1")
+        && json_top_level_bool_field_equals(&roster, "no_hidden_fallback", true)
+        && json_top_level_string_field_equals(
+            &role_assignments,
+            "schema",
+            "opensks.role-assignments.v1",
+        )
+        && json_top_level_bool_field_equals(&role_assignments, "no_hidden_fallback", true)
+        && json_top_level_string_field_equals(
+            &disagreement,
+            "schema",
+            "opensks.disagreement-report.v1",
+        )
+        && json_top_level_bool_field_equals(&disagreement, "live_disagreements_observed", false)
+        && json_top_level_string_field_equals(&quorum, "schema", "opensks.quorum-report.v1")
+        && json_top_level_bool_field_equals(&quorum, "live_quorum_evaluated", false)
+        && json_top_level_bool_field_equals(&quorum, "hidden_fallback_allowed", false)
+        && json_top_level_string_field_equals(
+            &preflight,
+            "schema",
+            "opensks.collaboration-preflight.v1",
+        )
+        && json_top_level_bool_field_equals(&preflight, "no_hidden_fallback", true)
+        && json_top_level_bool_field_equals(&preflight, "preflight_ready", true)
+        && json_top_level_bool_field_equals(&preflight, "live_multi_llm_execution", false)
+        && json_top_level_bool_field_equals(
+            &preflight,
+            "live_multi_provider_worker_collaboration",
+            false,
+        )
+        && json_top_level_bool_field_equals(&preflight, "live_execution_ready", false)
+        && !preflight.contains("\"secret_value_exposed\":true")
+        && json_top_level_string_field_equals(
+            &execution,
+            "schema",
+            "opensks.native-collaboration-execution.v1",
+        )
+        && json_top_level_string_field_equals(
+            &execution,
+            "scope",
+            "native_multi_session_llm_collaboration",
+        )
+        && json_top_level_string_field_equals(
+            &execution,
+            "status",
+            "native_multi_session_collaboration_recorded",
+        )
+        && json_top_level_bool_field_equals(
+            &execution,
+            "native_multi_session_llm_collaboration",
+            true,
+        )
+        && json_top_level_bool_field_equals(&execution, "native_agent_provenance_verified", true)
+        && json_top_level_bool_field_equals(&execution, "no_hidden_fallback", true)
+        && json_top_level_bool_field_equals(
+            &execution,
+            "live_multi_provider_worker_collaboration",
+            false,
+        )
+        && json_top_level_bool_field_equals(&execution, "live_remote_provider_api_calls", false)
+        && json_top_level_bool_field_equals(&execution, "provider_credentials_required", false)
+        && json_top_level_bool_field_equals(&execution, "final_apply_executed", false)
+        && json_top_level_bool_field_equals(&execution, "secret_value_exposed", false)
+        && native_session_count >= 2
+        && completed_session_count >= 2
+        && completed_session_count <= native_session_count
+        && role_lane_count >= 2
+        && native_session_count == source_session_count
+        && completed_session_count == source_completed_count
+        && worker_lane_count == source_worker_count
+        && reviewer_lane_count == source_reviewer_count
+        && mapper_lane_count == source_mapper_count
+        && beta006_native_collaboration_events_valid(
+            &events,
+            NativeCollaborationEventExpectations {
+                source_mission_id: &source_mission_id,
+                native_session_count,
+                completed_session_count,
+                worker_lane_count,
+                reviewer_lane_count,
+                mapper_lane_count,
+                agent_consensus_ref: &agent_consensus_ref,
+                agent_consensus_hash: &agent_consensus_hash,
+            },
+        )
+}
+
+fn read_native_collaboration_source(
+    cwd: &Path,
+    source_ref: &str,
+    expected_hash: &str,
+) -> Option<String> {
+    if source_ref.contains("..")
+        || source_ref.starts_with('/')
+        || !source_ref.starts_with(".sneakoscope/missions/")
+    {
+        return None;
+    }
+    let contents = fs::read_to_string(cwd.join(source_ref)).ok()?;
+    if stable_content_hash(&contents) == expected_hash {
+        Some(contents)
+    } else {
+        None
+    }
+}
+
+fn beta006_native_collaboration_events_valid(
+    events: &str,
+    expected: NativeCollaborationEventExpectations<'_>,
+) -> bool {
+    let expected_events = [
+        "native_sessions_discovered",
+        "worker_lane_completed",
+        "review_or_mapping_lane_completed",
+        "consensus_recorded",
+        "remote_provider_collaboration_not_claimed",
+    ];
+    let mut seen = HashMap::new();
+    for line in events.lines().filter(|line| !line.trim().is_empty()) {
+        let line = line.trim();
+        if !json_top_level_string_field_equals(
+            line,
+            "schema",
+            "opensks.native-collaboration-event.v1",
+        ) {
+            return false;
+        }
+        let Some(event) = extract_json_top_level_string_field(line, "event") else {
+            return false;
+        };
+        if !expected_events.contains(&event.as_str())
+            || seen.insert(event, line.to_string()).is_some()
+        {
+            return false;
+        }
+    }
+    if expected_events
+        .iter()
+        .any(|event| !seen.contains_key(*event))
+    {
+        return false;
+    }
+
+    let sessions = seen
+        .get("native_sessions_discovered")
+        .expect("event exists");
+    let worker = seen.get("worker_lane_completed").expect("event exists");
+    let review = seen
+        .get("review_or_mapping_lane_completed")
+        .expect("event exists");
+    let consensus = seen.get("consensus_recorded").expect("event exists");
+    let remote = seen
+        .get("remote_provider_collaboration_not_claimed")
+        .expect("event exists");
+
+    json_top_level_string_field_equals(sessions, "source_mission_id", expected.source_mission_id)
+        && json_top_level_number_field_equals(
+            sessions,
+            "session_count",
+            expected.native_session_count,
+        )
+        && json_top_level_number_field_equals(
+            sessions,
+            "completed_session_count",
+            expected.completed_session_count,
+        )
+        && json_top_level_bool_field_equals(sessions, "executed", true)
+        && json_top_level_number_field_equals(
+            worker,
+            "worker_lane_count",
+            expected.worker_lane_count,
+        )
+        && json_top_level_bool_field_equals(worker, "executed", true)
+        && json_top_level_number_field_equals(
+            review,
+            "reviewer_lane_count",
+            expected.reviewer_lane_count,
+        )
+        && json_top_level_number_field_equals(
+            review,
+            "mapper_lane_count",
+            expected.mapper_lane_count,
+        )
+        && json_top_level_bool_field_equals(review, "executed", true)
+        && json_top_level_string_field_equals(
+            consensus,
+            "agent_consensus_ref",
+            expected.agent_consensus_ref,
+        )
+        && json_top_level_string_field_equals(
+            consensus,
+            "agent_consensus_hash",
+            expected.agent_consensus_hash,
+        )
+        && json_top_level_bool_field_equals(consensus, "executed", true)
+        && json_top_level_bool_field_equals(
+            remote,
+            "live_multi_provider_worker_collaboration",
+            false,
+        )
+        && json_top_level_bool_field_equals(remote, "live_remote_provider_api_calls", false)
+        && json_top_level_bool_field_equals(remote, "executed", true)
 }
 
 fn production_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
@@ -13285,6 +13912,64 @@ mod tests {
         );
     }
 
+    fn assert_beta006_status(root: &Path, expected_status: &str) {
+        let beta = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta acceptance");
+        assert!(
+            beta.contains(&format!(
+                "\"id\":\"beta-006\",\"criterion\":\"Multi-LLM collaboration works.\",\"status\":\"{expected_status}\""
+            )),
+            "expected beta-006 status {expected_status}, got {beta}"
+        );
+    }
+
+    fn write_native_collaboration_fixture(root: &Path, mission_id: &str) {
+        let agents_dir = root
+            .join(".sneakoscope")
+            .join("missions")
+            .join(mission_id)
+            .join("agents");
+        fs::create_dir_all(&agents_dir).expect("create native agents dir");
+        fs::write(
+            agents_dir.join("agent-sessions.json"),
+            format!(
+                concat!(
+                    "{{\n",
+                    "  \"schema\": \"sks.agent-sessions.v1\",\n",
+                    "  \"mission_id\": {},\n",
+                    "  \"native_sessions_required\": true,\n",
+                    "  \"sessions\": [\n",
+                    "    {{\"agent_id\":\"worker-1\",\"role\":\"implementation_worker\",\"status\":\"completed\",\"write_scope\":[\"README.md\"]}},\n",
+                    "    {{\"agent_id\":\"mapper-1\",\"role\":\"native_agent\",\"status\":\"completed\",\"write_scope\":[]}},\n",
+                    "    {{\"agent_id\":\"reviewer-1\",\"role\":\"qa_reviewer\",\"status\":\"completed\",\"write_scope\":[]}}\n",
+                    "  ]\n",
+                    "}}\n"
+                ),
+                json_string(mission_id)
+            ),
+        )
+        .expect("write agent sessions");
+        fs::write(
+            agents_dir.join("agent-consensus.json"),
+            format!(
+                concat!(
+                    "{{\n",
+                    "  \"schema\": \"sks.agent-consensus.v1\",\n",
+                    "  \"mission_id\": {},\n",
+                    "  \"consensus\": \"native sessions completed disjoint docs, mapping, and QA review lanes; no remote provider collaboration claimed\",\n",
+                    "  \"post_fix_status\": \"no_blockers\"\n",
+                    "}}\n"
+                ),
+                json_string(mission_id)
+            ),
+        )
+        .expect("write agent consensus");
+    }
+
     fn first_mission_dir(root: &Path) -> PathBuf {
         let missions_dir = root.join(OPEN_SKSDIR).join("missions");
         fs::read_dir(&missions_dir)
@@ -14598,6 +15283,8 @@ mod tests {
             "bench/disagreement-report.json",
             "bench/quorum-report.json",
             "bench/collaboration-preflight.json",
+            "bench/native-collaboration-execution.json",
+            "bench/native-collaboration-events.jsonl",
             "auth/auth-registry.json",
             "auth/auth-policy.json",
             "auth/auth-audit-log.jsonl",
@@ -14668,6 +15355,19 @@ mod tests {
         assert!(collaboration.contains("\"live_multi_provider_worker_collaboration\": false"));
         assert!(collaboration.contains("\"live_execution_ready\": false"));
         assert!(collaboration.contains("\"secret_value_exposed\":false"));
+        let native_collaboration =
+            fs::read_to_string(open.join("bench/native-collaboration-execution.json"))
+                .expect("native collaboration");
+        assert!(
+            native_collaboration
+                .contains("\"schema\": \"opensks.native-collaboration-execution.v1\"")
+        );
+        assert!(native_collaboration.contains("\"native_multi_session_llm_collaboration\": false"));
+        assert!(
+            native_collaboration.contains("\"live_multi_provider_worker_collaboration\": false")
+        );
+        assert!(native_collaboration.contains("\"live_remote_provider_api_calls\": false"));
+        assert!(native_collaboration.contains("\"final_apply_executed\": false"));
         let auth_policy = fs::read_to_string(open.join("auth/auth-policy.json")).expect("auth");
         assert!(auth_policy.contains("\"schema\": \"opensks.auth-policy.v1\""));
         assert!(auth_policy.contains("macos_keychain_first"));
@@ -15186,6 +15886,152 @@ mod tests {
         assert!(preflight.contains("\"live_multi_provider_worker_collaboration\": false"));
         assert!(preflight.contains("\"live_execution_ready\": false"));
         assert!(preflight.contains("\"secret_value_exposed\":false"));
+        let execution = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("bench")
+                .join("native-collaboration-execution.json"),
+        )
+        .expect("native collaboration execution");
+        assert!(execution.contains("\"schema\": \"opensks.native-collaboration-execution.v1\""));
+        assert!(execution.contains("\"native_multi_session_llm_collaboration\": false"));
+        assert!(execution.contains("\"live_multi_provider_worker_collaboration\": false"));
+        assert!(execution.contains("\"live_remote_provider_api_calls\": false"));
+        assert!(execution.contains("\"final_apply_executed\": false"));
+    }
+
+    #[test]
+    fn beta006_requires_independently_verified_native_collaboration_provenance() {
+        let root = temp_workspace("beta006-native-collaboration");
+        run_cli(["bench"], &root).expect("bench without native sessions");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance without native sessions");
+        assert_beta006_status(&root, "partial");
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings without beta006");
+        assert!(findings.contains("\"id\":\"beta-006\""));
+
+        write_native_collaboration_fixture(&root, "M-20990101-000000-beta006");
+        run_cli(["bench"], &root).expect("bench with native sessions");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance with native sessions");
+        assert_beta006_status(&root, "partial");
+        let beta = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta with native collaboration");
+        assert!(beta.contains("independently verifiable native multi-session provenance"));
+        assert!(beta.contains("signed/proven native session provenance remain unverified"));
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings with beta006");
+        assert!(findings.contains("\"id\":\"beta-006\""));
+
+        let execution = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("bench")
+                .join("native-collaboration-execution.json"),
+        )
+        .expect("native collaboration execution");
+        assert!(execution.contains("\"native_multi_session_llm_collaboration\": true"));
+        assert!(execution.contains("\"native_agent_provenance_verified\": false"));
+        assert!(execution.contains("\"live_multi_provider_worker_collaboration\": false"));
+    }
+
+    #[test]
+    fn beta006_stays_partial_for_spoofed_or_live_claiming_native_artifacts() {
+        let root = temp_workspace("beta006-native-tamper");
+        let mission_id = "M-20990101-000001-beta006";
+        write_native_collaboration_fixture(&root, mission_id);
+        run_cli(["bench"], &root).expect("bench with native sessions");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance valid native sessions");
+        assert_beta006_status(&root, "partial");
+
+        let bench_dir = root.join(OPEN_SKSDIR).join("bench");
+        let execution_path = bench_dir.join("native-collaboration-execution.json");
+        let events_path = bench_dir.join("native-collaboration-events.jsonl");
+        let sessions_path = root
+            .join(".sneakoscope")
+            .join("missions")
+            .join(mission_id)
+            .join("agents")
+            .join("agent-sessions.json");
+        let original_execution = fs::read_to_string(&execution_path).expect("execution");
+        let original_events = fs::read_to_string(&events_path).expect("events");
+        let original_sessions = fs::read_to_string(&sessions_path).expect("sessions");
+
+        fs::write(
+            &execution_path,
+            original_execution.replace(
+                "\"live_multi_provider_worker_collaboration\": false",
+                "\"live_multi_provider_worker_collaboration\": true",
+            ),
+        )
+        .expect("tamper live provider flag");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance live provider tamper");
+        assert_beta006_status(&root, "partial");
+
+        fs::write(&execution_path, &original_execution).expect("restore execution");
+        fs::write(
+            &execution_path,
+            original_execution.replace(
+                "\"agent_session_hash\": \"",
+                "\"agent_session_hash\": \"fnv1a64:0000000000000000-",
+            ),
+        )
+        .expect("tamper source hash");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance hash tamper");
+        assert_beta006_status(&root, "partial");
+
+        fs::write(&execution_path, &original_execution).expect("restore execution hash");
+        let missing_consensus_event = original_events
+            .lines()
+            .filter(|line| !line.contains("consensus_recorded"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        fs::write(&events_path, missing_consensus_event).expect("tamper events");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance event tamper");
+        assert_beta006_status(&root, "partial");
+
+        fs::write(&events_path, &original_events).expect("restore events");
+        fs::write(
+            &sessions_path,
+            original_sessions.replace("\"role\":\"qa_reviewer\"", "\"role\":\"observer\""),
+        )
+        .expect("tamper source role");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance source role tamper");
+        assert_beta006_status(&root, "partial");
+
+        fs::write(&sessions_path, &original_sessions).expect("restore sessions");
+        fs::write(
+            &execution_path,
+            original_execution.replace(
+                "\"native_multi_session_llm_collaboration\": true",
+                "\"native_multi_session_llm_collaboration\": true,\n  \"native_multi_session_llm_collaboration\": true",
+            ),
+        )
+        .expect("tamper duplicate field");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance duplicate field");
+        assert_beta006_status(&root, "partial");
+
+        fs::write(&execution_path, &original_execution).expect("restore duplicate field");
+        fs::write(
+            &execution_path,
+            original_execution.replace(
+                "\"agent_session_ref\": \".sneakoscope/missions/",
+                "\"agent_session_ref\": \"../.sneakoscope/missions/",
+            ),
+        )
+        .expect("tamper path traversal");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance path traversal");
+        assert_beta006_status(&root, "partial");
     }
 
     #[test]
