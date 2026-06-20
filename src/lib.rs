@@ -32,6 +32,7 @@ const DESIGN_SCREENSHOT_WIDTH: usize = 32;
 const DESIGN_SCREENSHOT_HEIGHT: usize = 32;
 const DESIGN_SCREENSHOT_MODE: &str = "deterministic_local_raster_artifact";
 const DESIGN_SCREENSHOT_RENDERER: &str = "opensks_local_source_rasterizer_v1";
+const PROVIDER_KEYCHAIN_SERVICE: &str = "opensks-provider-credentials";
 const PRD_SOURCE_PATH: &str =
     "/Users/weklem/Desktop/opensks_prd_v3_goal_loop_mcp_computer_use_voxel_triwiki.md";
 
@@ -376,6 +377,7 @@ struct ProviderStatus {
     definition: ProviderDefinition,
     configured: bool,
     configured_value: Option<String>,
+    credential_source: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -432,6 +434,7 @@ struct ProviderAdapterCheck {
     configured: bool,
     attempted: bool,
     status: String,
+    credential_source: String,
     endpoint: String,
     http_code: Option<String>,
     duration_ms: u128,
@@ -1324,10 +1327,13 @@ fn run_auth_command(_args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksEr
         &dir.join("provider-registry.json"),
         &render_provider_registry(&stamp, &statuses, &[]),
     )?;
-    write_text_atomic(&dir.join("auth-policy.json"), &render_auth_policy(&stamp))?;
+    write_text_atomic(
+        &dir.join("auth-policy.json"),
+        &render_auth_policy(&stamp, &statuses),
+    )?;
     write_text_atomic(
         &dir.join("auth-audit-log.jsonl"),
-        &render_auth_audit_event(&stamp, "auth_registry_snapshot"),
+        &render_auth_audit_event(&stamp, "auth_registry_snapshot", &statuses),
     )?;
     Ok(CliOutput {
         stdout: format!(
@@ -5838,19 +5844,81 @@ fn provider_definitions() -> Vec<ProviderDefinition> {
 }
 
 fn provider_statuses() -> Vec<ProviderStatus> {
+    provider_statuses_with_keychain_command(None)
+}
+
+fn provider_statuses_with_keychain_command(keychain_command: Option<&Path>) -> Vec<ProviderStatus> {
     provider_definitions()
         .into_iter()
-        .map(|definition| {
-            let configured_value = env::var(definition.env_var)
-                .ok()
-                .filter(|value| !value.is_empty());
-            ProviderStatus {
-                configured: configured_value.is_some(),
-                configured_value,
-                definition,
-            }
-        })
+        .map(|definition| provider_status_for_definition(definition, keychain_command))
         .collect()
+}
+
+fn provider_status_for_definition(
+    definition: ProviderDefinition,
+    keychain_command: Option<&Path>,
+) -> ProviderStatus {
+    let env_value = env::var(definition.env_var)
+        .ok()
+        .filter(|value| !value.is_empty());
+    let keychain_value = provider_keychain_credential(&definition, keychain_command);
+    let (configured_value, credential_source) = if env_value.is_some() {
+        (env_value, "env")
+    } else if keychain_value.is_some() {
+        (keychain_value, "keychain")
+    } else {
+        (None, "none")
+    };
+    ProviderStatus {
+        configured: configured_value.is_some(),
+        configured_value,
+        credential_source,
+        definition,
+    }
+}
+
+fn provider_keychain_credential(
+    definition: &ProviderDefinition,
+    keychain_command: Option<&Path>,
+) -> Option<String> {
+    #[cfg(test)]
+    keychain_command?;
+
+    #[cfg(not(target_os = "macos"))]
+    keychain_command?;
+
+    let command = keychain_command
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("security"));
+    let output = process::Command::new(command)
+        .args([
+            "find-generic-password",
+            "-s",
+            PROVIDER_KEYCHAIN_SERVICE,
+            "-a",
+            definition.env_var,
+            "-w",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout)
+        .trim_end_matches(['\r', '\n'])
+        .to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn provider_auth_posture(status: &ProviderStatus) -> &'static str {
+    match (status.configured, status.credential_source) {
+        (true, "keychain") => "configured_keychain_fallback",
+        (true, "env") => "configured_env_override",
+        (true, _) => "configured",
+        (false, _) => "not_configured",
+    }
 }
 
 fn render_provider_statuses_json(statuses: &[ProviderStatus]) -> String {
@@ -5860,13 +5928,16 @@ fn render_provider_statuses_json(statuses: &[ProviderStatus]) -> String {
             format!(
                 concat!(
                     "{{\"name\":{},\"kind\":{},\"credential_env\":{},",
-                    "\"configured\":{},\"secret_value_exposed\":false,",
+                    "\"configured\":{},\"credential_source\":{},",
+                    "\"auth_posture\":{},\"secret_value_exposed\":false,",
                     "\"model_profile\":{},\"cache_support\":{},\"auth_method\":{}}}"
                 ),
                 json_string(status.definition.name),
                 json_string(status.definition.kind),
                 json_string(status.definition.env_var),
                 status.configured,
+                json_string(status.credential_source),
+                json_string(provider_auth_posture(status)),
                 json_string(status.definition.model_profile),
                 json_string(status.definition.cache_support),
                 json_string(status.definition.auth_method)
@@ -5982,6 +6053,7 @@ fn check_provider_adapter(
             configured: false,
             attempted: false,
             status: "not_configured".to_string(),
+            credential_source: status.credential_source.to_string(),
             endpoint: endpoint.to_string(),
             http_code: None,
             duration_ms: 0,
@@ -5998,6 +6070,7 @@ fn check_provider_adapter(
             configured: true,
             attempted: false,
             status: "remote_probe_requires_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1".to_string(),
+            credential_source: status.credential_source.to_string(),
             endpoint: endpoint.to_string(),
             http_code: None,
             duration_ms: 0,
@@ -6011,6 +6084,7 @@ fn check_provider_adapter(
             configured: false,
             attempted: false,
             status: "not_configured".to_string(),
+            credential_source: status.credential_source.to_string(),
             endpoint: endpoint.to_string(),
             http_code: None,
             duration_ms: 0,
@@ -6049,7 +6123,8 @@ fn check_provider_adapter(
     match output {
         Ok(output) => {
             let http_code = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stderr =
+                redact_provider_diagnostic(String::from_utf8_lossy(&output.stderr).trim(), secret);
             let status_text = if output.status.success() && http_code.starts_with('2') {
                 "adapter_models_endpoint_reachable"
             } else if http_code == "401" || http_code == "403" {
@@ -6062,6 +6137,7 @@ fn check_provider_adapter(
                 configured: true,
                 attempted: true,
                 status: status_text.to_string(),
+                credential_source: status.credential_source.to_string(),
                 endpoint: endpoint.to_string(),
                 http_code: if http_code.is_empty() {
                     None
@@ -6077,6 +6153,7 @@ fn check_provider_adapter(
             configured: true,
             attempted: true,
             status: "adapter_check_error".to_string(),
+            credential_source: status.credential_source.to_string(),
             endpoint: endpoint.to_string(),
             http_code: None,
             duration_ms: started.elapsed().as_millis(),
@@ -6087,6 +6164,26 @@ fn check_provider_adapter(
 
 fn provider_adapter_endpoint(status: &ProviderStatus) -> Option<String> {
     provider_adapter_expected_endpoint(status.definition.name).map(str::to_string)
+}
+
+fn redact_provider_diagnostic(value: &str, secret: &str) -> String {
+    let redacted = if secret.is_empty() {
+        value.to_string()
+    } else {
+        value.replace(secret, "[redacted-secret]")
+    };
+    let lower = redacted.to_ascii_lowercase();
+    if lower.contains("authorization")
+        || lower.contains("bearer")
+        || lower.contains("sk-")
+        || lower.contains("api_key=")
+        || lower.contains("api-key")
+        || json_bool_field_true_anywhere(&lower.replace("\\\"", "\""), "secret_value_exposed")
+    {
+        "[redacted-provider-diagnostic]".to_string()
+    } else {
+        redacted
+    }
 }
 
 fn provider_adapter_expected_endpoint(name: &str) -> Option<&'static str> {
@@ -8435,7 +8532,14 @@ fn render_native_collaboration_events_jsonl(
         + "\n"
 }
 
+fn keychain_integration_available(statuses: &[ProviderStatus]) -> bool {
+    statuses
+        .iter()
+        .any(|status| status.credential_source == "keychain")
+}
+
 fn render_auth_registry(stamp: &ClockStamp, statuses: &[ProviderStatus]) -> String {
+    let keychain_available = keychain_integration_available(statuses);
     format!(
         concat!(
             "{{\n",
@@ -8444,7 +8548,7 @@ fn render_auth_registry(stamp: &ClockStamp, statuses: &[ProviderStatus]) -> Stri
             "  \"auth_methods\": {},\n",
             "  \"key_storage\": {},\n",
             "  \"secrets_stored_in_repo\": false,\n",
-            "  \"live_keychain_integration\": false,\n",
+            "  \"live_keychain_integration\": {},\n",
             "  \"env_credential_discovery\": {}\n",
             "}}\n"
         ),
@@ -8461,11 +8565,13 @@ fn render_auth_registry(stamp: &ClockStamp, statuses: &[ProviderStatus]) -> Stri
             "encrypted_file_fallback",
             "workspace_scoped_credentials"
         ]),
+        keychain_available,
         render_provider_statuses_json(statuses)
     )
 }
 
-fn render_auth_policy(stamp: &ClockStamp) -> String {
+fn render_auth_policy(stamp: &ClockStamp, statuses: &[ProviderStatus]) -> String {
+    let keychain_available = keychain_integration_available(statuses);
     format!(
         concat!(
             "{{\n",
@@ -8478,7 +8584,7 @@ fn render_auth_policy(stamp: &ClockStamp) -> String {
             "  \"local_endpoint_providers\": {},\n",
             "  \"workspace_scoped_credentials\": true,\n",
             "  \"audit_log\": \"auth-audit-log.jsonl\",\n",
-            "  \"live_keychain_integration\": false,\n",
+            "  \"live_keychain_integration\": {},\n",
             "  \"secret_values_exposed\": false\n",
             "}}\n"
         ),
@@ -8486,7 +8592,7 @@ fn render_auth_policy(stamp: &ClockStamp) -> String {
         json_array(&[
             "macos_keychain_first",
             "encrypted_file_fallback_planned",
-            "environment_discovery_current"
+            "environment_fallback_current"
         ]),
         json_array(&[
             "api_key",
@@ -8497,19 +8603,21 @@ fn render_auth_policy(stamp: &ClockStamp) -> String {
         ]),
         json_array(&["OpenAI", "Claude"]),
         json_array(&["OpenRouter", "OpenAI", "Claude", "Gemini", "Codex LB"]),
-        json_array(&["Ollama", "LM Studio", "OpenAI-compatible local endpoints"])
+        json_array(&["Ollama", "LM Studio", "OpenAI-compatible local endpoints"]),
+        keychain_available
     )
 }
 
-fn render_auth_audit_event(stamp: &ClockStamp, event: &str) -> String {
+fn render_auth_audit_event(stamp: &ClockStamp, event: &str, statuses: &[ProviderStatus]) -> String {
     format!(
         concat!(
             "{{\"schema\":\"opensks.auth-audit-event.v1\",",
             "\"at\":{},\"event\":{},\"workspace_scoped\":true,",
-            "\"secret_value_exposed\":false,\"live_keychain_integration\":false}}\n"
+            "\"secret_value_exposed\":false,\"live_keychain_integration\":{}}}\n"
         ),
         stamp.json(),
-        json_string(event)
+        json_string(event),
+        keychain_integration_available(statuses)
     )
 }
 
@@ -8610,14 +8718,17 @@ fn render_provider_profiles_json(statuses: &[ProviderStatus]) -> String {
             format!(
                 concat!(
                     "{{\"name\":{},\"model_profile\":{},\"cache_support\":{},",
-                    "\"auth_method\":{},\"kind\":{},\"configured\":{}}}"
+                    "\"auth_method\":{},\"kind\":{},\"configured\":{},",
+                    "\"credential_source\":{},\"auth_posture\":{}}}"
                 ),
                 json_string(status.definition.name),
                 json_string(status.definition.model_profile),
                 json_string(status.definition.cache_support),
                 json_string(status.definition.auth_method),
                 json_string(status.definition.kind),
-                status.configured
+                status.configured,
+                json_string(status.credential_source),
+                json_string(provider_auth_posture(status))
             )
         })
         .collect::<Vec<_>>()
@@ -11857,13 +11968,14 @@ fn render_provider_adapter_checks_json(checks: &[ProviderAdapterCheck]) -> Strin
             format!(
                 concat!(
                     "{{\"name\":{},\"configured\":{},\"attempted\":{},",
-                    "\"status\":{},\"endpoint\":{},\"http_code\":{},",
+                    "\"status\":{},\"credential_source\":{},\"endpoint\":{},\"http_code\":{},",
                     "\"duration_ms\":{},\"secret_value_exposed\":false,\"stderr\":{}}}"
                 ),
                 json_string(&check.name),
                 check.configured,
                 check.attempted,
                 json_string(&check.status),
+                json_string(&check.credential_source),
                 json_string(&check.endpoint),
                 check
                     .http_code
@@ -14406,6 +14518,9 @@ pub fn default_cwd() -> Result<PathBuf, OpenSksError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn temp_workspace(name: &str) -> PathBuf {
         let stamp = ClockStamp::now().expect("clock");
@@ -14426,6 +14541,56 @@ mod tests {
         )
         .expect("write cargo manifest");
         fs::write(root.join("src/lib.rs"), source).expect("write cargo source");
+    }
+
+    fn test_provider_definition(env_var: &'static str) -> ProviderDefinition {
+        ProviderDefinition {
+            name: "Test Provider",
+            env_var,
+            kind: "remote",
+            default_base_url: None,
+            model_profile: "test-profile",
+            cache_support: "provider-dependent",
+            auth_method: "api_key",
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_mock_security_command(
+        root: &Path,
+        env_var: &str,
+        secret: &str,
+        found: bool,
+    ) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = root.join("mock-security");
+        let script = if found {
+            format!(
+                concat!(
+                    "#!/bin/sh\n",
+                    "if [ \"$1\" = \"find-generic-password\" ] && ",
+                    "[ \"$2\" = \"-s\" ] && [ \"$3\" = \"{}\" ] && ",
+                    "[ \"$4\" = \"-a\" ] && [ \"$5\" = \"{}\" ] && ",
+                    "[ \"$6\" = \"-w\" ]; then\n",
+                    "  printf '%s\\n' '{}'\n",
+                    "  exit 0\n",
+                    "fi\n",
+                    "printf 'unexpected mock security arguments\\n' >&2\n",
+                    "exit 64\n"
+                ),
+                PROVIDER_KEYCHAIN_SERVICE, env_var, secret
+            )
+        } else {
+            "#!/bin/sh\nprintf 'not found\\n' >&2\nexit 44\n".to_string()
+        };
+        fs::write(&path, script).expect("write mock security");
+        let mut permissions = fs::metadata(&path)
+            .expect("mock security metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&path, permissions).expect("mock security permissions");
+        path
     }
 
     fn assert_beta002_status(root: &Path, expected_status: &str) {
@@ -17150,6 +17315,108 @@ mod tests {
             fs::read_to_string(dir.join("usage-ledger.jsonl")).expect("usage ledger");
         assert!(usage_ledger.contains("\"tokens\":0"));
         assert!(usage_ledger.contains("\"cost_usd\":0.0"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn provider_env_source_overrides_keychain_without_serializing_secrets() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let root = temp_workspace("provider-env-override");
+        let env_var = "OPENSKS_TEST_PROVIDER_ENV_OVERRIDE";
+        let env_secret = "env-secret-should-not-serialize";
+        let keychain_secret = "keychain-secret-should-not-serialize";
+        let command = write_mock_security_command(&root, env_var, keychain_secret, true);
+        unsafe {
+            env::set_var(env_var, env_secret);
+            env::remove_var("OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE");
+        }
+
+        let status =
+            provider_status_for_definition(test_provider_definition(env_var), Some(&command));
+
+        unsafe {
+            env::remove_var(env_var);
+        }
+
+        assert!(status.configured);
+        assert_eq!(status.credential_source, "env");
+        assert_eq!(status.configured_value.as_deref(), Some(env_secret));
+
+        let statuses = vec![status.clone()];
+        let registry_statuses = render_provider_statuses_json(&statuses);
+        assert!(registry_statuses.contains("\"credential_source\":\"env\""));
+        assert!(registry_statuses.contains("\"auth_posture\":\"configured_env_override\""));
+        assert!(!registry_statuses.contains(keychain_secret));
+        assert!(!registry_statuses.contains(env_secret));
+
+        let adapter_check = check_provider_adapter(
+            &root.join(OPEN_SKSDIR).join("providers"),
+            &status,
+            "https://api.openai.com/v1/models",
+        );
+        assert_eq!(adapter_check.credential_source, "env");
+        let adapter_json = render_provider_adapter_checks_json(&[adapter_check]);
+        assert!(adapter_json.contains("\"credential_source\":\"env\""));
+        assert!(!adapter_json.contains(keychain_secret));
+        assert!(!adapter_json.contains(env_secret));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn provider_keychain_source_fills_missing_env_without_serializing_secret() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let root = temp_workspace("provider-keychain-fallback");
+        let env_var = "OPENSKS_TEST_PROVIDER_KEYCHAIN_FALLBACK";
+        let keychain_secret = "keychain-fallback-secret-should-not-serialize";
+        let command = write_mock_security_command(&root, env_var, keychain_secret, true);
+        unsafe {
+            env::remove_var(env_var);
+        }
+
+        let status =
+            provider_status_for_definition(test_provider_definition(env_var), Some(&command));
+
+        assert!(status.configured);
+        assert_eq!(status.credential_source, "keychain");
+        assert_eq!(status.configured_value.as_deref(), Some(keychain_secret));
+
+        let statuses = vec![status];
+        let registry_statuses = render_provider_statuses_json(&statuses);
+        assert!(registry_statuses.contains("\"credential_source\":\"keychain\""));
+        assert!(registry_statuses.contains("\"auth_posture\":\"configured_keychain_fallback\""));
+        assert!(!registry_statuses.contains(keychain_secret));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn provider_keychain_miss_stays_unconfigured_when_env_missing() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let root = temp_workspace("provider-keychain-miss");
+        let env_var = "OPENSKS_TEST_PROVIDER_KEYCHAIN_MISS";
+        let command = write_mock_security_command(&root, env_var, "unused-secret", false);
+        unsafe {
+            env::remove_var(env_var);
+        }
+
+        let status =
+            provider_status_for_definition(test_provider_definition(env_var), Some(&command));
+
+        assert!(!status.configured);
+        assert_eq!(status.credential_source, "none");
+        assert!(status.configured_value.is_none());
+    }
+
+    #[test]
+    fn provider_adapter_stderr_redaction_removes_in_memory_secret() {
+        let secret = "sk-test-secret-should-not-serialize";
+        let redacted = redact_provider_diagnostic(
+            "curl diagnostic accidentally included sk-test-secret-should-not-serialize",
+            secret,
+        );
+        assert!(redacted.contains("[redacted-secret]"));
+        assert!(!redacted.contains(secret));
+        let dangerous = redact_provider_diagnostic("Authorization: Bearer sk-test-token", secret);
+        assert_eq!(dangerous, "[redacted-provider-diagnostic]");
     }
 
     #[test]
