@@ -51,6 +51,19 @@ recorded stage span passed. This does not mean provider-backed or production
 worker overlap tuning is live; that tuning remains a non-goal for the current
 slice and a remaining production gap.
 
+`prod-006: passed` is scoped to local signed-updates artifact evidence under
+`.opensks/updater`: `update-manifest.json`, `update-signature.json`,
+`update-channels.json`, `rollback-plan.json`, `update-boundary.json`, and
+`updater-final-state.json`. The scoped gate requires the manifest to require
+signature and rollback; the signature `manifest_hash` to match the manifest
+hash; the signature value to equal `local_update_signature(manifest_hash)`;
+final state to report `signature_verified=true` and
+`network_or_install_performed=false`; stable/latest channels to require
+signature and rollback; the update boundary to require operator approval,
+verified signature, and rollback; and rollback apply transaction to remain
+non-live. This is not production crypto, notarization, network install, or live
+apply evidence; those remain production gaps.
+
 Current live local slices:
 
 - `qa run` executes `cargo fmt --check`, `cargo test --no-run`, and `cargo clippy --all-targets --all-features -- -D warnings` when `Cargo.toml` exists.
@@ -60,7 +73,7 @@ Current live local slices:
 - `bench` records timed local runtime checks plus explicit multi-LLM roster, role-assignment, disagreement, quorum, and collaboration preflight artifacts with hidden fallback disabled.
 - `auth` discovers provider environment-variable configuration without exposing secret values and writes auth policy plus audit artifacts for Keychain-first storage posture, OAuth candidates, API keys, and local endpoints.
 - `provider list`, `provider probe`, `provider usage`, and `provider adapter-check` write provider profiles, first-class/optional adapter capabilities, local endpoint reachability probes, OpenRouter/OpenAI adapter smoke evidence, and zero-leak usage counters.
-- `updater plan` writes stable/latest channel, local signature proof, update boundary, rollback, and final-state artifacts without performing a network install.
+- `updater plan` writes the `prod-006` local signed-updates artifact set under `.opensks/updater` and verifies local manifest-signature, channel, boundary, rollback, and final-state evidence without performing production crypto, notarization, network install, or live apply.
 - `acceptance audit` writes MVP/Beta/Production acceptance ledgers and findings so remaining live gaps are explicit rather than inferred from green tests.
 - `prd coverage` writes `prd-coverage.json` and `requirement-coverage-gate.json`, checking implemented plus artifact-MVP PRD requirement coverage against the 95% production threshold while keeping live acceptance completion separate.
 - `voxel index` scans workspace text into code, symbol, design, security, provider, package, and context voxels with stable/dynamic cache classification.

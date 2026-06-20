@@ -7388,6 +7388,18 @@ fn production_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
             "acceptance audit did not find a latest mission final-seal.json with artifact_mvp_final_seal_integrity_status=passed and checked_artifacts_exist=true; live H-proof route gate, provider-backed workers, repair waves, and final apply remain explicitly false.",
         )
     };
+    let prod_006_passed = prod006_signed_update_artifact_gate_passed(cwd);
+    let (prod_006_status, prod_006_evidence) = if prod_006_passed {
+        (
+            "passed",
+            "updater artifacts prove a local signed-update manifest plan: update-signature.json matches update-manifest.json, updater-final-state.json reports signature_verified=true, stable/latest channels require signatures and rollback, and network/install/apply remain explicitly false; production crypto/notarization remains unverified.",
+        )
+    } else {
+        (
+            "partial",
+            "prod-006 requires updater plan artifacts with a recomputable local manifest signature, matching final-state manifest hash, signature_verified=true, stable/latest signed rollback channels, operator-approval boundary, rollback plan, and network/install/apply explicitly false; production crypto/notarization remains unverified.",
+        )
+    };
     vec![
         acceptance_item(
             "prod-001",
@@ -7422,8 +7434,8 @@ fn production_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
         acceptance_item(
             "prod-006",
             "signed updates",
-            "partial",
-            "updater plan writes local signature/channel/rollback artifacts; production crypto/notarized apply is not live.",
+            prod_006_status,
+            prod_006_evidence,
         ),
     ]
 }
@@ -7529,6 +7541,136 @@ fn prod004_secret_leak_release_history_gate_passed(cwd: &Path) -> bool {
         .all(|surface| secret_leak_surface_gate_passed(cwd, surface))
 }
 
+fn prod006_signed_update_artifact_gate_passed(cwd: &Path) -> bool {
+    let updater_dir = cwd.join(OPEN_SKSDIR).join("updater");
+    let Ok(manifest) = fs::read_to_string(updater_dir.join("update-manifest.json")) else {
+        return false;
+    };
+    let Ok(signature) = fs::read_to_string(updater_dir.join("update-signature.json")) else {
+        return false;
+    };
+    let Ok(channels) = fs::read_to_string(updater_dir.join("update-channels.json")) else {
+        return false;
+    };
+    let Ok(rollback) = fs::read_to_string(updater_dir.join("rollback-plan.json")) else {
+        return false;
+    };
+    let Ok(boundary) = fs::read_to_string(updater_dir.join("update-boundary.json")) else {
+        return false;
+    };
+    let Ok(final_state) = fs::read_to_string(updater_dir.join("updater-final-state.json")) else {
+        return false;
+    };
+
+    let manifest_hash = stable_content_hash(&manifest);
+    let Some(signature_manifest_hash) =
+        extract_json_top_level_string_field(&signature, "manifest_hash")
+    else {
+        return false;
+    };
+    let Some(signature_value) = extract_json_top_level_string_field(&signature, "signature") else {
+        return false;
+    };
+    let Some(final_manifest_hash) =
+        extract_json_top_level_string_field(&final_state, "manifest_hash")
+    else {
+        return false;
+    };
+    let expected_signature = local_update_signature(&manifest_hash);
+
+    json_top_level_string_field_equals(&manifest, "schema", "opensks.update-manifest.v1")
+        && json_top_level_string_field_equals(
+            &manifest,
+            "current_version",
+            env!("CARGO_PKG_VERSION"),
+        )
+        && json_top_level_string_field_equals(&manifest, "default_channel", "stable")
+        && json_top_level_bool_field_equals(&manifest, "requires_signature", true)
+        && json_top_level_bool_field_equals(&manifest, "requires_rollback_plan", true)
+        && json_top_level_bool_field_equals(&manifest, "network_install_enabled", false)
+        && json_top_level_string_array_contains(&manifest, "channels", &["stable", "latest"])
+        && json_top_level_string_array_contains(
+            &manifest,
+            "artifacts",
+            &["opensks-cli", "app-bundle-candidate", "manifest"],
+        )
+        && json_top_level_string_field_equals(&signature, "schema", "opensks.update-signature.v1")
+        && signature_manifest_hash == manifest_hash
+        && signature_value == expected_signature
+        && json_top_level_string_field_equals(
+            &signature,
+            "trusted_signer_fingerprint",
+            trusted_update_signer_fingerprint(),
+        )
+        && json_top_level_string_field_equals(
+            &signature,
+            "algorithm",
+            "fnv1a64-local-dev-proof-not-production-crypto",
+        )
+        && json_top_level_bool_field_equals(&signature, "production_crypto_live", false)
+        && json_top_level_string_field_equals(&channels, "schema", "opensks.update-channels.v1")
+        && signed_update_channel_gate_passed(&channels, "stable")
+        && signed_update_channel_gate_passed(&channels, "latest")
+        && json_top_level_string_field_equals(&rollback, "schema", "opensks.rollback-plan.v1")
+        && json_top_level_string_field_equals(
+            &rollback,
+            "current_version",
+            env!("CARGO_PKG_VERSION"),
+        )
+        && json_top_level_string_array_contains(
+            &rollback,
+            "rollback_slots",
+            &[
+                "previous-stable",
+                "previous-latest",
+                "manual-operator-restore",
+            ],
+        )
+        && json_top_level_string_field_equals(
+            &rollback,
+            "restore_strategy",
+            "preserve_previous_manifest_and_binary_before_apply",
+        )
+        && json_top_level_bool_field_equals(&rollback, "apply_transaction_live", false)
+        && json_top_level_string_field_equals(&boundary, "schema", "opensks.update-boundary.v1")
+        && json_top_level_bool_field_equals(&boundary, "auto_download", false)
+        && json_top_level_bool_field_equals(&boundary, "auto_apply", false)
+        && json_top_level_bool_field_equals(&boundary, "requires_operator_approval", true)
+        && json_top_level_bool_field_equals(&boundary, "requires_verified_signature", true)
+        && json_top_level_bool_field_equals(&boundary, "requires_rollback_plan", true)
+        && json_top_level_string_field_equals(
+            &boundary,
+            "signed_updater_live",
+            "local_manifest_signature_artifact_only",
+        )
+        && json_top_level_string_field_equals(
+            &final_state,
+            "schema",
+            "opensks.updater-final-state.v1",
+        )
+        && json_top_level_string_field_equals(&final_state, "status", "verified_artifact_plan")
+        && final_manifest_hash == manifest_hash
+        && json_top_level_bool_field_equals(&final_state, "signature_verified", true)
+        && json_top_level_string_array_contains(
+            &final_state,
+            "channels_present",
+            &["stable", "latest"],
+        )
+        && json_top_level_bool_field_equals(&final_state, "rollback_plan_present", true)
+        && json_top_level_bool_field_equals(&final_state, "network_or_install_performed", false)
+}
+
+fn signed_update_channel_gate_passed(channels: &str, name: &str) -> bool {
+    extract_json_top_level_array_objects(channels, "channels")
+        .iter()
+        .any(|channel| {
+            json_top_level_string_field_equals(channel, "name", name)
+                && json_top_level_bool_field_equals(channel, "auto_apply", false)
+                && json_top_level_bool_field_equals(channel, "requires_signature", true)
+                && json_top_level_bool_field_equals(channel, "rollback_required", true)
+        })
+}
+
 fn secret_leak_surface_gate_passed(cwd: &Path, surface: &str) -> bool {
     let surface_dir = cwd.join(OPEN_SKSDIR).join(surface);
     let Ok(rate) = fs::read_to_string(surface_dir.join("secret-leak-rate.json")) else {
@@ -7577,6 +7719,75 @@ fn json_top_level_string_field_equals(input: &str, key: &str, expected: &str) ->
 fn json_top_level_bool_field_equals(input: &str, key: &str, expected: bool) -> bool {
     extract_json_top_level_raw_field(input, key).as_deref()
         == Some(if expected { "true" } else { "false" })
+}
+
+fn json_top_level_string_array_contains(input: &str, key: &str, expected: &[&str]) -> bool {
+    let Some(raw) = extract_json_top_level_raw_field(input, key) else {
+        return false;
+    };
+    let values = extract_json_string_array_values(&raw);
+    expected
+        .iter()
+        .all(|expected_value| values.iter().any(|value| value == expected_value))
+}
+
+fn extract_json_string_array_values(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return Vec::new();
+    }
+    let mut values = Vec::new();
+    let mut index = 1usize;
+    while index < trimmed.len().saturating_sub(1) {
+        index = skip_json_whitespace(trimmed, index);
+        if index >= trimmed.len().saturating_sub(1) {
+            break;
+        }
+        if trimmed[index..].starts_with(',') {
+            index += 1;
+            continue;
+        }
+        if !trimmed[index..].starts_with('"') {
+            return Vec::new();
+        }
+        let Some(end) = json_string_token_end(trimmed, index) else {
+            return Vec::new();
+        };
+        values.push(unescape_simple_json_string(&trimmed[index + 1..end - 1]));
+        index = end;
+    }
+    values
+}
+
+fn extract_json_top_level_array_objects(input: &str, key: &str) -> Vec<String> {
+    let Some(raw) = extract_json_top_level_raw_field(input, key) else {
+        return Vec::new();
+    };
+    let trimmed = raw.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return Vec::new();
+    }
+    let mut objects = Vec::new();
+    let mut index = 1usize;
+    while index < trimmed.len().saturating_sub(1) {
+        index = skip_json_whitespace(trimmed, index);
+        if index >= trimmed.len().saturating_sub(1) {
+            break;
+        }
+        if trimmed[index..].starts_with(',') {
+            index += 1;
+            continue;
+        }
+        if !trimmed[index..].starts_with('{') {
+            return Vec::new();
+        }
+        let Some(end) = json_value_end(trimmed, index) else {
+            return Vec::new();
+        };
+        objects.push(trimmed[index..end].to_string());
+        index = end;
+    }
+    objects
 }
 
 fn extract_json_top_level_number_field(input: &str, key: &str) -> Option<usize> {
@@ -11467,6 +11678,153 @@ mod tests {
     }
 
     #[test]
+    fn prod006_requires_artifact_bound_signed_update_gate() {
+        let root = temp_workspace("prod006-gate");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance without updater artifacts");
+        let production = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production without updater artifacts");
+        assert!(production.contains(
+            "\"id\":\"prod-006\",\"criterion\":\"signed updates\",\"status\":\"partial\""
+        ));
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings without updater artifacts");
+        assert!(findings.contains("\"id\":\"prod-006\""));
+
+        run_cli(["updater", "plan"], &root).expect("updater plan");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance with updater artifacts");
+        let production = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production with updater artifacts");
+        assert!(production.contains(
+            "\"id\":\"prod-006\",\"criterion\":\"signed updates\",\"status\":\"passed\""
+        ));
+        assert!(production.contains("local signed-update manifest plan"));
+        assert!(production.contains("signature_verified=true"));
+        assert!(production.contains("network/install/apply remain explicitly false"));
+        assert!(production.contains("production crypto/notarization remains unverified"));
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings with updater artifacts");
+        assert!(!findings.contains("\"id\":\"prod-006\""));
+    }
+
+    #[test]
+    fn prod006_stays_partial_for_malformed_or_mismatched_update_artifacts() {
+        let root = temp_workspace("prod006-tamper");
+        let updater_dir = root.join(OPEN_SKSDIR).join("updater");
+
+        for artifact in [
+            "update-manifest.json",
+            "update-signature.json",
+            "update-channels.json",
+            "rollback-plan.json",
+            "update-boundary.json",
+            "updater-final-state.json",
+        ] {
+            run_cli(["updater", "plan"], &root).expect("updater plan for missing artifact");
+            fs::remove_file(updater_dir.join(artifact)).expect("remove updater artifact");
+            run_cli(["acceptance", "audit"], &root).expect("acceptance with missing artifact");
+            let production = fs::read_to_string(
+                root.join(OPEN_SKSDIR)
+                    .join("acceptance")
+                    .join("production-acceptance.json"),
+            )
+            .expect("production with missing artifact");
+            assert!(
+                production.contains(
+                    "\"id\":\"prod-006\",\"criterion\":\"signed updates\",\"status\":\"partial\""
+                ),
+                "expected prod-006 partial when {artifact} is missing"
+            );
+        }
+
+        run_cli(["updater", "plan"], &root).expect("updater plan for bad signature");
+        let signature_path = updater_dir.join("update-signature.json");
+        let signature = fs::read_to_string(&signature_path).expect("signature");
+        let manifest_hash = extract_json_top_level_string_field(&signature, "manifest_hash")
+            .expect("manifest hash");
+        fs::write(
+            &signature_path,
+            signature.replace(&manifest_hash, "fnv1a64:0000000000000000"),
+        )
+        .expect("corrupt signature manifest hash");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance with bad signature");
+        let production = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production with bad signature");
+        assert!(production.contains(
+            "\"id\":\"prod-006\",\"criterion\":\"signed updates\",\"status\":\"partial\""
+        ));
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings with bad signature");
+        assert!(findings.contains("\"id\":\"prod-006\""));
+
+        run_cli(["updater", "plan"], &root).expect("updater plan for live apply tamper");
+        let final_state_path = updater_dir.join("updater-final-state.json");
+        let final_state = fs::read_to_string(&final_state_path).expect("final state");
+        fs::write(
+            &final_state_path,
+            final_state.replace(
+                "\"network_or_install_performed\": false",
+                "\"network_or_install_performed\": true",
+            ),
+        )
+        .expect("corrupt live apply boundary");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance with live apply tamper");
+        let production = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production with live apply tamper");
+        assert!(production.contains(
+            "\"id\":\"prod-006\",\"criterion\":\"signed updates\",\"status\":\"partial\""
+        ));
+
+        run_cli(["updater", "plan"], &root).expect("updater plan for duplicate final state");
+        let final_state = fs::read_to_string(&final_state_path).expect("final state duplicate");
+        fs::write(
+            &final_state_path,
+            final_state.replace(
+                "\"signature_verified\": true,",
+                "\"signature_verified\": true,\n  \"signature_verified\": true,",
+            ),
+        )
+        .expect("duplicate final state signature flag");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance with duplicate final state key");
+        let production = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production with duplicate final state key");
+        assert!(production.contains(
+            "\"id\":\"prod-006\",\"criterion\":\"signed updates\",\"status\":\"partial\""
+        ));
+    }
+
+    #[test]
     fn cli_v3_plane_commands_write_named_artifacts() {
         let root = temp_workspace("cli-v3");
         fs::write(
@@ -11640,8 +11998,8 @@ mod tests {
         let acceptance = fs::read_to_string(open.join("acceptance/acceptance-summary.json"))
             .expect("acceptance");
         assert!(acceptance.contains("\"schema\": \"opensks.acceptance-summary.v1\""));
-        assert!(acceptance.contains("\"passed\":15"));
-        assert!(acceptance.contains("\"partial\":8"));
+        assert!(acceptance.contains("\"passed\":16"));
+        assert!(acceptance.contains("\"partial\":7"));
         assert!(acceptance.contains("\"goal_complete\": false"));
         let beta = fs::read_to_string(open.join("acceptance/beta-acceptance.json")).expect("beta");
         assert!(beta.contains("\"passed\":2"));
@@ -11661,9 +12019,9 @@ mod tests {
         assert!(mvp.contains("\"status\":\"partial\""));
         let production = fs::read_to_string(open.join("acceptance/production-acceptance.json"))
             .expect("production");
-        assert!(production.contains("\"passed\":5"));
-        assert!(production.contains("\"partial\":1"));
-        assert!(production.contains("\"all_passed\": false"));
+        assert!(production.contains("\"passed\":6"));
+        assert!(production.contains("\"partial\":0"));
+        assert!(production.contains("\"all_passed\": true"));
         assert!(production.contains("cache hit warm prefix >= 95%"));
         assert!(production.contains(
             "\"id\":\"prod-001\",\"criterion\":\"cache hit warm prefix >= 95%\",\"status\":\"passed\""
@@ -11694,6 +12052,13 @@ mod tests {
         ));
         assert!(production.contains("artifact_mvp_final_seal_integrity"));
         assert!(production.contains("live H-proof route gate"));
+        assert!(production.contains("signed updates"));
+        assert!(production.contains(
+            "\"id\":\"prod-006\",\"criterion\":\"signed updates\",\"status\":\"passed\""
+        ));
+        assert!(production.contains("local signed-update manifest plan"));
+        assert!(production.contains("signature_verified=true"));
+        assert!(production.contains("network/install/apply remain explicitly false"));
         let findings = fs::read_to_string(open.join("acceptance/acceptance-findings.jsonl"))
             .expect("findings");
         assert!(!findings.contains("\"id\":\"beta-004\""));
@@ -11701,7 +12066,7 @@ mod tests {
         assert!(!findings.contains("\"id\":\"prod-002\""));
         assert!(!findings.contains("\"id\":\"prod-005\""));
         assert!(!findings.contains("\"id\":\"prod-004\""));
-        assert!(findings.contains("\"id\":\"prod-006\""));
+        assert!(!findings.contains("\"id\":\"prod-006\""));
         let qa_secret_rate =
             fs::read_to_string(open.join("qa/secret-leak-rate.json")).expect("qa leak rate");
         assert!(qa_secret_rate.contains("\"schema\": \"opensks.secret-leak-rate.v1\""));

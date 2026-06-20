@@ -106,9 +106,17 @@ only attempted when credentials are configured and
 `OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1` is set.
 Run `provider adapter-check` before rerunning `bench` when the collaboration
 preflight should include adapter-check presence evidence.
-`updater plan` writes stable/latest channel, local signature proof, update
-boundary, rollback, and final-state artifacts without performing a network
-install.
+`updater plan` writes the local `prod-006` signed-updates artifact set under
+`.opensks/updater`: `update-manifest.json`, `update-signature.json`,
+`update-channels.json`, `rollback-plan.json`, `update-boundary.json`, and
+`updater-final-state.json`. The scoped pass is local manifest-signature
+evidence only: the manifest requires signature and rollback, the signature
+`manifest_hash` matches the manifest hash, the signature equals
+`local_update_signature(manifest_hash)`, final state has
+`signature_verified=true` and `network_or_install_performed=false`,
+stable/latest channels require signature and rollback, the boundary requires
+operator approval plus signature and rollback, and rollback apply transaction
+is not live.
 `prd coverage` writes the PRD coverage ledger plus
 `requirement-coverage-gate.json`, which checks implemented plus artifact-MVP
 requirement coverage against the 95% production threshold without claiming all
@@ -177,4 +185,5 @@ Still not live:
 - macOS accessibility/app automation beyond brokered inspection and inventory
 - Provider-backed worker execution, repair waves, and final apply transactions
 - Native/live Tauri GUI beyond the static dashboard artifact
-- Production crypto/notarized updater apply and production-grade acceptance targets
+- Production crypto/notarized updater apply, network install/apply, and
+  production-grade acceptance targets
