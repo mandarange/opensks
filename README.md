@@ -65,9 +65,11 @@ prd-coverage.json
 
 The final seal remains route-level `partial`, but it now carries an
 `artifact_mvp_final_seal_integrity` trust contract for the local artifact
-envelope. That scoped contract is what `prod-005` means by passed; live
-H-proof route completion, provider-backed workers, repair waves, and final
-apply still remain false. The current implementation proves intake, artifact
+envelope. `acceptance audit` now marks `prod-005` passed only after reading the
+latest mission `final-seal.json` and confirming that scoped trust contract;
+without that evidence it remains partial. Live H-proof route completion,
+provider-backed workers, repair waves, and final apply still remain false. The
+current implementation proves intake, artifact
 writing, automation-loop planning, capability planning, Voxel TriWiki seeding,
 and PRD coverage accounting. Goal runs also write local scheduler, QA/security,
 worktree-isolation, and patch-gate artifacts. `qa run` executes local Rust
@@ -75,9 +77,10 @@ checks when a Cargo workspace is present and always runs the built-in secret
 scan; it also writes `secret-leak-rate.json` and `secret-leak-gate.json` so the
 current workspace release scan has an explicit zero-leak gate. `cache warm`
 hashes local cache segments and writes `cache-hit-report.json` plus
-`cache-layout-improvement.json`, comparing the current stable prefix, including
-deterministic Voxel TriWiki context when indexed, with the previous warm
-snapshot; provider cached-token counters are still marked not connected.
+`cache-layout-improvement.json`, comparing the current stable prefix with the
+previous warm snapshot. The cache-layout gate only passes for the Voxel TriWiki
+scope when `.opensks/triwiki/voxels.jsonl` is present in the stable prefix;
+provider cached-token counters are still marked not connected.
 `bench` records timed local runtime checks plus explicit multi-LLM roster,
 role-assignment, disagreement, quorum, and collaboration preflight artifacts
 with hidden fallback disabled. `auth` discovers configured provider environment variables without

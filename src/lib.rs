@@ -1250,7 +1250,7 @@ fn run_acceptance_command(args: &[String], cwd: &Path) -> Result<CliOutput, Open
     let stamp = ClockStamp::now()?;
     let mvp = mvp_acceptance_items();
     let beta = beta_acceptance_items();
-    let production = production_acceptance_items();
+    let production = production_acceptance_items(cwd);
     write_text_atomic(
         &dir.join("mvp-acceptance.json"),
         &render_acceptance_report(&stamp, "mvp", &mvp),
@@ -5494,8 +5494,15 @@ fn render_cache_layout_improvement_report(
     } else {
         (stable_prefix_bytes as f64 / total_bytes as f64) * 100.0
     };
-    let layout_gate_passed =
-        stable_segment_count > 0 && prefix_hit.baseline_available && prefix_hit.local_target_met;
+    let voxel_triwiki_segment_present = segments.iter().any(|segment| {
+        segment.name == "voxel_triwiki_summary"
+            && segment.path == ".opensks/triwiki/voxels.jsonl"
+            && segment.stability == "stable"
+    });
+    let layout_gate_passed = voxel_triwiki_segment_present
+        && stable_segment_count > 0
+        && prefix_hit.baseline_available
+        && prefix_hit.local_target_met;
     format!(
         concat!(
             "{{\n",
@@ -5507,6 +5514,7 @@ fn render_cache_layout_improvement_report(
             "  \"layout_gate_passed\": {},\n",
             "  \"status\": {},\n",
             "  \"baseline_available\": {},\n",
+            "  \"voxel_triwiki_segment_present\": {},\n",
             "  \"stable_segment_count\": {},\n",
             "  \"dynamic_segment_count\": {},\n",
             "  \"total_segment_count\": {},\n",
@@ -5532,12 +5540,15 @@ fn render_cache_layout_improvement_report(
         layout_gate_passed,
         json_string(if layout_gate_passed {
             "local_cache_layout_improved_provider_unverified"
+        } else if !voxel_triwiki_segment_present {
+            "voxel_triwiki_segment_missing_provider_unverified"
         } else if prefix_hit.baseline_available {
             "local_cache_layout_target_missed_provider_unverified"
         } else {
             "baseline_missing_provider_unverified"
         }),
         prefix_hit.baseline_available,
+        voxel_triwiki_segment_present,
         stable_segment_count,
         dynamic_segment_count,
         segments.len(),
@@ -7062,7 +7073,19 @@ fn beta_acceptance_items() -> Vec<AcceptanceItem> {
     ]
 }
 
-fn production_acceptance_items() -> Vec<AcceptanceItem> {
+fn production_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
+    let final_seal_trust_passed = latest_final_seal_artifact_integrity_passed(cwd);
+    let (prod_005_status, prod_005_evidence) = if final_seal_trust_passed {
+        (
+            "passed",
+            "latest mission final-seal.json was read by acceptance audit and reports artifact_mvp_final_seal_integrity_status=passed with checked artifact refs; live H-proof route gate, provider-backed workers, repair waves, and final apply remain explicitly false.",
+        )
+    } else {
+        (
+            "partial",
+            "acceptance audit did not find a latest mission final-seal.json with artifact_mvp_final_seal_integrity_status=passed and checked_artifacts_exist=true; live H-proof route gate, provider-backed workers, repair waves, and final apply remain explicitly false.",
+        )
+    };
     vec![
         acceptance_item(
             "prod-001",
@@ -7091,8 +7114,8 @@ fn production_acceptance_items() -> Vec<AcceptanceItem> {
         acceptance_item(
             "prod-005",
             "final seal trustworthy",
-            "passed",
-            "final-seal.json includes an artifact_mvp_final_seal_integrity trust contract with checked artifact refs; live H-proof route gate, provider-backed workers, repair waves, and final apply remain explicitly false.",
+            prod_005_status,
+            prod_005_evidence,
         ),
         acceptance_item(
             "prod-006",
@@ -7101,6 +7124,34 @@ fn production_acceptance_items() -> Vec<AcceptanceItem> {
             "updater plan writes local signature/channel/rollback artifacts; production crypto/notarized apply is not live.",
         ),
     ]
+}
+
+fn latest_final_seal_artifact_integrity_passed(cwd: &Path) -> bool {
+    latest_final_seal_text(cwd)
+        .as_deref()
+        .is_some_and(final_seal_text_artifact_integrity_passed)
+}
+
+fn latest_final_seal_text(cwd: &Path) -> Option<String> {
+    let missions_dir = cwd.join(OPEN_SKSDIR).join("missions");
+    let mut seals = Vec::new();
+    for entry in fs::read_dir(&missions_dir).ok()? {
+        let path = entry.ok()?.path().join("final-seal.json");
+        if path.exists() {
+            seals.push(path);
+        }
+    }
+    seals.sort();
+    seals
+        .into_iter()
+        .rev()
+        .find_map(|path| fs::read_to_string(path).ok())
+}
+
+fn final_seal_text_artifact_integrity_passed(final_seal: &str) -> bool {
+    final_seal.contains("\"artifact_mvp_final_seal_integrity\": true")
+        && final_seal.contains("\"artifact_mvp_final_seal_integrity_status\": \"passed\"")
+        && final_seal.contains("\"checked_artifacts_exist\": true")
 }
 
 fn acceptance_item(
@@ -8622,7 +8673,7 @@ pub fn start_goal_loop(config: &GoalRunConfig, cwd: &Path) -> Result<GoalRunResu
         &mission_dir.join("requirement-coverage-gate.json"),
         &render_requirement_coverage_gate_json(&prd_requirements()),
     )?;
-    let final_seal_refs = final_seal_artifact_refs();
+    let final_seal_refs = final_seal_prechecked_artifact_refs();
     let final_seal_artifacts_present = final_seal_refs
         .iter()
         .filter(|artifact| **artifact != "final-seal.json")
@@ -9306,6 +9357,12 @@ fn render_voxel_json(voxel: &Voxel) -> String {
 }
 
 fn final_seal_artifact_refs() -> Vec<&'static str> {
+    let mut refs = final_seal_prechecked_artifact_refs();
+    refs.push("final-seal.json");
+    refs
+}
+
+fn final_seal_prechecked_artifact_refs() -> Vec<&'static str> {
     vec![
         "goal-loop.json",
         "goal-state.jsonl",
@@ -9327,7 +9384,6 @@ fn final_seal_artifact_refs() -> Vec<&'static str> {
         "patch-gate-result.json",
         "prd-coverage.json",
         "requirement-coverage-gate.json",
-        "final-seal.json",
     ]
 }
 
@@ -9344,10 +9400,18 @@ fn render_final_seal_json(
         .iter()
         .filter(|check| check.status == "failed" || check.status == "error")
         .count();
-    let qa_status = if failed_checks == 0 {
+    let non_passed_checks = verification
+        .checks
+        .iter()
+        .filter(|check| check.status != "passed")
+        .count();
+    let qa_passed = !verification.checks.is_empty() && non_passed_checks == 0;
+    let qa_status = if qa_passed {
         "passed"
-    } else {
+    } else if failed_checks > 0 {
         "failed"
+    } else {
+        "blocked"
     };
     let security_status = if verification.security_summary.secret_findings == 0
         && verification.security_summary.critical_or_warning_findings == 0
@@ -9356,14 +9420,15 @@ fn render_final_seal_json(
     } else {
         "findings"
     };
-    let artifact_refs = final_seal_artifact_refs();
-    let artifact_integrity_passed = failed_checks == 0
+    let checked_artifacts = final_seal_prechecked_artifact_refs();
+    let artifact_manifest = final_seal_artifact_refs();
+    let artifact_integrity_passed = qa_passed
         && verification.security_summary.secret_findings == 0
         && verification.security_summary.critical_or_warning_findings == 0
         && !tool_plan.capabilities.is_empty()
         && !voxels.is_empty()
         && verification.artifact_refs_present;
-    let artifact_manifest_hash = stable_content_hash(&artifact_refs.join("\n"));
+    let artifact_manifest_hash = stable_content_hash(&artifact_manifest.join("\n"));
     format!(
         concat!(
             "{{\n",
@@ -9382,6 +9447,8 @@ fn render_final_seal_json(
             "    \"artifact_manifest_hash\": {},\n",
             "    \"checked_artifacts_exist\": {},\n",
             "    \"checked_artifact_count\": {},\n",
+            "    \"artifact_manifest_count\": {},\n",
+            "    \"final_artifact\": \"final-seal.json\",\n",
             "    \"patch_gate\": {{\"status\":\"pending_diff\",\"final_apply_allowed\":false,\"ref\":\"patch-gate-result.json\"}},\n",
             "    \"live_route_completion\": false,\n",
             "    \"live_hproof_route_gate\": false,\n",
@@ -9393,7 +9460,8 @@ fn render_final_seal_json(
             "    \"final_apply_transaction_live\": false,\n",
             "    \"live_final_apply\": false,\n",
             "    \"acceptance_binding\": \"prod-005 passed only for artifact-MVP final-seal integrity; live route completion remains partial\",\n",
-            "    \"checked_artifacts\": {}\n",
+            "    \"checked_artifacts\": {},\n",
+            "    \"artifact_manifest\": {}\n",
             "  }},\n",
             "  \"requirements_coverage\": {{\n",
             "    \"requirements_total\": {},\n",
@@ -9403,7 +9471,7 @@ fn render_final_seal_json(
             "  }},\n",
             "  \"model_provenance\": {{\"runtime\":\"local-rust-cli\",\"model_calls\":0}},\n",
             "  \"tool_provenance\": {{\"tool_plan_ref\":\"tool-plan.json\",\"capabilities\":{},\"approval_required\":{}}},\n",
-            "  \"qa_summary\": {{\"status\":{},\"check_count\":{},\"failed_checks\":{},\"checks\":{} }},\n",
+            "  \"qa_summary\": {{\"status\":{},\"check_count\":{},\"failed_checks\":{},\"non_passed_checks\":{},\"checks\":{} }},\n",
             "  \"security_summary\": {{\"status\":{},\"risk_profile\":{},\"secrets_exposed\":{},\"secret_findings\":{},\"security_findings\":{},\"critical_or_warning_findings\":{},\"destructive_actions_executed\":false}},\n",
             "  \"mutation_summary\": {{\"workspace_mutated\":true,\"artifacts_written\":{},\"final_apply_transaction\":\"artifact-only\"}},\n",
             "  \"cache_summary\": {{\"voxel_count\":{},\"content_hash_algorithm\":\"fnv1a64\",\"stable_prefix_seeded\":true}}\n",
@@ -9420,8 +9488,10 @@ fn render_final_seal_json(
         }),
         json_string(&artifact_manifest_hash),
         verification.artifact_refs_present,
-        artifact_refs.len(),
-        json_array(&artifact_refs),
+        checked_artifacts.len(),
+        artifact_manifest.len(),
+        json_array(&checked_artifacts),
+        json_array(&artifact_manifest),
         goal.success_criteria.len(),
         goal.success_criteria.len(),
         json_vec(&tool_plan.capabilities),
@@ -9429,6 +9499,7 @@ fn render_final_seal_json(
         json_string(qa_status),
         verification.checks.len(),
         failed_checks,
+        non_passed_checks,
         json_array(&[
             "goal-loop.json written",
             "goal-state.jsonl written",
@@ -9458,7 +9529,7 @@ fn render_final_seal_json(
         verification.security_summary.secret_findings,
         verification.security_summary.security_findings,
         verification.security_summary.critical_or_warning_findings,
-        json_array(&artifact_refs),
+        json_array(&artifact_manifest),
         voxels.len()
     )
 }
@@ -9819,6 +9890,16 @@ mod tests {
         path
     }
 
+    fn write_minimal_cargo_project(root: &Path, source: &str) {
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"opensks-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n",
+        )
+        .expect("write cargo manifest");
+        fs::write(root.join("src/lib.rs"), source).expect("write cargo source");
+    }
+
     fn first_mission_dir(root: &Path) -> PathBuf {
         let missions_dir = root.join(OPEN_SKSDIR).join("missions");
         fs::read_dir(&missions_dir)
@@ -9832,6 +9913,7 @@ mod tests {
     #[test]
     fn goal_command_writes_prd_artifact_contract() {
         let root = temp_workspace("artifact-contract");
+        write_minimal_cargo_project(&root, "pub fn fixture() -> bool {\n    true\n}\n");
         let output = run_cli(
             [
                 "goal",
@@ -9907,7 +9989,9 @@ mod tests {
         assert!(final_seal.contains("\"artifact_mvp_final_seal_integrity_status\": \"passed\""));
         assert!(final_seal.contains("\"artifact_manifest_hash\": \"fnv1a64:"));
         assert!(final_seal.contains("\"checked_artifacts_exist\": true"));
-        assert!(final_seal.contains("\"checked_artifact_count\": 21"));
+        assert!(final_seal.contains("\"checked_artifact_count\": 20"));
+        assert!(final_seal.contains("\"artifact_manifest_count\": 21"));
+        assert!(final_seal.contains("\"final_artifact\": \"final-seal.json\""));
         assert!(final_seal.contains("\"patch_gate\": {\"status\":\"pending_diff\",\"final_apply_allowed\":false,\"ref\":\"patch-gate-result.json\"}"));
         assert!(final_seal.contains("\"live_route_completion\": false"));
         assert!(final_seal.contains("\"live_hproof_route_gate\": false"));
@@ -9955,6 +10039,7 @@ mod tests {
     #[test]
     fn status_command_reads_final_seal() {
         let root = temp_workspace("status");
+        write_minimal_cargo_project(&root, "pub fn fixture() -> bool {\n    true\n}\n");
         let output = run_cli(["naruto", "Repair tests with proof artifacts"], &root)
             .expect("naruto command succeeds");
         let mission_line = output
@@ -10054,6 +10139,85 @@ mod tests {
     }
 
     #[test]
+    fn final_seal_trust_blocks_when_qa_is_skipped() {
+        let stamp = ClockStamp::now().expect("clock");
+        let goal = Goal {
+            id: "goal-test".to_string(),
+            text: "test final seal skipped qa".to_string(),
+            kind: "code_change".to_string(),
+            success_criteria: vec![Requirement {
+                id: "REQ-001".to_string(),
+                text: "write artifacts".to_string(),
+            }],
+            constraints: Vec::new(),
+            allowed_capabilities: vec!["qa".to_string()],
+            risk_profile: "low".to_string(),
+            budget: GoalBudget {
+                max_tokens: 1000,
+                max_cost_usd: 1.0,
+                max_tool_calls: 10,
+            },
+            stop_policy: StopPolicy {
+                max_waves: 1,
+                max_wall_clock_seconds: 60,
+                max_no_progress: 1,
+                max_repeated_output: 1,
+                required_coverage_threshold: 0.95,
+            },
+        };
+        let tool_plan = ToolPlan {
+            capabilities: vec!["qa".to_string()],
+            approval_required: Vec::new(),
+            worker_lanes: vec!["verifier".to_string()],
+        };
+        let voxels = vec![Voxel {
+            id: "voxel-test".to_string(),
+            kind: "qa_voxel".to_string(),
+            coordinates: "mission:test/proof".to_string(),
+            content_hash: "fnv1a64:test".to_string(),
+            summary: "proof voxel".to_string(),
+            evidence_refs: vec!["final-seal.json".to_string()],
+            links: Vec::new(),
+            cache_stability: "stable".to_string(),
+            privacy_level: "local".to_string(),
+        }];
+        let security_summary = SecurityScanSummary {
+            secret_findings: 0,
+            security_findings: 0,
+            critical_or_warning_findings: 0,
+        };
+        let checks = vec![CommandCheck {
+            name: "cargo-project-detection".to_string(),
+            command: vec!["cargo".to_string()],
+            status: "skipped".to_string(),
+            exit_code: None,
+            duration_ms: 0,
+            stdout: String::new(),
+            stderr: "Cargo.toml not found in workspace root".to_string(),
+        }];
+
+        let seal = render_final_seal_json(
+            &goal,
+            "M-test",
+            &stamp,
+            &tool_plan,
+            &voxels,
+            FinalSealVerification {
+                checks: &checks,
+                security_summary: &security_summary,
+                artifact_refs_present: true,
+            },
+        );
+
+        assert!(seal.contains("\"artifact_mvp_final_seal_integrity\": false"));
+        assert!(seal.contains("\"artifact_mvp_final_seal_integrity_status\": \"blocked\""));
+        assert!(
+            seal.contains("\"status\":\"blocked\"") || seal.contains("\"status\": \"blocked\"")
+        );
+        assert!(seal.contains("\"non_passed_checks\":1"));
+    }
+
+    #[test]
     fn missing_goal_text_is_usage_error() {
         let root = temp_workspace("missing-text");
         let error = run_cli(["goal"], &root).expect_err("goal text required");
@@ -10091,6 +10255,35 @@ mod tests {
     }
 
     #[test]
+    fn acceptance_prod005_requires_latest_final_seal_evidence() {
+        let root = temp_workspace("acceptance-prod005-final-seal");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance audit without seal");
+        let production_without_seal = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production without seal");
+        assert!(production_without_seal.contains(
+            "\"id\":\"prod-005\",\"criterion\":\"final seal trustworthy\",\"status\":\"partial\""
+        ));
+
+        write_minimal_cargo_project(&root, "pub fn fixture() -> bool {\n    true\n}\n");
+        run_cli(["naruto", "create evidence-bound final seal"], &root).expect("naruto seal");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance audit with seal");
+        let production_with_seal = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production with seal");
+        assert!(production_with_seal.contains(
+            "\"id\":\"prod-005\",\"criterion\":\"final seal trustworthy\",\"status\":\"passed\""
+        ));
+        assert!(production_with_seal.contains("latest mission final-seal.json was read"));
+    }
+
+    #[test]
     fn cli_v3_plane_commands_write_named_artifacts() {
         let root = temp_workspace("cli-v3");
         fs::write(
@@ -10098,12 +10291,10 @@ mod tests {
             "Stable context fixture for cache warm-prefix reuse.\n",
         )
         .expect("write cache fixture");
-        fs::create_dir_all(root.join("src")).expect("create src");
-        fs::write(
-            root.join("src/lib.rs"),
-            "pub fn dynamic_worker_context() -> &'static str { \"dynamic\" }\n",
-        )
-        .expect("write dynamic cache fixture");
+        write_minimal_cargo_project(
+            &root,
+            "pub fn dynamic_worker_context() -> &'static str {\n    \"dynamic\"\n}\n",
+        );
         run_cli(["mcp", "add", "local-demo", "stdio://demo"], &root).expect("mcp add");
         run_cli(["mcp", "audit"], &root).expect("mcp audit");
         run_cli(["browser", "local browser smoke"], &root).expect("browser");
@@ -10123,8 +10314,8 @@ mod tests {
         run_cli(["provider", "adapter-check"], &root).expect("provider adapter-check");
         run_cli(["updater", "plan"], &root).expect("updater plan");
         run_cli(["prd", "coverage"], &root).expect("prd coverage");
-        run_cli(["acceptance", "audit"], &root).expect("acceptance audit");
         run_cli(["naruto", "dashboard worker lane fixture"], &root).expect("naruto lane fixture");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance audit");
         run_cli(["app"], &root).expect("app");
         run_cli(["scheduler", "run", "local QA"], &root).expect("scheduler run");
         run_cli(["worktree", "create", "worker one"], &root).expect("worktree create");
@@ -10490,6 +10681,32 @@ mod tests {
         assert!(layout.contains("\"stable_segment_count\": 2"));
         assert!(layout.contains("\"dynamic_segment_count\": 1"));
         assert!(layout.contains("\"live_provider_cache_metrics\": false"));
+    }
+
+    #[test]
+    fn cache_layout_gate_requires_voxel_triwiki_segment() {
+        let root = temp_workspace("cache-no-voxel-triwiki");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("README.md"), "Stable repository overview.\n").expect("readme");
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn worker_lane() -> &'static str { \"dynamic\" }\n",
+        )
+        .expect("source");
+
+        run_cli(["cache", "warm"], &root).expect("first cache warm");
+        run_cli(["cache", "warm"], &root).expect("second cache warm");
+
+        let layout = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("cache")
+                .join("cache-layout-improvement.json"),
+        )
+        .expect("layout");
+        assert!(layout.contains("\"baseline_available\": true"));
+        assert!(layout.contains("\"voxel_triwiki_segment_present\": false"));
+        assert!(layout.contains("\"layout_gate_passed\": false"));
+        assert!(layout.contains("voxel_triwiki_segment_missing_provider_unverified"));
     }
 
     #[test]
