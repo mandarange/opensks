@@ -7256,6 +7256,18 @@ fn beta_acceptance_items() -> Vec<AcceptanceItem> {
 }
 
 fn production_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
+    let prod_001_passed = prod001_cache_warm_prefix_gate_passed(cwd);
+    let (prod_001_status, prod_001_evidence) = if prod_001_passed {
+        (
+            "passed",
+            "cache-hit-report.json proves local_stable_prefix reuse met the >=95% warm-prefix target against a previous snapshot; provider cached-token telemetry remains explicitly unavailable/not connected.",
+        )
+    } else {
+        (
+            "partial",
+            "prod-001 requires cache warm to run at least twice so cache-hit-report.json has a baseline, local_hit_percent >= target_hit_percent, local_target_met=true, and provider metrics explicitly unavailable/not connected.",
+        )
+    };
     let prod_004_passed = prod004_secret_leak_release_history_gate_passed(cwd);
     let (prod_004_status, prod_004_evidence) = if prod_004_passed {
         (
@@ -7284,8 +7296,8 @@ fn production_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
         acceptance_item(
             "prod-001",
             "cache hit warm prefix >= 95%",
-            "partial",
-            "cache-hit-report.json measures local stable-prefix reuse against the previous warm snapshot; provider cache-hit percentage is not live.",
+            prod_001_status,
+            prod_001_evidence,
         ),
         acceptance_item(
             "prod-002",
@@ -7318,6 +7330,33 @@ fn production_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
             "updater plan writes local signature/channel/rollback artifacts; production crypto/notarized apply is not live.",
         ),
     ]
+}
+
+fn prod001_cache_warm_prefix_gate_passed(cwd: &Path) -> bool {
+    let Ok(cache_hit) = fs::read_to_string(
+        cwd.join(OPEN_SKSDIR)
+            .join("cache")
+            .join("cache-hit-report.json"),
+    ) else {
+        return false;
+    };
+    let Some(local_hit_percent) = extract_json_float_field(&cache_hit, "local_hit_percent") else {
+        return false;
+    };
+    let Some(target_hit_percent) = extract_json_float_field(&cache_hit, "target_hit_percent")
+    else {
+        return false;
+    };
+
+    cache_hit.contains("\"schema\": \"opensks.cache-hit-report.v1\"")
+        && json_string_field_equals(&cache_hit, "scope", "local_stable_prefix")
+        && json_bool_field_equals(&cache_hit, "baseline_available", true)
+        && json_bool_field_equals(&cache_hit, "local_target_met", true)
+        && json_bool_field_equals(&cache_hit, "provider_metrics_available", false)
+        && json_string_field_equals(&cache_hit, "provider_metrics_status", "not_connected")
+        && json_string_field_equals(&cache_hit, "status", "local_target_met_provider_unverified")
+        && target_hit_percent >= 95.0
+        && local_hit_percent >= target_hit_percent
 }
 
 fn prod004_secret_leak_release_history_gate_passed(cwd: &Path) -> bool {
@@ -7381,6 +7420,10 @@ fn json_number_field_equals(input: &str, key: &str, expected: usize) -> bool {
 
 fn json_number_field_positive(input: &str, key: &str) -> bool {
     extract_json_number_field(input, key).is_some_and(|value| value > 0)
+}
+
+fn extract_json_float_field(input: &str, key: &str) -> Option<f64> {
+    extract_json_raw_field(input, key)?.parse().ok()
 }
 
 fn latest_final_seal_artifact_integrity_passed(cwd: &Path) -> bool {
@@ -10541,6 +10584,106 @@ mod tests {
     }
 
     #[test]
+    fn prod001_requires_artifact_bound_cache_hit_gate() {
+        let root = temp_workspace("prod001-cache-hit");
+        fs::write(root.join("README.md"), "Stable cache prefix fixture.\n").expect("readme");
+
+        run_cli(["acceptance", "audit"], &root).expect("acceptance without cache");
+        let production_without_cache = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production without cache");
+        assert!(production_without_cache.contains(
+            "\"id\":\"prod-001\",\"criterion\":\"cache hit warm prefix >= 95%\",\"status\":\"partial\""
+        ));
+
+        run_cli(["cache", "warm"], &root).expect("first cache warm");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance after first warm");
+        let production_without_baseline = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production without baseline");
+        assert!(production_without_baseline.contains(
+            "\"id\":\"prod-001\",\"criterion\":\"cache hit warm prefix >= 95%\",\"status\":\"partial\""
+        ));
+
+        run_cli(["cache", "warm"], &root).expect("second cache warm");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance after second warm");
+        let production_with_cache = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production with cache");
+        assert!(production_with_cache.contains(
+            "\"id\":\"prod-001\",\"criterion\":\"cache hit warm prefix >= 95%\",\"status\":\"passed\""
+        ));
+        assert!(production_with_cache.contains("local_stable_prefix"));
+        assert!(
+            production_with_cache
+                .contains("provider cached-token telemetry remains explicitly unavailable")
+        );
+    }
+
+    #[test]
+    fn prod001_stays_partial_for_malformed_or_low_cache_hit_artifacts() {
+        let root = temp_workspace("prod001-malformed-cache");
+        let cache_dir = root.join(OPEN_SKSDIR).join("cache");
+        fs::create_dir_all(&cache_dir).expect("cache dir");
+        fs::write(cache_dir.join("cache-hit-report.json"), "{}\n").expect("malformed cache hit");
+
+        run_cli(["acceptance", "audit"], &root).expect("acceptance malformed");
+        let production_malformed = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production malformed");
+        assert!(production_malformed.contains(
+            "\"id\":\"prod-001\",\"criterion\":\"cache hit warm prefix >= 95%\",\"status\":\"partial\""
+        ));
+
+        fs::write(
+            cache_dir.join("cache-hit-report.json"),
+            concat!(
+                "{\n",
+                "  \"schema\": \"opensks.cache-hit-report.v1\",\n",
+                "  \"scope\": \"local_stable_prefix\",\n",
+                "  \"target_hit_percent\": 95.00,\n",
+                "  \"baseline_available\": true,\n",
+                "  \"local_target_met\": false,\n",
+                "  \"provider_metrics_available\": false,\n",
+                "  \"provider_metrics_status\": \"not_connected\",\n",
+                "  \"local_hit_percent\": 94.99,\n",
+                "  \"status\": \"local_target_missed_provider_unverified\"\n",
+                "}\n"
+            ),
+        )
+        .expect("low hit cache");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance low hit");
+        let production_low_hit = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production low hit");
+        assert!(production_low_hit.contains(
+            "\"id\":\"prod-001\",\"criterion\":\"cache hit warm prefix >= 95%\",\"status\":\"partial\""
+        ));
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings");
+        assert!(findings.contains("\"id\":\"prod-001\""));
+    }
+
+    #[test]
     fn cli_v3_plane_commands_write_named_artifacts() {
         let root = temp_workspace("cli-v3");
         fs::write(
@@ -10714,8 +10857,8 @@ mod tests {
         let acceptance = fs::read_to_string(open.join("acceptance/acceptance-summary.json"))
             .expect("acceptance");
         assert!(acceptance.contains("\"schema\": \"opensks.acceptance-summary.v1\""));
-        assert!(acceptance.contains("\"passed\":12"));
-        assert!(acceptance.contains("\"partial\":11"));
+        assert!(acceptance.contains("\"passed\":13"));
+        assert!(acceptance.contains("\"partial\":10"));
         assert!(acceptance.contains("\"goal_complete\": false"));
         let mvp = fs::read_to_string(open.join("acceptance/mvp-acceptance.json")).expect("mvp");
         assert!(mvp.contains("OpenRouter/OpenAI provider adapters work."));
@@ -10724,9 +10867,17 @@ mod tests {
         assert!(mvp.contains("\"status\":\"partial\""));
         let production = fs::read_to_string(open.join("acceptance/production-acceptance.json"))
             .expect("production");
-        assert!(production.contains("\"passed\":3"));
-        assert!(production.contains("\"partial\":3"));
+        assert!(production.contains("\"passed\":4"));
+        assert!(production.contains("\"partial\":2"));
         assert!(production.contains("\"all_passed\": false"));
+        assert!(production.contains("cache hit warm prefix >= 95%"));
+        assert!(production.contains(
+            "\"id\":\"prod-001\",\"criterion\":\"cache hit warm prefix >= 95%\",\"status\":\"passed\""
+        ));
+        assert!(production.contains("local_stable_prefix"));
+        assert!(
+            production.contains("provider cached-token telemetry remains explicitly unavailable")
+        );
         assert!(production.contains("requirement coverage >= 95%"));
         assert!(production.contains(
             "\"id\":\"prod-003\",\"criterion\":\"requirement coverage >= 95%\",\"status\":\"passed\""
@@ -10745,6 +10896,7 @@ mod tests {
         assert!(production.contains("live H-proof route gate"));
         let findings = fs::read_to_string(open.join("acceptance/acceptance-findings.jsonl"))
             .expect("findings");
+        assert!(!findings.contains("\"id\":\"prod-001\""));
         assert!(!findings.contains("\"id\":\"prod-005\""));
         assert!(!findings.contains("\"id\":\"prod-004\""));
         assert!(findings.contains("\"id\":\"prod-006\""));

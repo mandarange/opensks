@@ -80,9 +80,11 @@ explicit local release-history zero-leak denominator. Live external production
 telemetry remains false. `cache warm`
 hashes local cache segments and writes `cache-hit-report.json` plus
 `cache-layout-improvement.json`, comparing the current stable prefix with the
-previous warm snapshot. The cache-layout gate only passes for the Voxel TriWiki
-scope when `.opensks/triwiki/voxels.jsonl` is present in the stable prefix;
-provider cached-token counters are still marked not connected.
+previous warm snapshot. `prod-001` passes only for that local stable-prefix
+artifact evidence when the local warm-prefix hit is at least 95%; provider
+cached-token counters are still marked not connected. The cache-layout gate only
+passes for the Voxel TriWiki scope when `.opensks/triwiki/voxels.jsonl` is
+present in the stable prefix.
 `bench` records timed local runtime checks plus explicit multi-LLM roster,
 role-assignment, disagreement, quorum, and collaboration preflight artifacts
 with hidden fallback disabled. `auth` discovers configured provider environment variables without
