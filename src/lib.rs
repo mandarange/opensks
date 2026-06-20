@@ -7268,6 +7268,18 @@ fn production_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
             "prod-001 requires cache warm to run at least twice so cache-hit-report.json has a baseline, local_hit_percent >= target_hit_percent, local_target_met=true, and provider metrics explicitly unavailable/not connected.",
         )
     };
+    let prod_002_passed = prod002_stage_overlap_target_gate_passed(cwd);
+    let (prod_002_status, prod_002_evidence) = if prod_002_passed {
+        (
+            "passed",
+            "latest scheduler stage-overlap-report.json proves local concurrent stage execution met its configured overlap target with target_met=true, observed_parallel_execution=true, and overlap_ratio >= target_ratio; provider/production worker tuning remains outside this local artifact scope.",
+        )
+    } else {
+        (
+            "partial",
+            "prod-002 requires a latest scheduler stage-overlap-report.json with schema opensks.stage-overlap-report.v1, at least two parallelizable stages, observed_parallel_execution=true, overlap_observed=true, target_met=true, and overlap_ratio >= target_ratio.",
+        )
+    };
     let prod_004_passed = prod004_secret_leak_release_history_gate_passed(cwd);
     let (prod_004_status, prod_004_evidence) = if prod_004_passed {
         (
@@ -7302,8 +7314,8 @@ fn production_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
         acceptance_item(
             "prod-002",
             "stage overlap targets met",
-            "partial",
-            "scheduler stage-overlap-report.json records live concurrent stage spans and overlap metrics; production tuning targets are not fully met.",
+            prod_002_status,
+            prod_002_evidence,
         ),
         acceptance_item(
             "prod-003",
@@ -7357,6 +7369,74 @@ fn prod001_cache_warm_prefix_gate_passed(cwd: &Path) -> bool {
         && json_string_field_equals(&cache_hit, "status", "local_target_met_provider_unverified")
         && target_hit_percent >= 95.0
         && local_hit_percent >= target_hit_percent
+}
+
+fn prod002_stage_overlap_target_gate_passed(cwd: &Path) -> bool {
+    let Some(report) = latest_stage_overlap_report_text(cwd) else {
+        return false;
+    };
+    let Some(parallelizable_stage_count) =
+        extract_json_number_field(&report, "parallelizable_stage_count")
+    else {
+        return false;
+    };
+    let Some(overlap_ratio) = extract_json_float_field(&report, "overlap_ratio") else {
+        return false;
+    };
+    let Some(target_ratio) = extract_json_float_field(&report, "target_ratio") else {
+        return false;
+    };
+    let Some(total_stage_ms) = extract_json_number_field(&report, "total_stage_ms") else {
+        return false;
+    };
+    let Some(overlap_saved_ms) = extract_json_number_field(&report, "overlap_saved_ms") else {
+        return false;
+    };
+    let span_statuses = extract_stage_overlap_span_statuses(&report);
+
+    report.contains("\"schema\": \"opensks.stage-overlap-report.v1\"")
+        && parallelizable_stage_count >= 2
+        && span_statuses.len() == parallelizable_stage_count
+        && total_stage_ms > 0
+        && overlap_saved_ms > 0
+        && json_bool_field_equals(&report, "observed_parallel_execution", true)
+        && json_bool_field_equals(&report, "overlap_observed", true)
+        && json_bool_field_equals(&report, "target_met", true)
+        && span_statuses.iter().all(|status| status == "passed")
+        && target_ratio > 0.0
+        && overlap_ratio >= target_ratio
+}
+
+fn latest_stage_overlap_report_text(cwd: &Path) -> Option<String> {
+    let scheduler_dir = cwd.join(OPEN_SKSDIR).join("scheduler");
+    let mut reports = Vec::new();
+    for entry in fs::read_dir(&scheduler_dir).ok()? {
+        let path = entry.ok()?.path().join("stage-overlap-report.json");
+        if path.exists() {
+            reports.push(path);
+        }
+    }
+    reports.sort();
+    reports
+        .into_iter()
+        .rev()
+        .find_map(|path| fs::read_to_string(path).ok())
+}
+
+fn extract_stage_overlap_span_statuses(report: &str) -> Vec<String> {
+    let Some(spans) = extract_json_array_field(report, "spans") else {
+        return Vec::new();
+    };
+    let mut statuses = Vec::new();
+    let mut offset = 0usize;
+    while let Some(index) = spans[offset..].find("\"status\"") {
+        let status_offset = offset + index;
+        if let Some(status) = extract_json_string_field(&spans[status_offset..], "status") {
+            statuses.push(status);
+        }
+        offset = status_offset + "\"status\"".len();
+    }
+    statuses
 }
 
 fn prod004_secret_leak_release_history_gate_passed(cwd: &Path) -> bool {
@@ -10684,6 +10764,191 @@ mod tests {
     }
 
     #[test]
+    fn prod002_requires_artifact_bound_stage_overlap_gate() {
+        let root = temp_workspace("prod002-stage-overlap");
+
+        run_cli(["acceptance", "audit"], &root).expect("acceptance without scheduler");
+        let production_without_scheduler = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production without scheduler");
+        assert!(production_without_scheduler.contains(
+            "\"id\":\"prod-002\",\"criterion\":\"stage overlap targets met\",\"status\":\"partial\""
+        ));
+
+        let scheduler_dir = root.join(OPEN_SKSDIR).join("scheduler");
+        let missed_dir = scheduler_dir.join("scheduler-0001");
+        fs::create_dir_all(&missed_dir).expect("scheduler dir");
+        fs::write(
+            missed_dir.join("stage-overlap-report.json"),
+            concat!(
+                "{\n",
+                "  \"schema\": \"opensks.stage-overlap-report.v1\",\n",
+                "  \"parallelizable_stage_count\": 2,\n",
+                "  \"observed_parallel_execution\": true,\n",
+                "  \"overlap_observed\": true,\n",
+                "  \"target_ratio\": 0.10,\n",
+                "  \"overlap_ratio\": 0.09,\n",
+                "  \"total_stage_ms\": 100,\n",
+                "  \"overlap_saved_ms\": 9,\n",
+                "  \"target_met\": false,\n",
+                "  \"spans\": [{\"status\":\"passed\"},{\"status\":\"passed\"}]\n",
+                "}\n"
+            ),
+        )
+        .expect("missed overlap report");
+
+        run_cli(["acceptance", "audit"], &root).expect("acceptance missed target");
+        let production_missed_target = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production missed target");
+        assert!(production_missed_target.contains(
+            "\"id\":\"prod-002\",\"criterion\":\"stage overlap targets met\",\"status\":\"partial\""
+        ));
+
+        let no_spans_dir = scheduler_dir.join("scheduler-0002");
+        fs::create_dir_all(&no_spans_dir).expect("scheduler dir");
+        fs::write(
+            no_spans_dir.join("stage-overlap-report.json"),
+            concat!(
+                "{\n",
+                "  \"schema\": \"opensks.stage-overlap-report.v1\",\n",
+                "  \"parallelizable_stage_count\": 2,\n",
+                "  \"observed_parallel_execution\": true,\n",
+                "  \"overlap_observed\": true,\n",
+                "  \"target_ratio\": 0.10,\n",
+                "  \"overlap_ratio\": 0.42,\n",
+                "  \"total_stage_ms\": 100,\n",
+                "  \"overlap_saved_ms\": 42,\n",
+                "  \"target_met\": true,\n",
+                "  \"status\": \"passed\"\n",
+                "}\n"
+            ),
+        )
+        .expect("no spans overlap report");
+
+        run_cli(["acceptance", "audit"], &root).expect("acceptance no spans");
+        let production_no_spans = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production no spans");
+        assert!(production_no_spans.contains(
+            "\"id\":\"prod-002\",\"criterion\":\"stage overlap targets met\",\"status\":\"partial\""
+        ));
+
+        let whitespace_failed_dir = scheduler_dir.join("scheduler-0003");
+        fs::create_dir_all(&whitespace_failed_dir).expect("scheduler dir");
+        fs::write(
+            whitespace_failed_dir.join("stage-overlap-report.json"),
+            concat!(
+                "{\n",
+                "  \"schema\": \"opensks.stage-overlap-report.v1\",\n",
+                "  \"parallelizable_stage_count\": 2,\n",
+                "  \"observed_parallel_execution\": true,\n",
+                "  \"overlap_observed\": true,\n",
+                "  \"target_ratio\": 0.10,\n",
+                "  \"overlap_ratio\": 0.42,\n",
+                "  \"total_stage_ms\": 100,\n",
+                "  \"overlap_saved_ms\": 42,\n",
+                "  \"target_met\": true,\n",
+                "  \"spans\": [{\"status\" : \"failed\"},{\"status\":\"passed\"}]\n",
+                "}\n"
+            ),
+        )
+        .expect("whitespace failed span report");
+
+        run_cli(["acceptance", "audit"], &root).expect("acceptance failed span");
+        let production_failed_span = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production failed span");
+        assert!(production_failed_span.contains(
+            "\"id\":\"prod-002\",\"criterion\":\"stage overlap targets met\",\"status\":\"partial\""
+        ));
+
+        let single_span_dir = scheduler_dir.join("scheduler-0004");
+        fs::create_dir_all(&single_span_dir).expect("scheduler dir");
+        fs::write(
+            single_span_dir.join("stage-overlap-report.json"),
+            concat!(
+                "{\n",
+                "  \"schema\": \"opensks.stage-overlap-report.v1\",\n",
+                "  \"parallelizable_stage_count\": 2,\n",
+                "  \"observed_parallel_execution\": true,\n",
+                "  \"overlap_observed\": true,\n",
+                "  \"target_ratio\": 0.10,\n",
+                "  \"overlap_ratio\": 0.42,\n",
+                "  \"total_stage_ms\": 100,\n",
+                "  \"overlap_saved_ms\": 42,\n",
+                "  \"target_met\": true,\n",
+                "  \"spans\": [{\"status\":\"passed\"}]\n",
+                "}\n"
+            ),
+        )
+        .expect("single span report");
+
+        run_cli(["acceptance", "audit"], &root).expect("acceptance single span");
+        let production_single_span = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production single span");
+        assert!(production_single_span.contains(
+            "\"id\":\"prod-002\",\"criterion\":\"stage overlap targets met\",\"status\":\"partial\""
+        ));
+
+        let passed_dir = scheduler_dir.join("scheduler-0005");
+        fs::create_dir_all(&passed_dir).expect("scheduler dir");
+        fs::write(
+            passed_dir.join("stage-overlap-report.json"),
+            concat!(
+                "{\n",
+                "  \"schema\": \"opensks.stage-overlap-report.v1\",\n",
+                "  \"parallelizable_stage_count\": 2,\n",
+                "  \"observed_parallel_execution\": true,\n",
+                "  \"overlap_observed\": true,\n",
+                "  \"target_ratio\": 0.10,\n",
+                "  \"overlap_ratio\": 0.42,\n",
+                "  \"total_stage_ms\": 100,\n",
+                "  \"overlap_saved_ms\": 42,\n",
+                "  \"target_met\": true,\n",
+                "  \"spans\": [{\"status\":\"passed\"},{\"status\":\"passed\"}]\n",
+                "}\n"
+            ),
+        )
+        .expect("passed overlap report");
+
+        run_cli(["acceptance", "audit"], &root).expect("acceptance passed target");
+        let production_passed = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("production-acceptance.json"),
+        )
+        .expect("production passed target");
+        assert!(production_passed.contains(
+            "\"id\":\"prod-002\",\"criterion\":\"stage overlap targets met\",\"status\":\"passed\""
+        ));
+        assert!(production_passed.contains("overlap_ratio >= target_ratio"));
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings");
+        assert!(!findings.contains("\"id\":\"prod-002\""));
+    }
+
+    #[test]
     fn cli_v3_plane_commands_write_named_artifacts() {
         let root = temp_workspace("cli-v3");
         fs::write(
@@ -10715,9 +10980,9 @@ mod tests {
         run_cli(["updater", "plan"], &root).expect("updater plan");
         run_cli(["prd", "coverage"], &root).expect("prd coverage");
         run_cli(["naruto", "dashboard worker lane fixture"], &root).expect("naruto lane fixture");
+        run_cli(["scheduler", "run", "local QA"], &root).expect("scheduler run");
         run_cli(["acceptance", "audit"], &root).expect("acceptance audit");
         run_cli(["app"], &root).expect("app");
-        run_cli(["scheduler", "run", "local QA"], &root).expect("scheduler run");
         run_cli(["worktree", "create", "worker one"], &root).expect("worktree create");
         run_cli(["patch", "propose", "safe patch"], &root).expect("patch propose");
 
@@ -10857,8 +11122,8 @@ mod tests {
         let acceptance = fs::read_to_string(open.join("acceptance/acceptance-summary.json"))
             .expect("acceptance");
         assert!(acceptance.contains("\"schema\": \"opensks.acceptance-summary.v1\""));
-        assert!(acceptance.contains("\"passed\":13"));
-        assert!(acceptance.contains("\"partial\":10"));
+        assert!(acceptance.contains("\"passed\":14"));
+        assert!(acceptance.contains("\"partial\":9"));
         assert!(acceptance.contains("\"goal_complete\": false"));
         let mvp = fs::read_to_string(open.join("acceptance/mvp-acceptance.json")).expect("mvp");
         assert!(mvp.contains("OpenRouter/OpenAI provider adapters work."));
@@ -10867,8 +11132,8 @@ mod tests {
         assert!(mvp.contains("\"status\":\"partial\""));
         let production = fs::read_to_string(open.join("acceptance/production-acceptance.json"))
             .expect("production");
-        assert!(production.contains("\"passed\":4"));
-        assert!(production.contains("\"partial\":2"));
+        assert!(production.contains("\"passed\":5"));
+        assert!(production.contains("\"partial\":1"));
         assert!(production.contains("\"all_passed\": false"));
         assert!(production.contains("cache hit warm prefix >= 95%"));
         assert!(production.contains(
@@ -10878,6 +11143,12 @@ mod tests {
         assert!(
             production.contains("provider cached-token telemetry remains explicitly unavailable")
         );
+        assert!(production.contains("stage overlap targets met"));
+        assert!(production.contains(
+            "\"id\":\"prod-002\",\"criterion\":\"stage overlap targets met\",\"status\":\"passed\""
+        ));
+        assert!(production.contains("target_met=true"));
+        assert!(production.contains("overlap_ratio >= target_ratio"));
         assert!(production.contains("requirement coverage >= 95%"));
         assert!(production.contains(
             "\"id\":\"prod-003\",\"criterion\":\"requirement coverage >= 95%\",\"status\":\"passed\""
@@ -10897,6 +11168,7 @@ mod tests {
         let findings = fs::read_to_string(open.join("acceptance/acceptance-findings.jsonl"))
             .expect("findings");
         assert!(!findings.contains("\"id\":\"prod-001\""));
+        assert!(!findings.contains("\"id\":\"prod-002\""));
         assert!(!findings.contains("\"id\":\"prod-005\""));
         assert!(!findings.contains("\"id\":\"prod-004\""));
         assert!(findings.contains("\"id\":\"prod-006\""));

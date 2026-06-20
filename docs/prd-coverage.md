@@ -43,6 +43,14 @@ partial. Even when the scoped artifact contract passes, `live_route_completion`,
 live H-proof, provider-backed workers, repair waves, and final apply remain
 explicitly false.
 
+`prod-002: passed` is also scoped to local artifact evidence. `acceptance audit`
+binds it to `.opensks/scheduler/*/stage-overlap-report.json` and treats the
+local scheduler stage-overlap target as met only when `target_met=true`,
+`observed_parallel_execution=true`, `overlap_ratio>=target_ratio`, and every
+recorded stage span passed. This does not mean provider-backed or production
+worker overlap tuning is live; that tuning remains a non-goal for the current
+slice and a remaining production gap.
+
 Current live local slices:
 
 - `qa run` executes `cargo fmt --check`, `cargo test --no-run`, and `cargo clippy --all-targets --all-features -- -D warnings` when `Cargo.toml` exists.
@@ -65,7 +73,7 @@ Current live local slices:
 - `design qa` scans local design surfaces, records static accessibility/responsive/color-token findings, and writes `design-visual-diff-report.json` from deterministic source visual signatures between runs.
 - `mcp audit` writes a broker policy that denies raw model tool calls by default.
 - `mcp describe`, `mcp invoke`, and `mcp serve --once` provide a local MCP-style JSON-RPC surface for allowlisted OpenSKS tools.
-- `scheduler run` writes a bounded local scheduler plan, event stream, final state, and live `stage-overlap-report.json` from concurrent runtime metadata checks.
+- `scheduler run` writes a bounded local scheduler plan, event stream, final state, and local `stage-overlap-report.json` from concurrent runtime metadata checks, which is the artifact scope for the `prod-002` local scheduler overlap target.
 - `worktree create` creates an isolated snapshot under `.opensks/worktrees/.../workspace`.
 - `patch propose` writes a patch envelope plus gate result that blocks final apply until real checks pass.
 

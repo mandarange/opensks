@@ -126,8 +126,13 @@ platform, module, macOS integration, source-note, and product statement
 manifests that preserve PRD product posture without claiming live native GUI or
 updater completion.
 `scheduler run` writes the bounded stage plan, event stream, final state, and a
-live `stage-overlap-report.json` from concurrent local runtime metadata checks;
-production provider/worker overlap tuning is still reported as partial.
+local `stage-overlap-report.json` from concurrent runtime metadata checks.
+`prod-002` is scoped to that local scheduler overlap target: `acceptance audit`
+binds it to `.opensks/scheduler/*/stage-overlap-report.json` and can mark it
+passed only when `target_met=true`, `observed_parallel_execution=true`,
+`overlap_ratio>=target_ratio`, and every recorded stage span passed. This is
+not provider/production worker tuning; production worker overlap tuning remains
+partial and is still a gap.
 Non-goal computer/app capability commands still create the PRD-named
 audit/session artifacts with explicit non-live status where the full engine does
 not exist yet. `design qa` scans local design surfaces for static
