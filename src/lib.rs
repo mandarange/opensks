@@ -381,11 +381,18 @@ struct ProviderStatus {
 #[derive(Debug, Clone)]
 struct NativeCollaborationEvidence {
     available: bool,
+    native_agent_provenance_verified: bool,
     mission_id: String,
     agent_session_ref: String,
     agent_session_hash: String,
     agent_consensus_ref: String,
     agent_consensus_hash: String,
+    agent_proof_evidence_ref: String,
+    agent_proof_evidence_hash: String,
+    parallel_runtime_proof_ref: String,
+    parallel_runtime_proof_hash: String,
+    native_cli_session_proof_ref: String,
+    native_cli_session_proof_hash: String,
     session_count: usize,
     completed_session_count: usize,
     worker_lane_count: usize,
@@ -7808,11 +7815,18 @@ fn render_collaboration_provider_readiness(statuses: &[ProviderStatus]) -> Strin
 fn discover_native_collaboration_evidence(cwd: &Path) -> NativeCollaborationEvidence {
     let unavailable = |reason: &str| NativeCollaborationEvidence {
         available: false,
+        native_agent_provenance_verified: false,
         mission_id: String::new(),
         agent_session_ref: String::new(),
         agent_session_hash: String::new(),
         agent_consensus_ref: String::new(),
         agent_consensus_hash: String::new(),
+        agent_proof_evidence_ref: String::new(),
+        agent_proof_evidence_hash: String::new(),
+        parallel_runtime_proof_ref: String::new(),
+        parallel_runtime_proof_hash: String::new(),
+        native_cli_session_proof_ref: String::new(),
+        native_cli_session_proof_hash: String::new(),
         session_count: 0,
         completed_session_count: 0,
         worker_lane_count: 0,
@@ -7845,6 +7859,9 @@ fn discover_native_collaboration_evidence(cwd: &Path) -> NativeCollaborationEvid
         let agents_dir = mission_dir.join("agents");
         let sessions_path = agents_dir.join("agent-sessions.json");
         let consensus_path = agents_dir.join("agent-consensus.json");
+        let agent_proof_path = agents_dir.join("agent-proof-evidence.json");
+        let parallel_runtime_path = agents_dir.join("parallel-runtime-proof.json");
+        let native_cli_proof_path = agents_dir.join("native-cli-session-proof.json");
         let Ok(sessions) = fs::read_to_string(&sessions_path) else {
             continue;
         };
@@ -7866,6 +7883,64 @@ fn discover_native_collaboration_evidence(cwd: &Path) -> NativeCollaborationEvid
             continue;
         }
 
+        let agent_session_ref =
+            format!(".sneakoscope/missions/{mission_id}/agents/agent-sessions.json");
+        let agent_session_hash = stable_content_hash(&sessions);
+        let agent_consensus_ref =
+            format!(".sneakoscope/missions/{mission_id}/agents/agent-consensus.json");
+        let agent_consensus_hash = stable_content_hash(&consensus);
+        let agent_proof_evidence_ref =
+            format!(".sneakoscope/missions/{mission_id}/agents/agent-proof-evidence.json");
+        let parallel_runtime_proof_ref =
+            format!(".sneakoscope/missions/{mission_id}/agents/parallel-runtime-proof.json");
+        let native_cli_session_proof_ref =
+            format!(".sneakoscope/missions/{mission_id}/agents/native-cli-session-proof.json");
+
+        let (
+            native_agent_provenance_verified,
+            agent_proof_evidence_hash,
+            parallel_runtime_proof_hash,
+            native_cli_session_proof_hash,
+        ) = if let (Ok(agent_proof), Ok(parallel_runtime), Ok(native_cli_proof)) = (
+            fs::read_to_string(&agent_proof_path),
+            fs::read_to_string(&parallel_runtime_path),
+            fs::read_to_string(&native_cli_proof_path),
+        ) {
+            let agent_proof_evidence_hash = stable_content_hash(&agent_proof);
+            let parallel_runtime_proof_hash = stable_content_hash(&parallel_runtime);
+            let native_cli_session_proof_hash = stable_content_hash(&native_cli_proof);
+            let proof_expectations = NativeProvenanceProofExpectations {
+                mission_id: &mission_id,
+                agent_session_ref: &agent_session_ref,
+                agent_session_hash: &agent_session_hash,
+                agent_consensus_ref: &agent_consensus_ref,
+                agent_consensus_hash: &agent_consensus_hash,
+                agent_proof_evidence_ref: &agent_proof_evidence_ref,
+                agent_proof_evidence_hash: &agent_proof_evidence_hash,
+                parallel_runtime_proof_ref: &parallel_runtime_proof_ref,
+                parallel_runtime_proof_hash: &parallel_runtime_proof_hash,
+                native_cli_session_proof_ref: &native_cli_session_proof_ref,
+                session_count,
+                completed_session_count,
+                worker_lane_count: worker_count,
+                reviewer_lane_count: reviewer_count,
+                mapper_lane_count: mapper_count,
+            };
+            (
+                native_agent_provenance_valid(
+                    &agent_proof,
+                    &parallel_runtime,
+                    &native_cli_proof,
+                    proof_expectations,
+                ),
+                agent_proof_evidence_hash,
+                parallel_runtime_proof_hash,
+                native_cli_session_proof_hash,
+            )
+        } else {
+            (false, String::new(), String::new(), String::new())
+        };
+
         let role_lane_count = [worker_count, reviewer_count, mapper_count]
             .into_iter()
             .filter(|count| *count > 0)
@@ -7876,15 +7951,30 @@ fn discover_native_collaboration_evidence(cwd: &Path) -> NativeCollaborationEvid
 
         return NativeCollaborationEvidence {
             available: true,
+            native_agent_provenance_verified,
             mission_id: mission_id.clone(),
-            agent_session_ref: format!(
-                ".sneakoscope/missions/{mission_id}/agents/agent-sessions.json"
-            ),
-            agent_session_hash: stable_content_hash(&sessions),
-            agent_consensus_ref: format!(
-                ".sneakoscope/missions/{mission_id}/agents/agent-consensus.json"
-            ),
-            agent_consensus_hash: stable_content_hash(&consensus),
+            agent_session_ref,
+            agent_session_hash,
+            agent_consensus_ref,
+            agent_consensus_hash,
+            agent_proof_evidence_ref: if agent_proof_evidence_hash.is_empty() {
+                String::new()
+            } else {
+                agent_proof_evidence_ref
+            },
+            agent_proof_evidence_hash,
+            parallel_runtime_proof_ref: if parallel_runtime_proof_hash.is_empty() {
+                String::new()
+            } else {
+                parallel_runtime_proof_ref
+            },
+            parallel_runtime_proof_hash,
+            native_cli_session_proof_ref: if native_cli_session_proof_hash.is_empty() {
+                String::new()
+            } else {
+                native_cli_session_proof_ref
+            },
+            native_cli_session_proof_hash,
             session_count,
             completed_session_count,
             worker_lane_count: worker_count,
@@ -7897,6 +7987,25 @@ fn discover_native_collaboration_evidence(cwd: &Path) -> NativeCollaborationEvid
     }
 
     unavailable("no valid native agent session plus consensus evidence found")
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeProvenanceProofExpectations<'a> {
+    mission_id: &'a str,
+    agent_session_ref: &'a str,
+    agent_session_hash: &'a str,
+    agent_consensus_ref: &'a str,
+    agent_consensus_hash: &'a str,
+    agent_proof_evidence_ref: &'a str,
+    agent_proof_evidence_hash: &'a str,
+    parallel_runtime_proof_ref: &'a str,
+    parallel_runtime_proof_hash: &'a str,
+    native_cli_session_proof_ref: &'a str,
+    session_count: usize,
+    completed_session_count: usize,
+    worker_lane_count: usize,
+    reviewer_lane_count: usize,
+    mapper_lane_count: usize,
 }
 
 fn native_agent_sessions_summary(
@@ -7952,6 +8061,227 @@ fn native_agent_consensus_valid(consensus: &str, mission_id: &str) -> bool {
             .is_some_and(|value| !value.trim().is_empty())
 }
 
+fn native_agent_provenance_valid(
+    agent_proof: &str,
+    parallel_runtime: &str,
+    native_cli_proof: &str,
+    expected: NativeProvenanceProofExpectations<'_>,
+) -> bool {
+    native_agent_proof_evidence_valid(agent_proof, expected)
+        && native_parallel_runtime_proof_valid(parallel_runtime, expected)
+        && native_cli_session_proof_valid(native_cli_proof, expected)
+}
+
+fn native_agent_proof_evidence_valid(
+    proof: &str,
+    expected: NativeProvenanceProofExpectations<'_>,
+) -> bool {
+    let Some(backend) = extract_json_top_level_string_field(proof, "backend") else {
+        return false;
+    };
+    let backend = backend.trim().to_ascii_lowercase();
+
+    json_top_level_string_field_equals(proof, "schema", "sks.agent-proof-evidence.v1")
+        && json_top_level_string_field_equals(proof, "mission_id", expected.mission_id)
+        && json_top_level_bool_field_equals(proof, "ok", true)
+        && json_top_level_string_field_equals(proof, "status", "passed")
+        && !backend.is_empty()
+        && !backend.contains("fake")
+        && !backend.contains("mock")
+        && json_top_level_field_absent(proof, "fake_backend_disclaimer")
+        && json_top_level_string_field_equals(proof, "route_blackbox_kind", "actual_agent_command")
+        && json_top_level_bool_field_equals(proof, "real_route_command_used", true)
+        && json_top_level_bool_field_equals(proof, "real_parallel_claim", true)
+        && json_top_level_string_field_equals(
+            proof,
+            "native_cli_session_proof",
+            "native-cli-session-proof.json",
+        )
+        && json_top_level_string_field_equals(
+            proof,
+            "agent_session_ref",
+            expected.agent_session_ref,
+        )
+        && json_top_level_string_field_equals(
+            proof,
+            "agent_session_hash",
+            expected.agent_session_hash,
+        )
+        && json_top_level_string_field_equals(
+            proof,
+            "agent_consensus_ref",
+            expected.agent_consensus_ref,
+        )
+        && json_top_level_string_field_equals(
+            proof,
+            "agent_consensus_hash",
+            expected.agent_consensus_hash,
+        )
+        && json_top_level_string_field_equals(
+            proof,
+            "parallel_runtime_proof_ref",
+            expected.parallel_runtime_proof_ref,
+        )
+        && json_top_level_string_field_equals(
+            proof,
+            "parallel_runtime_proof_hash",
+            expected.parallel_runtime_proof_hash,
+        )
+        && json_top_level_string_field_equals(
+            proof,
+            "native_cli_session_proof_ref",
+            expected.native_cli_session_proof_ref,
+        )
+        && json_top_level_min_number_field(
+            proof,
+            "native_cli_worker_process_count",
+            expected.session_count,
+        )
+        && json_top_level_min_number_field(
+            proof,
+            "native_cli_max_observed_worker_process_count",
+            expected.session_count,
+        )
+        && json_top_level_min_number_field(
+            proof,
+            "native_cli_unique_worker_session_count",
+            expected.session_count,
+        )
+        && json_top_level_bool_field_equals(proof, "all_sessions_closed", true)
+        && json_top_level_bool_field_equals(proof, "terminal_sessions_closed", true)
+        && json_top_level_bool_field_equals(proof, "ledger_hash_chain_ok", true)
+        && json_top_level_bool_field_equals(proof, "consensus_ok", true)
+        && json_top_level_empty_array_field_equals(proof, "blockers")
+}
+
+fn native_parallel_runtime_proof_valid(
+    proof: &str,
+    expected: NativeProvenanceProofExpectations<'_>,
+) -> bool {
+    let Some(proof_mode) = extract_json_top_level_string_field(proof, "proof_mode") else {
+        return false;
+    };
+    let proof_mode = proof_mode.trim().to_ascii_lowercase();
+
+    json_top_level_string_field_equals(proof, "schema", "sks.parallel-runtime-proof.v1")
+        && json_top_level_string_field_equals(proof, "mission_id", expected.mission_id)
+        && json_top_level_bool_field_equals(proof, "passed", true)
+        && !proof_mode.contains("fake")
+        && !proof_mode.contains("mock")
+        && json_top_level_bool_field_equals(proof, "require_worker_pids", true)
+        && json_top_level_min_number_field(proof, "requested_workers", expected.session_count)
+        && json_top_level_min_number_field(
+            proof,
+            "max_observed_worker_processes",
+            expected.session_count,
+        )
+        && json_top_level_min_number_field(proof, "unique_worker_pids", expected.session_count)
+        && json_top_level_min_number_field(proof, "unique_model_call_ids", 1)
+        && json_top_level_min_number_field(proof, "max_observed_model_calls", 1)
+        && extract_json_top_level_raw_field(proof, "utilization_proof_consistency")
+            .is_some_and(|raw| json_top_level_bool_field_equals(&raw, "ok", true))
+        && json_top_level_empty_array_field_equals(proof, "blockers")
+}
+
+fn native_cli_session_proof_valid(
+    proof: &str,
+    expected: NativeProvenanceProofExpectations<'_>,
+) -> bool {
+    let Some(backend) = extract_json_top_level_string_field(proof, "backend") else {
+        return false;
+    };
+    let Some(proof_mode) = extract_json_top_level_string_field(proof, "proof_mode") else {
+        return false;
+    };
+    let backend = backend.trim().to_ascii_lowercase();
+    let proof_mode = proof_mode.trim().to_ascii_lowercase();
+    let role_lane_count = [
+        expected.worker_lane_count,
+        expected.reviewer_lane_count,
+        expected.mapper_lane_count,
+    ]
+    .into_iter()
+    .filter(|count| *count > 0)
+    .count();
+
+    json_top_level_string_field_equals(proof, "schema", "sks.native-cli-session-proof.v1")
+        && json_top_level_string_field_equals(proof, "mission_id", expected.mission_id)
+        && !backend.is_empty()
+        && !backend.contains("fake")
+        && !backend.contains("mock")
+        && json_top_level_field_absent(proof, "fake_backend_disclaimer")
+        && !proof_mode.contains("fake")
+        && !proof_mode.contains("mock")
+        && json_top_level_bool_field_equals(proof, "ok", true)
+        && json_top_level_bool_field_equals(proof, "real_parallel_claim", true)
+        && json_top_level_bool_field_equals(proof, "native_cli_session_proof", true)
+        && json_top_level_string_field_equals(
+            proof,
+            "agent_session_ref",
+            expected.agent_session_ref,
+        )
+        && json_top_level_string_field_equals(
+            proof,
+            "agent_session_hash",
+            expected.agent_session_hash,
+        )
+        && json_top_level_string_field_equals(
+            proof,
+            "agent_consensus_ref",
+            expected.agent_consensus_ref,
+        )
+        && json_top_level_string_field_equals(
+            proof,
+            "agent_consensus_hash",
+            expected.agent_consensus_hash,
+        )
+        && json_top_level_string_field_equals(
+            proof,
+            "agent_proof_evidence_ref",
+            expected.agent_proof_evidence_ref,
+        )
+        && json_top_level_string_field_equals(
+            proof,
+            "agent_proof_evidence_hash",
+            expected.agent_proof_evidence_hash,
+        )
+        && json_top_level_string_field_equals(
+            proof,
+            "parallel_runtime_proof_ref",
+            expected.parallel_runtime_proof_ref,
+        )
+        && json_top_level_string_field_equals(
+            proof,
+            "parallel_runtime_proof_hash",
+            expected.parallel_runtime_proof_hash,
+        )
+        && json_top_level_number_field_equals(proof, "native_worker_count", expected.session_count)
+        && json_top_level_number_field_equals(
+            proof,
+            "completed_native_worker_count",
+            expected.completed_session_count,
+        )
+        && json_top_level_number_field_equals(
+            proof,
+            "worker_lane_count",
+            expected.worker_lane_count,
+        )
+        && json_top_level_number_field_equals(
+            proof,
+            "reviewer_lane_count",
+            expected.reviewer_lane_count,
+        )
+        && json_top_level_number_field_equals(
+            proof,
+            "mapper_lane_count",
+            expected.mapper_lane_count,
+        )
+        && json_top_level_empty_array_field_equals(proof, "blockers")
+        && expected.session_count >= 2
+        && expected.completed_session_count >= 2
+        && role_lane_count >= 2
+}
+
 fn render_native_collaboration_execution(
     stamp: &ClockStamp,
     evidence: &NativeCollaborationEvidence,
@@ -7964,7 +8294,7 @@ fn render_native_collaboration_execution(
             "  \"scope\": \"native_multi_session_llm_collaboration\",\n",
             "  \"status\": {},\n",
             "  \"native_multi_session_llm_collaboration\": {},\n",
-            "  \"native_agent_provenance_verified\": false,\n",
+            "  \"native_agent_provenance_verified\": {},\n",
             "  \"native_session_count\": {},\n",
             "  \"completed_session_count\": {},\n",
             "  \"worker_lane_count\": {},\n",
@@ -7976,6 +8306,12 @@ fn render_native_collaboration_execution(
             "  \"agent_session_hash\": {},\n",
             "  \"agent_consensus_ref\": {},\n",
             "  \"agent_consensus_hash\": {},\n",
+            "  \"agent_proof_evidence_ref\": {},\n",
+            "  \"agent_proof_evidence_hash\": {},\n",
+            "  \"parallel_runtime_proof_ref\": {},\n",
+            "  \"parallel_runtime_proof_hash\": {},\n",
+            "  \"native_cli_session_proof_ref\": {},\n",
+            "  \"native_cli_session_proof_hash\": {},\n",
             "  \"no_hidden_fallback\": true,\n",
             "  \"live_multi_provider_worker_collaboration\": false,\n",
             "  \"live_remote_provider_api_calls\": false,\n",
@@ -7988,6 +8324,7 @@ fn render_native_collaboration_execution(
         stamp.json(),
         json_string(&evidence.status),
         evidence.available,
+        evidence.native_agent_provenance_verified,
         evidence.session_count,
         evidence.completed_session_count,
         evidence.worker_lane_count,
@@ -8018,6 +8355,36 @@ fn render_native_collaboration_execution(
             "null".to_string()
         } else {
             json_string(&evidence.agent_consensus_hash)
+        },
+        if evidence.agent_proof_evidence_ref.is_empty() {
+            "null".to_string()
+        } else {
+            json_string(&evidence.agent_proof_evidence_ref)
+        },
+        if evidence.agent_proof_evidence_hash.is_empty() {
+            "null".to_string()
+        } else {
+            json_string(&evidence.agent_proof_evidence_hash)
+        },
+        if evidence.parallel_runtime_proof_ref.is_empty() {
+            "null".to_string()
+        } else {
+            json_string(&evidence.parallel_runtime_proof_ref)
+        },
+        if evidence.parallel_runtime_proof_hash.is_empty() {
+            "null".to_string()
+        } else {
+            json_string(&evidence.parallel_runtime_proof_hash)
+        },
+        if evidence.native_cli_session_proof_ref.is_empty() {
+            "null".to_string()
+        } else {
+            json_string(&evidence.native_cli_session_proof_ref)
+        },
+        if evidence.native_cli_session_proof_hash.is_empty() {
+            "null".to_string()
+        } else {
+            json_string(&evidence.native_cli_session_proof_hash)
         },
         json_string(&evidence.reason)
     )
@@ -10300,6 +10667,36 @@ fn beta006_native_collaboration_gate_passed(cwd: &Path) -> bool {
     else {
         return false;
     };
+    let Some(agent_proof_evidence_ref) =
+        extract_json_top_level_string_field(&execution, "agent_proof_evidence_ref")
+    else {
+        return false;
+    };
+    let Some(agent_proof_evidence_hash) =
+        extract_json_top_level_string_field(&execution, "agent_proof_evidence_hash")
+    else {
+        return false;
+    };
+    let Some(parallel_runtime_proof_ref) =
+        extract_json_top_level_string_field(&execution, "parallel_runtime_proof_ref")
+    else {
+        return false;
+    };
+    let Some(parallel_runtime_proof_hash) =
+        extract_json_top_level_string_field(&execution, "parallel_runtime_proof_hash")
+    else {
+        return false;
+    };
+    let Some(native_cli_session_proof_ref) =
+        extract_json_top_level_string_field(&execution, "native_cli_session_proof_ref")
+    else {
+        return false;
+    };
+    let Some(native_cli_session_proof_hash) =
+        extract_json_top_level_string_field(&execution, "native_cli_session_proof_hash")
+    else {
+        return false;
+    };
     let Some(native_session_count) =
         extract_json_top_level_number_field(&execution, "native_session_count")
     else {
@@ -10340,6 +10737,27 @@ fn beta006_native_collaboration_gate_passed(cwd: &Path) -> bool {
     else {
         return false;
     };
+    let Some(agent_proof_evidence) = read_native_collaboration_source(
+        cwd,
+        &agent_proof_evidence_ref,
+        &agent_proof_evidence_hash,
+    ) else {
+        return false;
+    };
+    let Some(parallel_runtime_proof) = read_native_collaboration_source(
+        cwd,
+        &parallel_runtime_proof_ref,
+        &parallel_runtime_proof_hash,
+    ) else {
+        return false;
+    };
+    let Some(native_cli_session_proof) = read_native_collaboration_source(
+        cwd,
+        &native_cli_session_proof_ref,
+        &native_cli_session_proof_hash,
+    ) else {
+        return false;
+    };
     let Some((
         source_session_count,
         source_completed_count,
@@ -10352,6 +10770,30 @@ fn beta006_native_collaboration_gate_passed(cwd: &Path) -> bool {
         return false;
     };
     if !native_agent_consensus_valid(&agent_consensus, &source_mission_id) {
+        return false;
+    }
+    if !native_agent_provenance_valid(
+        &agent_proof_evidence,
+        &parallel_runtime_proof,
+        &native_cli_session_proof,
+        NativeProvenanceProofExpectations {
+            mission_id: &source_mission_id,
+            agent_session_ref: &agent_session_ref,
+            agent_session_hash: &agent_session_hash,
+            agent_consensus_ref: &agent_consensus_ref,
+            agent_consensus_hash: &agent_consensus_hash,
+            agent_proof_evidence_ref: &agent_proof_evidence_ref,
+            agent_proof_evidence_hash: &agent_proof_evidence_hash,
+            parallel_runtime_proof_ref: &parallel_runtime_proof_ref,
+            parallel_runtime_proof_hash: &parallel_runtime_proof_hash,
+            native_cli_session_proof_ref: &native_cli_session_proof_ref,
+            session_count: source_session_count,
+            completed_session_count: source_completed_count,
+            worker_lane_count: source_worker_count,
+            reviewer_lane_count: source_reviewer_count,
+            mapper_lane_count: source_mapper_count,
+        },
+    ) {
         return false;
     }
 
@@ -10945,12 +11387,20 @@ fn json_top_level_number_field_equals(input: &str, key: &str, expected: usize) -
     extract_json_top_level_number_field(input, key) == Some(expected)
 }
 
+fn json_top_level_min_number_field(input: &str, key: &str, minimum: usize) -> bool {
+    extract_json_top_level_number_field(input, key).is_some_and(|value| value >= minimum)
+}
+
 fn json_top_level_null_field_equals(input: &str, key: &str) -> bool {
     extract_json_top_level_raw_field(input, key).as_deref() == Some("null")
 }
 
 fn json_top_level_field_absent(input: &str, key: &str) -> bool {
     extract_json_top_level_raw_fields(input, key).is_empty()
+}
+
+fn json_top_level_empty_array_field_equals(input: &str, key: &str) -> bool {
+    extract_json_top_level_raw_field(input, key).is_some_and(|raw| raw.trim() == "[]")
 }
 
 fn json_top_level_string_array_contains(input: &str, key: &str, expected: &[&str]) -> bool {
@@ -14119,6 +14569,135 @@ mod tests {
         .expect("write agent consensus");
     }
 
+    fn write_native_cli_session_proof_fixture(root: &Path, mission_id: &str, proof: Option<&str>) {
+        let agents_dir = root
+            .join(".sneakoscope")
+            .join("missions")
+            .join(mission_id)
+            .join("agents");
+        let sessions_path = agents_dir.join("agent-sessions.json");
+        let consensus_path = agents_dir.join("agent-consensus.json");
+        let sessions = fs::read_to_string(&sessions_path).expect("agent sessions");
+        let consensus = fs::read_to_string(&consensus_path).expect("agent consensus");
+        let agent_session_ref =
+            format!(".sneakoscope/missions/{mission_id}/agents/agent-sessions.json");
+        let agent_consensus_ref =
+            format!(".sneakoscope/missions/{mission_id}/agents/agent-consensus.json");
+        let agent_proof_evidence_ref =
+            format!(".sneakoscope/missions/{mission_id}/agents/agent-proof-evidence.json");
+        let parallel_runtime_proof_ref =
+            format!(".sneakoscope/missions/{mission_id}/agents/parallel-runtime-proof.json");
+        let native_cli_session_proof_ref =
+            format!(".sneakoscope/missions/{mission_id}/agents/native-cli-session-proof.json");
+        let parallel_runtime_proof = format!(
+            concat!(
+                "{{\n",
+                "  \"schema\": \"sks.parallel-runtime-proof.v1\",\n",
+                "  \"mission_id\": {},\n",
+                "  \"proof_mode\": \"native-cli-session\",\n",
+                "  \"require_worker_pids\": true,\n",
+                "  \"requested_workers\": 3,\n",
+                "  \"max_observed_worker_processes\": 3,\n",
+                "  \"unique_worker_pids\": 3,\n",
+                "  \"unique_model_call_ids\": 3,\n",
+                "  \"max_observed_model_calls\": 3,\n",
+                "  \"utilization_proof_consistency\": {{\"ok\": true}},\n",
+                "  \"passed\": true,\n",
+                "  \"blockers\": []\n",
+                "}}\n"
+            ),
+            json_string(mission_id),
+        );
+        fs::write(
+            agents_dir.join("parallel-runtime-proof.json"),
+            &parallel_runtime_proof,
+        )
+        .expect("write parallel runtime proof");
+        let parallel_runtime_proof_hash = stable_content_hash(&parallel_runtime_proof);
+        let agent_proof = format!(
+            concat!(
+                "{{\n",
+                "  \"schema\": \"sks.agent-proof-evidence.v1\",\n",
+                "  \"mission_id\": {},\n",
+                "  \"ok\": true,\n",
+                "  \"status\": \"passed\",\n",
+                "  \"backend\": \"native-codex-cli\",\n",
+                "  \"route_blackbox_kind\": \"actual_agent_command\",\n",
+                "  \"real_route_command_used\": true,\n",
+                "  \"real_parallel_claim\": true,\n",
+                "  \"native_cli_session_proof\": \"native-cli-session-proof.json\",\n",
+                "  \"agent_session_ref\": {},\n",
+                "  \"agent_session_hash\": {},\n",
+                "  \"agent_consensus_ref\": {},\n",
+                "  \"agent_consensus_hash\": {},\n",
+                "  \"parallel_runtime_proof_ref\": {},\n",
+                "  \"parallel_runtime_proof_hash\": {},\n",
+                "  \"native_cli_session_proof_ref\": {},\n",
+                "  \"native_cli_worker_process_count\": 3,\n",
+                "  \"native_cli_max_observed_worker_process_count\": 3,\n",
+                "  \"native_cli_unique_worker_session_count\": 3,\n",
+                "  \"all_sessions_closed\": true,\n",
+                "  \"terminal_sessions_closed\": true,\n",
+                "  \"ledger_hash_chain_ok\": true,\n",
+                "  \"consensus_ok\": true,\n",
+                "  \"blockers\": []\n",
+                "}}\n"
+            ),
+            json_string(mission_id),
+            json_string(&agent_session_ref),
+            json_string(&stable_content_hash(&sessions)),
+            json_string(&agent_consensus_ref),
+            json_string(&stable_content_hash(&consensus)),
+            json_string(&parallel_runtime_proof_ref),
+            json_string(&parallel_runtime_proof_hash),
+            json_string(&native_cli_session_proof_ref),
+        );
+        fs::write(agents_dir.join("agent-proof-evidence.json"), &agent_proof)
+            .expect("write agent proof evidence");
+        let agent_proof_evidence_hash = stable_content_hash(&agent_proof);
+        let default_proof = format!(
+            concat!(
+                "{{\n",
+                "  \"schema\": \"sks.native-cli-session-proof.v1\",\n",
+                "  \"mission_id\": {},\n",
+                "  \"ok\": true,\n",
+                "  \"backend\": \"native-codex-cli\",\n",
+                "  \"proof_mode\": \"native-cli-session\",\n",
+                "  \"real_parallel_claim\": true,\n",
+                "  \"native_cli_session_proof\": true,\n",
+                "  \"agent_session_ref\": {},\n",
+                "  \"agent_session_hash\": {},\n",
+                "  \"agent_consensus_ref\": {},\n",
+                "  \"agent_consensus_hash\": {},\n",
+                "  \"agent_proof_evidence_ref\": {},\n",
+                "  \"agent_proof_evidence_hash\": {},\n",
+                "  \"parallel_runtime_proof_ref\": {},\n",
+                "  \"parallel_runtime_proof_hash\": {},\n",
+                "  \"native_worker_count\": 3,\n",
+                "  \"completed_native_worker_count\": 3,\n",
+                "  \"worker_lane_count\": 1,\n",
+                "  \"reviewer_lane_count\": 1,\n",
+                "  \"mapper_lane_count\": 1,\n",
+                "  \"blockers\": []\n",
+                "}}\n"
+            ),
+            json_string(mission_id),
+            json_string(&agent_session_ref),
+            json_string(&stable_content_hash(&sessions)),
+            json_string(&agent_consensus_ref),
+            json_string(&stable_content_hash(&consensus)),
+            json_string(&agent_proof_evidence_ref),
+            json_string(&agent_proof_evidence_hash),
+            json_string(&parallel_runtime_proof_ref),
+            json_string(&parallel_runtime_proof_hash),
+        );
+        fs::write(
+            agents_dir.join("native-cli-session-proof.json"),
+            proof.unwrap_or(&default_proof),
+        )
+        .expect("write native cli proof");
+    }
+
     fn first_mission_dir(root: &Path) -> PathBuf {
         let missions_dir = root.join(OPEN_SKSDIR).join("missions");
         fs::read_dir(&missions_dir)
@@ -16091,6 +16670,194 @@ mod tests {
         assert!(execution.contains("\"native_multi_session_llm_collaboration\": true"));
         assert!(execution.contains("\"native_agent_provenance_verified\": false"));
         assert!(execution.contains("\"live_multi_provider_worker_collaboration\": false"));
+    }
+
+    #[test]
+    fn beta006_passes_with_non_fake_native_cli_session_proof() {
+        let root = temp_workspace("beta006-native-proof-pass");
+        let mission_id = "M-20990101-000002-beta006";
+        write_native_collaboration_fixture(&root, mission_id);
+        write_native_cli_session_proof_fixture(&root, mission_id, None);
+
+        run_cli(["bench"], &root).expect("bench with native proof");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance with native proof");
+        assert_beta006_status(&root, "passed");
+
+        let execution = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("bench")
+                .join("native-collaboration-execution.json"),
+        )
+        .expect("native collaboration execution");
+        assert!(execution.contains("\"native_agent_provenance_verified\": true"));
+        assert!(execution.contains("\"native_cli_session_proof_ref\": \".sneakoscope/missions/"));
+    }
+
+    #[test]
+    fn beta006_rejects_fake_mock_missing_low_count_and_mismatched_native_proofs() {
+        let root = temp_workspace("beta006-native-proof-tamper");
+        let mission_id = "M-20990101-000003-beta006";
+        write_native_collaboration_fixture(&root, mission_id);
+        write_native_cli_session_proof_fixture(&root, mission_id, None);
+        let proof_path = root
+            .join(".sneakoscope")
+            .join("missions")
+            .join(mission_id)
+            .join("agents")
+            .join("native-cli-session-proof.json");
+        let agent_proof_path = root
+            .join(".sneakoscope")
+            .join("missions")
+            .join(mission_id)
+            .join("agents")
+            .join("agent-proof-evidence.json");
+        let parallel_runtime_path = root
+            .join(".sneakoscope")
+            .join("missions")
+            .join(mission_id)
+            .join("agents")
+            .join("parallel-runtime-proof.json");
+        let original_proof = fs::read_to_string(&proof_path).expect("proof");
+        let original_agent_proof = fs::read_to_string(&agent_proof_path).expect("agent proof");
+        let original_parallel_runtime =
+            fs::read_to_string(&parallel_runtime_path).expect("parallel proof");
+
+        run_cli(["bench"], &root).expect("bench with valid proof");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance with valid proof");
+        assert_beta006_status(&root, "passed");
+
+        fs::write(
+            &proof_path,
+            original_proof.replace("\"backend\": \"native-codex-cli\"", "\"backend\": \"fake\""),
+        )
+        .expect("fake backend proof");
+        run_cli(["bench"], &root).expect("bench fake backend");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance fake backend");
+        assert_beta006_status(&root, "partial");
+
+        fs::write(
+            &proof_path,
+            original_proof.replace(
+                "\"proof_mode\": \"native-cli-session\"",
+                "\"proof_mode\": \"mock-process\"",
+            ),
+        )
+        .expect("mock proof mode");
+        run_cli(["bench"], &root).expect("bench mock proof");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance mock proof");
+        assert_beta006_status(&root, "partial");
+
+        fs::remove_file(&proof_path).expect("remove proof");
+        run_cli(["bench"], &root).expect("bench missing proof");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance missing proof");
+        assert_beta006_status(&root, "partial");
+
+        fs::write(
+            &proof_path,
+            original_proof.replace("\"native_worker_count\": 3", "\"native_worker_count\": 1"),
+        )
+        .expect("low worker count proof");
+        run_cli(["bench"], &root).expect("bench low proof count");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance low proof count");
+        assert_beta006_status(&root, "partial");
+
+        fs::write(
+            &proof_path,
+            original_proof.replace(
+                "\"backend\": \"native-codex-cli\",\n",
+                "\"backend\": \"native-codex-cli\",\n  \"fake_backend_disclaimer\": \"fixture only\",\n",
+            ),
+        )
+        .expect("fake disclaimer proof");
+        run_cli(["bench"], &root).expect("bench fake disclaimer proof");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance fake disclaimer proof");
+        assert_beta006_status(&root, "partial");
+
+        fs::write(
+            &proof_path,
+            original_proof.replace("\"ok\": true", "\"ok\": false"),
+        )
+        .expect("false ok proof");
+        run_cli(["bench"], &root).expect("bench false ok proof");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance false ok proof");
+        assert_beta006_status(&root, "partial");
+
+        fs::write(
+            &proof_path,
+            original_proof.replace(
+                "\"real_parallel_claim\": true",
+                "\"real_parallel_claim\": false",
+            ),
+        )
+        .expect("false real parallel claim proof");
+        run_cli(["bench"], &root).expect("bench false real claim proof");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance false real claim proof");
+        assert_beta006_status(&root, "partial");
+
+        fs::write(
+            &proof_path,
+            original_proof.replace("\"blockers\": []", "\"blockers\": [\"blocked\"]"),
+        )
+        .expect("blocked proof");
+        run_cli(["bench"], &root).expect("bench blocked proof");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance blocked proof");
+        assert_beta006_status(&root, "partial");
+
+        fs::write(&proof_path, &original_proof).expect("restore proof after low count");
+        fs::write(
+            &agent_proof_path,
+            original_agent_proof
+                .replace("\"backend\": \"native-codex-cli\"", "\"backend\": \"mock\""),
+        )
+        .expect("mock agent proof backend");
+        run_cli(["bench"], &root).expect("bench mock agent proof");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance mock agent proof");
+        assert_beta006_status(&root, "partial");
+
+        fs::write(&agent_proof_path, &original_agent_proof).expect("restore agent proof");
+        fs::write(
+            &parallel_runtime_path,
+            original_parallel_runtime.replace(
+                "\"require_worker_pids\": true",
+                "\"require_worker_pids\": false",
+            ),
+        )
+        .expect("parallel proof missing pid requirement");
+        run_cli(["bench"], &root).expect("bench weak parallel proof");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance weak parallel proof");
+        assert_beta006_status(&root, "partial");
+
+        fs::write(
+            &parallel_runtime_path,
+            original_parallel_runtime.replace(
+                "\"proof_mode\": \"native-cli-session\"",
+                "\"proof_mode\": \"mock-process\"",
+            ),
+        )
+        .expect("mock parallel proof mode");
+        run_cli(["bench"], &root).expect("bench mock parallel proof");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance mock parallel proof");
+        assert_beta006_status(&root, "partial");
+
+        fs::write(&parallel_runtime_path, &original_parallel_runtime)
+            .expect("restore parallel proof");
+        fs::write(&proof_path, &original_proof).expect("restore proof");
+        run_cli(["bench"], &root).expect("bench restored proof");
+        let execution_path = root
+            .join(OPEN_SKSDIR)
+            .join("bench")
+            .join("native-collaboration-execution.json");
+        let execution = fs::read_to_string(&execution_path).expect("execution");
+        fs::write(
+            &execution_path,
+            execution.replace(
+                "\"native_cli_session_proof_hash\": \"",
+                "\"native_cli_session_proof_hash\": \"fnv1a64:0000000000000000-",
+            ),
+        )
+        .expect("tamper proof hash");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance proof hash tamper");
+        assert_beta006_status(&root, "partial");
     }
 
     #[test]
