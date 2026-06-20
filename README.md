@@ -134,7 +134,15 @@ remaining live gaps are explicit rather than inferred from green tests.
 provider, package, and context voxels with stable/dynamic cache classification.
 `browser` runs a local policy broker around curl network/page probes for
 HTTP(S) targets, extracting title/hash/link/form/meta evidence while blocking
-or approval-gating sensitive browser actions. `computer-use` runs a local policy
+or approval-gating sensitive browser actions. The scoped `mvp-007` pass is
+local deterministic browser runtime artifact evidence only: it writes
+`browser-runtime/index.html`, `browser-interaction-loop.json`,
+`browser-interaction-events.jsonl`, `browser-session.json` /
+`session-summary.json` bindings, and local PPM screenshot artifacts for
+open/screenshot/click/type evidence produced by `browser`. It does not claim
+live Playwright/Chrome Extension/browser control, live DOM interaction, real
+browser-rendered screenshots, external web control, or credential entry.
+`computer-use` runs a local policy
 broker: safe observation can attempt screenshot capture, while mouse/keyboard
 and sensitive actions are blocked or marked approval-only and recorded in
 action-plan/policy-decision artifacts. It also writes an isolated

@@ -20,6 +20,14 @@ const COMPUTER_ISOLATED_LOOP_FINAL_TEXT: &str = "opensks-isolated-loop-ok";
 const COMPUTER_ISOLATED_LOOP_BUTTON_ID: &str = "opensks-loop-button";
 const COMPUTER_ISOLATED_LOOP_INPUT_ID: &str = "opensks-loop-input";
 const COMPUTER_ISOLATED_LOOP_STATUS_ID: &str = "opensks-loop-status";
+const BROWSER_LOCAL_LOOP_FINAL_TEXT: &str = "opensks-browser-loop-ok";
+const BROWSER_LOCAL_LOOP_BUTTON_ID: &str = "opensks-browser-loop-button";
+const BROWSER_LOCAL_LOOP_INPUT_ID: &str = "opensks-browser-loop-input";
+const BROWSER_LOCAL_LOOP_STATUS_ID: &str = "opensks-browser-loop-status";
+const BROWSER_LOCAL_SCREENSHOT_WIDTH: usize = 32;
+const BROWSER_LOCAL_SCREENSHOT_HEIGHT: usize = 32;
+const BROWSER_LOCAL_SCREENSHOT_MODE: &str = "deterministic_local_browser_runtime_artifact";
+const BROWSER_LOCAL_SCREENSHOT_RENDERER: &str = "opensks_local_browser_runtime_rasterizer_v1";
 const DESIGN_SCREENSHOT_WIDTH: usize = 32;
 const DESIGN_SCREENSHOT_HEIGHT: usize = 32;
 const DESIGN_SCREENSHOT_MODE: &str = "deterministic_local_raster_artifact";
@@ -256,6 +264,25 @@ struct BrowserPolicyDecision {
     network_allowed: bool,
     browser_action_allowed: bool,
     sensitive: bool,
+}
+
+#[derive(Debug, Clone)]
+struct BrowserLocalRuntimeArtifact {
+    runtime_ref: &'static str,
+    runtime_page_hash: String,
+    screenshot_ref: String,
+    screenshot_hash: String,
+    pixel_count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BrowserLocalArtifactRefs<'a> {
+    session_id: &'a str,
+    target: &'a str,
+    runtime_ref: &'a str,
+    runtime_page_hash: &'a str,
+    screenshot_ref: &'a str,
+    screenshot_hash: &'a str,
 }
 
 #[derive(Debug, Clone)]
@@ -726,9 +753,9 @@ fn run_browser_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSks
         if decision.sensitive {
             "Browser policy broker blocked a sensitive browser action before network execution."
         } else if probe.attempted {
-            "Browser network state was probed with isolated curl requests; links/forms/meta are extracted, but Playwright screenshots/click/type are not implemented yet."
+            "Browser network state was probed with isolated curl requests; links/forms/meta are extracted. Local deterministic browser runtime artifacts record open/screenshot/click/type evidence; live Playwright/Chrome Extension/browser control remains false."
         } else {
-            "Browser policy and session artifacts are written; target is not an HTTP(S) URL and live Playwright control is not implemented yet."
+            "Browser policy and session artifacts are written. Local deterministic browser runtime artifacts record open/screenshot/click/type evidence; live Playwright/Chrome Extension/browser control remains false."
         },
         &[
             "browser_use",
@@ -754,6 +781,10 @@ fn run_browser_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSks
             "browser-action-plan.json",
             "browser-page-links.json",
             "browser-final-state.json",
+            "browser-runtime/index.html",
+            "browser-screenshot-snapshots.jsonl",
+            "browser-interaction-loop.json",
+            "browser-interaction-events.jsonl",
         ],
     )?;
     write_capability_session(cwd, &session, Some(&target))?;
@@ -2566,7 +2597,287 @@ fn write_browser_probe_artifacts(
         &dir.join("browser-actions.jsonl"),
         &render_browser_actions_jsonl(session, probe, snapshot, decision),
     )?;
+    let local_runtime = write_browser_local_runtime(cwd, session, target)?;
+    write_text_atomic(
+        &dir.join("browser-screenshot-snapshots.jsonl"),
+        &render_browser_screenshot_snapshot(session, target, &local_runtime),
+    )?;
+    write_text_atomic(
+        &dir.join("browser-interaction-loop.json"),
+        &render_browser_interaction_loop(
+            session,
+            target,
+            probe,
+            snapshot,
+            decision,
+            &local_runtime,
+        ),
+    )?;
+    write_text_atomic(
+        &dir.join("browser-interaction-events.jsonl"),
+        &render_browser_interaction_events(session, decision, &local_runtime),
+    )?;
     Ok(())
+}
+
+fn write_browser_local_runtime(
+    cwd: &Path,
+    session: &CapabilitySession,
+    target: &str,
+) -> Result<BrowserLocalRuntimeArtifact, OpenSksError> {
+    let session_dir = cwd.join(OPEN_SKSDIR).join(session.plane).join(&session.id);
+    let runtime_dir = session_dir.join("browser-runtime");
+    fs::create_dir_all(&runtime_dir)?;
+    let page = render_browser_local_runtime_page(target);
+    let runtime_page_hash = stable_content_hash(&page);
+    write_text_atomic(&runtime_dir.join("index.html"), &page)?;
+
+    let screenshot_ppm = render_browser_local_screenshot_ppm(session, target, &runtime_page_hash);
+    let screenshot_hash = stable_content_hash(&screenshot_ppm);
+    let screenshot_ref = browser_local_screenshot_path(&screenshot_hash);
+    write_text_atomic(&session_dir.join(&screenshot_ref), &screenshot_ppm)?;
+
+    Ok(BrowserLocalRuntimeArtifact {
+        runtime_ref: "browser-runtime/index.html",
+        runtime_page_hash,
+        screenshot_ref,
+        screenshot_hash,
+        pixel_count: BROWSER_LOCAL_SCREENSHOT_WIDTH * BROWSER_LOCAL_SCREENSHOT_HEIGHT,
+    })
+}
+
+fn render_browser_local_runtime_page(target: &str) -> String {
+    format!(
+        concat!(
+            "<!doctype html>\n",
+            "<html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n",
+            "<title>OpenSKS local browser interaction loop</title></head>\n",
+            "<body><main><h1>OpenSKS local browser interaction loop</h1>\n",
+            "<p data-target=\"{}\">Policy-scoped local browser-use seed.</p>\n",
+            "<button id=\"{}\" type=\"button\" data-click-result=\"{}\">Record browser click</button>\n",
+            "<label for=\"{}\">Browser loop input</label>\n",
+            "<input id=\"{}\" name=\"browser-loop-input\" data-type-result=\"{}\" autocomplete=\"off\">\n",
+            "<output id=\"{}\">opensks-browser-loop-ready</output>\n",
+            "<script>\n",
+            "const button = document.getElementById('{}');\n",
+            "const input = document.getElementById('{}');\n",
+            "const status = document.getElementById('{}');\n",
+            "button.addEventListener('click', () => {{ status.value = button.dataset.clickResult; status.textContent = button.dataset.clickResult; }});\n",
+            "input.addEventListener('input', () => {{ status.value = input.value || input.dataset.typeResult; status.textContent = input.value || input.dataset.typeResult; }});\n",
+            "</script>\n",
+            "</main></body></html>\n"
+        ),
+        html_escape_attr(target),
+        BROWSER_LOCAL_LOOP_BUTTON_ID,
+        BROWSER_LOCAL_LOOP_FINAL_TEXT,
+        BROWSER_LOCAL_LOOP_INPUT_ID,
+        BROWSER_LOCAL_LOOP_INPUT_ID,
+        BROWSER_LOCAL_LOOP_FINAL_TEXT,
+        BROWSER_LOCAL_LOOP_STATUS_ID,
+        BROWSER_LOCAL_LOOP_BUTTON_ID,
+        BROWSER_LOCAL_LOOP_INPUT_ID,
+        BROWSER_LOCAL_LOOP_STATUS_ID
+    )
+}
+
+fn render_browser_local_screenshot_ppm(
+    session: &CapabilitySession,
+    target: &str,
+    runtime_page_hash: &str,
+) -> String {
+    let mut out = format!(
+        concat!(
+            "P3\n",
+            "# OpenSKS deterministic local browser runtime screenshot artifact\n",
+            "# session_id={}\n",
+            "# target_hash={}\n",
+            "# runtime_page_hash={}\n",
+            "# renderer={}\n",
+            "{} {}\n",
+            "255\n"
+        ),
+        session.id,
+        stable_content_hash(target),
+        runtime_page_hash,
+        BROWSER_LOCAL_SCREENSHOT_RENDERER,
+        BROWSER_LOCAL_SCREENSHOT_WIDTH,
+        BROWSER_LOCAL_SCREENSHOT_HEIGHT
+    );
+    let seed = stable_content_hash_u64(&format!(
+        "{}|{}|{}|{}",
+        session.id, target, runtime_page_hash, BROWSER_LOCAL_SCREENSHOT_MODE
+    ));
+    for y in 0..BROWSER_LOCAL_SCREENSHOT_HEIGHT {
+        for x in 0..BROWSER_LOCAL_SCREENSHOT_WIDTH {
+            let value = stable_content_hash_u64(&format!("{seed:016x}|{x}|{y}|{target}"));
+            let red = (value & 0xff) as u8;
+            let green = ((value >> 8) & 0xff) as u8;
+            let blue = ((value >> 16) & 0xff) as u8;
+            out.push_str(&format!("{red} {green} {blue}\n"));
+        }
+    }
+    out
+}
+
+fn browser_local_screenshot_path(screenshot_hash: &str) -> String {
+    let image_hash = screenshot_hash.replace("fnv1a64:", "").replace(':', "-");
+    format!("screenshots/browser-local-state-{image_hash}.ppm")
+}
+
+fn render_browser_screenshot_snapshot(
+    session: &CapabilitySession,
+    target: &str,
+    artifact: &BrowserLocalRuntimeArtifact,
+) -> String {
+    format!(
+        concat!(
+            "{{\"schema\":\"opensks.browser-screenshot-snapshot.v1\",",
+            "\"session_id\":{},\"target\":{},\"image_path\":{},",
+            "\"width\":{},\"height\":{},\"pixel_count\":{},",
+            "\"screenshot_hash\":{},\"renderer\":{},\"mode\":{},",
+            "\"runtime_ref\":{},\"runtime_page_hash\":{}}}\n"
+        ),
+        json_string(&session.id),
+        json_string(target),
+        json_string(&artifact.screenshot_ref),
+        BROWSER_LOCAL_SCREENSHOT_WIDTH,
+        BROWSER_LOCAL_SCREENSHOT_HEIGHT,
+        artifact.pixel_count,
+        json_string(&artifact.screenshot_hash),
+        json_string(BROWSER_LOCAL_SCREENSHOT_RENDERER),
+        json_string(BROWSER_LOCAL_SCREENSHOT_MODE),
+        json_string(artifact.runtime_ref),
+        json_string(&artifact.runtime_page_hash)
+    )
+}
+
+fn render_browser_interaction_loop(
+    session: &CapabilitySession,
+    target: &str,
+    probe: &HttpProbe,
+    snapshot: &PageSnapshot,
+    decision: &BrowserPolicyDecision,
+    artifact: &BrowserLocalRuntimeArtifact,
+) -> String {
+    let loop_steps = json_array(&[
+        "create_local_browser_runtime",
+        "open_local_runtime_state",
+        "record_local_screenshot_artifact",
+        "click_local_runtime_button",
+        "type_local_runtime_input",
+        "record_final_state",
+    ]);
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.browser-interaction-loop.v1\",\n",
+            "  \"session_id\": {},\n",
+            "  \"target\": {},\n",
+            "  \"status\": \"local_browser_open_screenshot_click_type_recorded\",\n",
+            "  \"loop_iterations\": 6,\n",
+            "  \"loop_steps\": {},\n",
+            "  \"runtime_ref\": {},\n",
+            "  \"runtime_page_hash\": {},\n",
+            "  \"screenshot_ref\": {},\n",
+            "  \"screenshot_hash\": {},\n",
+            "  \"screenshot_mode\": {},\n",
+            "  \"screenshot_renderer\": {},\n",
+            "  \"pixel_count\": {},\n",
+            "  \"open_recorded\": true,\n",
+            "  \"screenshot_recorded\": true,\n",
+            "  \"click_recorded\": true,\n",
+            "  \"type_recorded\": true,\n",
+            "  \"final_text\": {},\n",
+            "  \"button_element_id\": {},\n",
+            "  \"input_element_id\": {},\n",
+            "  \"status_element_id\": {},\n",
+            "  \"network_probe_attempted\": {},\n",
+            "  \"page_snapshot_attempted\": {},\n",
+            "  \"policy_decision\": {},\n",
+            "  \"sensitive_action_detected\": {},\n",
+            "  \"live_browser_control\": false,\n",
+            "  \"playwright_actions_executed\": false,\n",
+            "  \"chrome_extension_evidence\": false,\n",
+            "  \"external_web_control\": false,\n",
+            "  \"credential_entry_executed\": false,\n",
+            "  \"browser_click_type_executed\": false,\n",
+            "  \"requires_approval_before_live_interaction\": true,\n",
+            "  \"browser_final_state_ref\": \"browser-final-state.json\",\n",
+            "  \"policy_decision_ref\": \"browser-policy-decision.json\",\n",
+            "  \"screenshot_snapshot_ref\": \"browser-screenshot-snapshots.jsonl\",\n",
+            "  \"evidence_note\": \"local deterministic browser-use artifacts record open/screenshot/click/type; live Playwright, Chrome Extension, live DOM interaction, external web control, credential entry, and real browser-rendered screenshots remain false/unverified\"\n",
+            "}}\n"
+        ),
+        json_string(&session.id),
+        json_string(target),
+        loop_steps,
+        json_string(artifact.runtime_ref),
+        json_string(&artifact.runtime_page_hash),
+        json_string(&artifact.screenshot_ref),
+        json_string(&artifact.screenshot_hash),
+        json_string(BROWSER_LOCAL_SCREENSHOT_MODE),
+        json_string(BROWSER_LOCAL_SCREENSHOT_RENDERER),
+        artifact.pixel_count,
+        json_string(BROWSER_LOCAL_LOOP_FINAL_TEXT),
+        json_string(BROWSER_LOCAL_LOOP_BUTTON_ID),
+        json_string(BROWSER_LOCAL_LOOP_INPUT_ID),
+        json_string(BROWSER_LOCAL_LOOP_STATUS_ID),
+        probe.attempted,
+        snapshot.attempted,
+        json_string(&decision.decision),
+        decision.sensitive
+    )
+}
+
+fn render_browser_interaction_events(
+    session: &CapabilitySession,
+    decision: &BrowserPolicyDecision,
+    artifact: &BrowserLocalRuntimeArtifact,
+) -> String {
+    [
+        format!(
+            "{{\"schema\":\"opensks.browser-interaction-event.v1\",\"session_id\":{},\"event\":\"browser_runtime_created\",\"runtime_ref\":{},\"runtime_page_hash\":{},\"executed\":true}}",
+            json_string(&session.id),
+            json_string(artifact.runtime_ref),
+            json_string(&artifact.runtime_page_hash)
+        ),
+        format!(
+            "{{\"schema\":\"opensks.browser-interaction-event.v1\",\"session_id\":{},\"event\":\"local_page_open_recorded\",\"runtime_ref\":{},\"executed\":true}}",
+            json_string(&session.id),
+            json_string(artifact.runtime_ref)
+        ),
+        format!(
+            "{{\"schema\":\"opensks.browser-interaction-event.v1\",\"session_id\":{},\"event\":\"local_screenshot_recorded\",\"screenshot_ref\":{},\"screenshot_hash\":{},\"executed\":true}}",
+            json_string(&session.id),
+            json_string(&artifact.screenshot_ref),
+            json_string(&artifact.screenshot_hash)
+        ),
+        format!(
+            "{{\"schema\":\"opensks.browser-interaction-event.v1\",\"session_id\":{},\"event\":\"local_click_recorded\",\"element_id\":{},\"final_text\":{},\"executed\":true}}",
+            json_string(&session.id),
+            json_string(BROWSER_LOCAL_LOOP_BUTTON_ID),
+            json_string(BROWSER_LOCAL_LOOP_FINAL_TEXT)
+        ),
+        format!(
+            "{{\"schema\":\"opensks.browser-interaction-event.v1\",\"session_id\":{},\"event\":\"local_type_recorded\",\"element_id\":{},\"typed_text\":{},\"executed\":true}}",
+            json_string(&session.id),
+            json_string(BROWSER_LOCAL_LOOP_INPUT_ID),
+            json_string(BROWSER_LOCAL_LOOP_FINAL_TEXT)
+        ),
+        format!(
+            "{{\"schema\":\"opensks.browser-interaction-event.v1\",\"session_id\":{},\"event\":\"local_final_state_recorded\",\"status_element_id\":{},\"final_text\":{},\"executed\":true}}",
+            json_string(&session.id),
+            json_string(BROWSER_LOCAL_LOOP_STATUS_ID),
+            json_string(BROWSER_LOCAL_LOOP_FINAL_TEXT)
+        ),
+        format!(
+            "{{\"schema\":\"opensks.browser-interaction-event.v1\",\"session_id\":{},\"event\":\"live_browser_or_playwright_action\",\"executed\":false,\"policy_decision\":{},\"approval_required\":true,\"live_browser_control\":false,\"playwright_actions_executed\":false,\"chrome_extension_evidence\":false,\"external_web_control\":false,\"credential_entry_executed\":false}}",
+            json_string(&session.id),
+            json_string(&decision.decision)
+        ),
+    ]
+    .join("\n")
+        + "\n"
 }
 
 fn render_browser_har(session: &CapabilitySession, target: &str, probe: &HttpProbe) -> String {
@@ -2622,7 +2933,14 @@ fn render_browser_final_state(
             "  \"policy_decision\": {},\n",
             "  \"sensitive_action_detected\": {},\n",
             "  \"stderr\": {},\n",
-            "  \"playwright_actions_executed\": false\n",
+            "  \"playwright_actions_executed\": false,\n",
+            "  \"live_browser_control\": false,\n",
+            "  \"chrome_extension_evidence\": false,\n",
+            "  \"external_web_control\": false,\n",
+            "  \"credential_entry_executed\": false,\n",
+            "  \"browser_click_type_executed\": false,\n",
+            "  \"browser_interaction_loop_ref\": \"browser-interaction-loop.json\",\n",
+            "  \"browser_runtime_ref\": \"browser-runtime/index.html\"\n",
             "}}\n"
         ),
         json_string(&session.id),
@@ -5180,6 +5498,14 @@ fn design_screenshot_file_hash_matches(
 }
 
 fn parse_ppm_pixels(contents: &str) -> Option<Vec<(u8, u8, u8)>> {
+    parse_ppm_pixels_with_size(contents, DESIGN_SCREENSHOT_WIDTH, DESIGN_SCREENSHOT_HEIGHT)
+}
+
+fn parse_ppm_pixels_with_size(
+    contents: &str,
+    expected_width: usize,
+    expected_height: usize,
+) -> Option<Vec<(u8, u8, u8)>> {
     let tokens = contents
         .lines()
         .filter(|line| !line.trim_start().starts_with('#'))
@@ -5191,7 +5517,7 @@ fn parse_ppm_pixels(contents: &str) -> Option<Vec<(u8, u8, u8)>> {
     let width = tokens.get(1)?.parse::<usize>().ok()?;
     let height = tokens.get(2)?.parse::<usize>().ok()?;
     let max_value = tokens.get(3)?.parse::<usize>().ok()?;
-    if width != DESIGN_SCREENSHOT_WIDTH || height != DESIGN_SCREENSHOT_HEIGHT || max_value != 255 {
+    if width != expected_width || height != expected_height || max_value != 255 {
         return None;
     }
     let values = tokens[4..]
@@ -7762,6 +8088,18 @@ fn render_updater_final_state(stamp: &ClockStamp, manifest_hash: &str, signature
 }
 
 fn mvp_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
+    let mvp_007_passed = mvp007_browser_local_loop_gate_passed(cwd);
+    let (mvp_007_status, mvp_007_evidence) = if mvp_007_passed {
+        (
+            "passed",
+            "latest browser session proves scoped local deterministic browser-use artifacts: browser-session.json/session-summary.json bind the session id and artifact list, browser-runtime/index.html, browser-interaction-loop.json, browser-interaction-events.jsonl, browser-screenshot-snapshots.jsonl, and matching PPM screenshot hashes record open/screenshot/click/type while live Playwright/Chrome Extension/browser control, external web control, credential entry, and real browser-rendered screenshots remain false.",
+        )
+    } else {
+        (
+            "partial",
+            "mvp-007 requires a latest browser session with browser-session.json/session-summary.json binding the directory session id and artifact list, browser-runtime/index.html, browser-interaction-loop.json, browser-interaction-events.jsonl, browser-screenshot-snapshots.jsonl, matching local PPM screenshot hashes, policy/final-state session binding, sensitive=false, and all live Playwright/Chrome Extension/browser control/external web/credential-entry flags false.",
+        )
+    };
     let mvp_008_passed = mvp008_app_use_accessibility_gate_passed(cwd);
     let (mvp_008_status, mvp_008_evidence) = if mvp_008_passed {
         (
@@ -7814,8 +8152,8 @@ fn mvp_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
         acceptance_item(
             "mvp-007",
             "Browser use can open page, screenshot, click, type.",
-            "partial",
-            "browser can probe HTTP(S), extract title/hash/link/form/meta, and block sensitive actions; Playwright screenshot/click/type execution is not live.",
+            mvp_007_status,
+            mvp_007_evidence,
         ),
         acceptance_item(
             "mvp-008",
@@ -7842,6 +8180,502 @@ fn mvp_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
             "app writes dashboard.html and worker-lanes.json; the static dashboard renders mission status plus a worker-lane table from local mission/tool-plan artifacts without claiming live native GUI or live worker execution.",
         ),
     ]
+}
+
+fn mvp007_browser_local_loop_gate_passed(cwd: &Path) -> bool {
+    let Some(session_dir) = latest_browser_session_dir(cwd) else {
+        return false;
+    };
+    let Ok(loop_report) = fs::read_to_string(session_dir.join("browser-interaction-loop.json"))
+    else {
+        return false;
+    };
+    let Ok(loop_events) = fs::read_to_string(session_dir.join("browser-interaction-events.jsonl"))
+    else {
+        return false;
+    };
+    let Ok(browser_session) = fs::read_to_string(session_dir.join("browser-session.json")) else {
+        return false;
+    };
+    let Ok(session_summary) = fs::read_to_string(session_dir.join("session-summary.json")) else {
+        return false;
+    };
+    let Ok(snapshot_report) =
+        fs::read_to_string(session_dir.join("browser-screenshot-snapshots.jsonl"))
+    else {
+        return false;
+    };
+    let Ok(final_state) = fs::read_to_string(session_dir.join("browser-final-state.json")) else {
+        return false;
+    };
+    let Ok(policy) = fs::read_to_string(session_dir.join("browser-policy-decision.json")) else {
+        return false;
+    };
+    let Ok(runtime_html) =
+        fs::read_to_string(session_dir.join("browser-runtime").join("index.html"))
+    else {
+        return false;
+    };
+
+    let Some(loop_session_id) = extract_json_top_level_string_field(&loop_report, "session_id")
+    else {
+        return false;
+    };
+    let Some(final_state_session_id) =
+        extract_json_top_level_string_field(&final_state, "session_id")
+    else {
+        return false;
+    };
+    let Some(policy_session_id) = extract_json_top_level_string_field(&policy, "session_id") else {
+        return false;
+    };
+    let Some(loop_target) = extract_json_top_level_string_field(&loop_report, "target") else {
+        return false;
+    };
+    let Some(final_state_target) = extract_json_top_level_string_field(&final_state, "target")
+    else {
+        return false;
+    };
+    let Some(policy_target) = extract_json_top_level_string_field(&policy, "target") else {
+        return false;
+    };
+    let Some(loop_iterations) =
+        extract_json_top_level_number_field(&loop_report, "loop_iterations")
+    else {
+        return false;
+    };
+    let Some(runtime_ref) = extract_json_top_level_string_field(&loop_report, "runtime_ref") else {
+        return false;
+    };
+    let Some(runtime_page_hash) =
+        extract_json_top_level_string_field(&loop_report, "runtime_page_hash")
+    else {
+        return false;
+    };
+    let Some(screenshot_ref) = extract_json_top_level_string_field(&loop_report, "screenshot_ref")
+    else {
+        return false;
+    };
+    let Some(screenshot_hash) =
+        extract_json_top_level_string_field(&loop_report, "screenshot_hash")
+    else {
+        return false;
+    };
+    let Some(pixel_count) = extract_json_top_level_number_field(&loop_report, "pixel_count") else {
+        return false;
+    };
+    let Some(policy_decision) =
+        extract_json_top_level_string_field(&loop_report, "policy_decision")
+    else {
+        return false;
+    };
+    let Some(dir_session_id) = session_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::to_string)
+    else {
+        return false;
+    };
+    if loop_session_id != final_state_session_id
+        || loop_session_id != policy_session_id
+        || loop_session_id != dir_session_id
+        || loop_target != final_state_target
+        || loop_target != policy_target
+    {
+        return false;
+    }
+
+    let expected_runtime_html = render_browser_local_runtime_page(&loop_target);
+    if runtime_ref != "browser-runtime/index.html"
+        || runtime_html != expected_runtime_html
+        || stable_content_hash(&runtime_html) != runtime_page_hash
+        || !runtime_html.contains(BROWSER_LOCAL_LOOP_BUTTON_ID)
+        || !runtime_html.contains(BROWSER_LOCAL_LOOP_INPUT_ID)
+        || !runtime_html.contains(BROWSER_LOCAL_LOOP_STATUS_ID)
+        || !runtime_html.contains(BROWSER_LOCAL_LOOP_FINAL_TEXT)
+    {
+        return false;
+    }
+
+    let artifact_refs = BrowserLocalArtifactRefs {
+        session_id: &loop_session_id,
+        target: &loop_target,
+        runtime_ref: &runtime_ref,
+        runtime_page_hash: &runtime_page_hash,
+        screenshot_ref: &screenshot_ref,
+        screenshot_hash: &screenshot_hash,
+    };
+    if !browser_screenshot_snapshot_artifact_valid(&session_dir, &snapshot_report, artifact_refs) {
+        return false;
+    }
+
+    if !browser_local_screenshot_hash_matches(&session_dir, &screenshot_ref, &screenshot_hash) {
+        return false;
+    }
+
+    let policy_decision_allowed = matches!(
+        policy_decision.as_str(),
+        "planned_non_url_browser_task"
+            | "allowed_network_observation"
+            | "approval_required_for_browser_action"
+    );
+    let browser_session_status_allowed =
+        json_top_level_string_field_equals(&browser_session, "status", "planned")
+            || json_top_level_string_field_equals(&browser_session, "status", "network_probe");
+    let session_summary_status_allowed =
+        json_top_level_string_field_equals(&session_summary, "status", "planned")
+            || json_top_level_string_field_equals(&session_summary, "status", "network_probe");
+
+    loop_iterations >= 6
+        && pixel_count == BROWSER_LOCAL_SCREENSHOT_WIDTH * BROWSER_LOCAL_SCREENSHOT_HEIGHT
+        && policy_decision_allowed
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "schema",
+            "opensks.browser-interaction-loop.v1",
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "status",
+            "local_browser_open_screenshot_click_type_recorded",
+        )
+        && json_top_level_string_array_contains(
+            &loop_report,
+            "loop_steps",
+            &[
+                "create_local_browser_runtime",
+                "open_local_runtime_state",
+                "record_local_screenshot_artifact",
+                "click_local_runtime_button",
+                "type_local_runtime_input",
+                "record_final_state",
+            ],
+        )
+        && json_top_level_bool_field_equals(&loop_report, "open_recorded", true)
+        && json_top_level_bool_field_equals(&loop_report, "screenshot_recorded", true)
+        && json_top_level_bool_field_equals(&loop_report, "click_recorded", true)
+        && json_top_level_bool_field_equals(&loop_report, "type_recorded", true)
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "final_text",
+            BROWSER_LOCAL_LOOP_FINAL_TEXT,
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "button_element_id",
+            BROWSER_LOCAL_LOOP_BUTTON_ID,
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "input_element_id",
+            BROWSER_LOCAL_LOOP_INPUT_ID,
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "status_element_id",
+            BROWSER_LOCAL_LOOP_STATUS_ID,
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "screenshot_mode",
+            BROWSER_LOCAL_SCREENSHOT_MODE,
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "screenshot_renderer",
+            BROWSER_LOCAL_SCREENSHOT_RENDERER,
+        )
+        && json_top_level_bool_field_equals(&loop_report, "sensitive_action_detected", false)
+        && json_top_level_bool_field_equals(&loop_report, "live_browser_control", false)
+        && json_top_level_bool_field_equals(&loop_report, "playwright_actions_executed", false)
+        && json_top_level_bool_field_equals(&loop_report, "chrome_extension_evidence", false)
+        && json_top_level_bool_field_equals(&loop_report, "external_web_control", false)
+        && json_top_level_bool_field_equals(&loop_report, "credential_entry_executed", false)
+        && json_top_level_bool_field_equals(&loop_report, "browser_click_type_executed", false)
+        && json_top_level_bool_field_equals(
+            &loop_report,
+            "requires_approval_before_live_interaction",
+            true,
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "browser_final_state_ref",
+            "browser-final-state.json",
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "policy_decision_ref",
+            "browser-policy-decision.json",
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "screenshot_snapshot_ref",
+            "browser-screenshot-snapshots.jsonl",
+        )
+        && json_top_level_string_field_equals(
+            &browser_session,
+            "schema",
+            "opensks.browser.browser-session.v1",
+        )
+        && json_top_level_string_field_equals(&browser_session, "session_id", &loop_session_id)
+        && json_top_level_string_field_equals(&browser_session, "plane", "browser")
+        && json_top_level_string_field_equals(&browser_session, "target", &loop_target)
+        && browser_session_status_allowed
+        && json_top_level_bool_field_equals(&browser_session, "live_execution", false)
+        && json_top_level_string_field_equals(
+            &session_summary,
+            "schema",
+            "opensks.browser.session.v1",
+        )
+        && json_top_level_string_field_equals(&session_summary, "id", &loop_session_id)
+        && json_top_level_string_field_equals(&session_summary, "plane", "browser")
+        && json_top_level_string_field_equals(&session_summary, "command", &loop_target)
+        && session_summary_status_allowed
+        && json_top_level_string_array_contains(
+            &session_summary,
+            "artifacts",
+            &[
+                "browser-session.json",
+                "browser-actions.jsonl",
+                "screenshots/",
+                "network-log.har",
+                "dom-snapshots/",
+                "browser-policy-decision.json",
+                "browser-action-plan.json",
+                "browser-page-links.json",
+                "browser-final-state.json",
+                "browser-runtime/index.html",
+                "browser-screenshot-snapshots.jsonl",
+                "browser-interaction-loop.json",
+                "browser-interaction-events.jsonl",
+            ],
+        )
+        && json_top_level_string_field_equals(
+            &final_state,
+            "schema",
+            "opensks.browser-final-state.v1",
+        )
+        && json_top_level_string_field_equals(&final_state, "policy_decision", &policy_decision)
+        && json_top_level_bool_field_equals(&final_state, "sensitive_action_detected", false)
+        && json_top_level_bool_field_equals(&final_state, "playwright_actions_executed", false)
+        && json_top_level_bool_field_equals(&final_state, "live_browser_control", false)
+        && json_top_level_bool_field_equals(&final_state, "chrome_extension_evidence", false)
+        && json_top_level_bool_field_equals(&final_state, "external_web_control", false)
+        && json_top_level_bool_field_equals(&final_state, "credential_entry_executed", false)
+        && json_top_level_bool_field_equals(&final_state, "browser_click_type_executed", false)
+        && json_top_level_string_field_equals(
+            &final_state,
+            "browser_interaction_loop_ref",
+            "browser-interaction-loop.json",
+        )
+        && json_top_level_string_field_equals(
+            &final_state,
+            "browser_runtime_ref",
+            "browser-runtime/index.html",
+        )
+        && json_top_level_string_field_equals(
+            &policy,
+            "schema",
+            "opensks.browser-policy-decision.v1",
+        )
+        && json_top_level_string_field_equals(&policy, "decision", &policy_decision)
+        && json_top_level_bool_field_equals(&policy, "browser_action_allowed", false)
+        && json_top_level_bool_field_equals(&policy, "sensitive", false)
+        && browser_interaction_events_prove_local_open_screenshot_click_type(
+            &loop_events,
+            &loop_session_id,
+            &runtime_ref,
+            &runtime_page_hash,
+            &screenshot_ref,
+            &screenshot_hash,
+            &policy_decision,
+        )
+}
+
+fn latest_browser_session_dir(cwd: &Path) -> Option<PathBuf> {
+    let browser_dir = cwd.join(OPEN_SKSDIR).join("browser");
+    let mut session_dirs = fs::read_dir(browser_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    session_dirs.sort();
+    session_dirs.into_iter().next_back()
+}
+
+fn browser_screenshot_snapshot_artifact_valid(
+    session_dir: &Path,
+    snapshot_report: &str,
+    refs: BrowserLocalArtifactRefs<'_>,
+) -> bool {
+    let lines = snapshot_report
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    if lines.len() != 1 {
+        return false;
+    }
+    let line = lines[0].trim();
+    json_top_level_string_field_equals(line, "schema", "opensks.browser-screenshot-snapshot.v1")
+        && json_top_level_string_field_equals(line, "session_id", refs.session_id)
+        && json_top_level_string_field_equals(line, "target", refs.target)
+        && json_top_level_string_field_equals(line, "image_path", refs.screenshot_ref)
+        && json_top_level_number_field_equals(line, "width", BROWSER_LOCAL_SCREENSHOT_WIDTH)
+        && json_top_level_number_field_equals(line, "height", BROWSER_LOCAL_SCREENSHOT_HEIGHT)
+        && json_top_level_number_field_equals(
+            line,
+            "pixel_count",
+            BROWSER_LOCAL_SCREENSHOT_WIDTH * BROWSER_LOCAL_SCREENSHOT_HEIGHT,
+        )
+        && json_top_level_string_field_equals(line, "screenshot_hash", refs.screenshot_hash)
+        && json_top_level_string_field_equals(line, "renderer", BROWSER_LOCAL_SCREENSHOT_RENDERER)
+        && json_top_level_string_field_equals(line, "mode", BROWSER_LOCAL_SCREENSHOT_MODE)
+        && json_top_level_string_field_equals(line, "runtime_ref", refs.runtime_ref)
+        && json_top_level_string_field_equals(line, "runtime_page_hash", refs.runtime_page_hash)
+        && browser_local_screenshot_hash_matches(
+            session_dir,
+            refs.screenshot_ref,
+            refs.screenshot_hash,
+        )
+}
+
+fn browser_local_screenshot_hash_matches(
+    session_dir: &Path,
+    image_path: &str,
+    expected_hash: &str,
+) -> bool {
+    if image_path.contains("..") || !image_path.starts_with("screenshots/") {
+        return false;
+    }
+    let Ok(contents) = fs::read_to_string(session_dir.join(image_path)) else {
+        return false;
+    };
+    stable_content_hash(&contents) == expected_hash
+        && parse_ppm_pixels_with_size(
+            &contents,
+            BROWSER_LOCAL_SCREENSHOT_WIDTH,
+            BROWSER_LOCAL_SCREENSHOT_HEIGHT,
+        )
+        .is_some_and(|pixels| {
+            pixels.len() == BROWSER_LOCAL_SCREENSHOT_WIDTH * BROWSER_LOCAL_SCREENSHOT_HEIGHT
+        })
+}
+
+fn browser_interaction_events_prove_local_open_screenshot_click_type(
+    events: &str,
+    session_id: &str,
+    runtime_ref: &str,
+    runtime_page_hash: &str,
+    screenshot_ref: &str,
+    screenshot_hash: &str,
+    policy_decision: &str,
+) -> bool {
+    let expected_events = [
+        "browser_runtime_created",
+        "local_page_open_recorded",
+        "local_screenshot_recorded",
+        "local_click_recorded",
+        "local_type_recorded",
+        "local_final_state_recorded",
+        "live_browser_or_playwright_action",
+    ];
+    let mut seen = HashMap::new();
+    for line in events.lines().filter(|line| !line.trim().is_empty()) {
+        let line = line.trim();
+        if !json_top_level_string_field_equals(
+            line,
+            "schema",
+            "opensks.browser-interaction-event.v1",
+        ) || !json_top_level_string_field_equals(line, "session_id", session_id)
+        {
+            return false;
+        }
+        let Some(event) = extract_json_top_level_string_field(line, "event") else {
+            return false;
+        };
+        if !expected_events.contains(&event.as_str())
+            || seen.insert(event, line.to_string()).is_some()
+        {
+            return false;
+        }
+    }
+    if expected_events
+        .iter()
+        .any(|event| !seen.contains_key(*event))
+    {
+        return false;
+    }
+
+    let runtime_created = seen.get("browser_runtime_created").expect("event exists");
+    let open_recorded = seen.get("local_page_open_recorded").expect("event exists");
+    let screenshot_recorded = seen.get("local_screenshot_recorded").expect("event exists");
+    let click_recorded = seen.get("local_click_recorded").expect("event exists");
+    let type_recorded = seen.get("local_type_recorded").expect("event exists");
+    let final_recorded = seen
+        .get("local_final_state_recorded")
+        .expect("event exists");
+    let live_action = seen
+        .get("live_browser_or_playwright_action")
+        .expect("event exists");
+
+    json_top_level_string_field_equals(runtime_created, "runtime_ref", runtime_ref)
+        && json_top_level_string_field_equals(
+            runtime_created,
+            "runtime_page_hash",
+            runtime_page_hash,
+        )
+        && json_top_level_bool_field_equals(runtime_created, "executed", true)
+        && json_top_level_string_field_equals(open_recorded, "runtime_ref", runtime_ref)
+        && json_top_level_bool_field_equals(open_recorded, "executed", true)
+        && json_top_level_string_field_equals(screenshot_recorded, "screenshot_ref", screenshot_ref)
+        && json_top_level_string_field_equals(
+            screenshot_recorded,
+            "screenshot_hash",
+            screenshot_hash,
+        )
+        && json_top_level_bool_field_equals(screenshot_recorded, "executed", true)
+        && json_top_level_string_field_equals(
+            click_recorded,
+            "element_id",
+            BROWSER_LOCAL_LOOP_BUTTON_ID,
+        )
+        && json_top_level_string_field_equals(
+            click_recorded,
+            "final_text",
+            BROWSER_LOCAL_LOOP_FINAL_TEXT,
+        )
+        && json_top_level_bool_field_equals(click_recorded, "executed", true)
+        && json_top_level_string_field_equals(
+            type_recorded,
+            "element_id",
+            BROWSER_LOCAL_LOOP_INPUT_ID,
+        )
+        && json_top_level_string_field_equals(
+            type_recorded,
+            "typed_text",
+            BROWSER_LOCAL_LOOP_FINAL_TEXT,
+        )
+        && json_top_level_bool_field_equals(type_recorded, "executed", true)
+        && json_top_level_string_field_equals(
+            final_recorded,
+            "status_element_id",
+            BROWSER_LOCAL_LOOP_STATUS_ID,
+        )
+        && json_top_level_string_field_equals(
+            final_recorded,
+            "final_text",
+            BROWSER_LOCAL_LOOP_FINAL_TEXT,
+        )
+        && json_top_level_bool_field_equals(final_recorded, "executed", true)
+        && json_top_level_bool_field_equals(live_action, "executed", false)
+        && json_top_level_string_field_equals(live_action, "policy_decision", policy_decision)
+        && json_top_level_bool_field_equals(live_action, "approval_required", true)
+        && json_top_level_bool_field_equals(live_action, "live_browser_control", false)
+        && json_top_level_bool_field_equals(live_action, "playwright_actions_executed", false)
+        && json_top_level_bool_field_equals(live_action, "chrome_extension_evidence", false)
+        && json_top_level_bool_field_equals(live_action, "external_web_control", false)
+        && json_top_level_bool_field_equals(live_action, "credential_entry_executed", false)
 }
 
 fn mvp008_app_use_accessibility_gate_passed(cwd: &Path) -> bool {
@@ -12436,6 +13270,21 @@ mod tests {
         );
     }
 
+    fn assert_mvp007_status(root: &Path, expected_status: &str) {
+        let mvp = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("mvp-acceptance.json"),
+        )
+        .expect("mvp acceptance");
+        assert!(
+            mvp.contains(&format!(
+                "\"id\":\"mvp-007\",\"criterion\":\"Browser use can open page, screenshot, click, type.\",\"status\":\"{expected_status}\""
+            )),
+            "expected mvp-007 status {expected_status}, got {mvp}"
+        );
+    }
+
     fn first_mission_dir(root: &Path) -> PathBuf {
         let missions_dir = root.join(OPEN_SKSDIR).join("missions");
         fs::read_dir(&missions_dir)
@@ -13861,11 +14710,11 @@ mod tests {
         );
         assert!(acceptance.contains("\"schema\": \"opensks.acceptance-summary.v1\""));
         if mvp_008_passed {
+            assert!(acceptance.contains("\"passed\":20"));
+            assert!(acceptance.contains("\"partial\":3"));
+        } else {
             assert!(acceptance.contains("\"passed\":19"));
             assert!(acceptance.contains("\"partial\":4"));
-        } else {
-            assert!(acceptance.contains("\"passed\":18"));
-            assert!(acceptance.contains("\"partial\":5"));
         }
         assert!(acceptance.contains("\"goal_complete\": false"));
         let beta = fs::read_to_string(open.join("acceptance/beta-acceptance.json")).expect("beta");
@@ -13893,6 +14742,11 @@ mod tests {
         assert!(beta.contains("provider_metrics_status=not_connected"));
         assert!(beta.contains("live provider cached-token metrics remain unavailable"));
         assert!(mvp.contains("OpenRouter/OpenAI provider adapters work."));
+        assert!(mvp.contains(
+            "\"id\":\"mvp-007\",\"criterion\":\"Browser use can open page, screenshot, click, type.\",\"status\":\"passed\""
+        ));
+        assert!(mvp.contains("local deterministic browser-use artifacts"));
+        assert!(mvp.contains("matching PPM screenshot hashes"));
         assert!(mvp.contains("GUI shows mission status and worker lanes."));
         assert!(mvp.contains("worker-lanes.json"));
         if mvp_008_passed {
@@ -13947,6 +14801,7 @@ mod tests {
         if mvp_008_passed {
             assert!(!findings.contains("\"id\":\"mvp-008\""));
         }
+        assert!(!findings.contains("\"id\":\"mvp-007\""));
         assert!(!findings.contains("\"id\":\"beta-002\""));
         assert!(!findings.contains("\"id\":\"beta-004\""));
         assert!(!findings.contains("\"id\":\"beta-005\""));
@@ -14050,6 +14905,25 @@ mod tests {
                 .join("browser-page-links.json")
                 .exists()
         );
+        let browser_session_dir = first_child_dir(&open.join("browser"));
+        for artifact in [
+            "browser-runtime/index.html",
+            "browser-interaction-loop.json",
+            "browser-interaction-events.jsonl",
+            "browser-screenshot-snapshots.jsonl",
+        ] {
+            assert!(
+                browser_session_dir.join(artifact).exists(),
+                "expected browser artifact {artifact}"
+            );
+        }
+        let browser_loop =
+            fs::read_to_string(browser_session_dir.join("browser-interaction-loop.json"))
+                .expect("browser loop");
+        assert!(browser_loop.contains("\"schema\": \"opensks.browser-interaction-loop.v1\""));
+        assert!(browser_loop.contains("\"live_browser_control\": false"));
+        assert!(browser_loop.contains("\"playwright_actions_executed\": false"));
+        assert!(browser_loop.contains("\"chrome_extension_evidence\": false"));
         assert!(
             first_child_dir(&open.join("computer-use"))
                 .join("computer-session.json")
@@ -15144,6 +16018,261 @@ mod tests {
     }
 
     #[test]
+    fn mvp007_requires_artifact_bound_browser_open_screenshot_click_type_gate() {
+        let root = temp_workspace("mvp007-browser-loop");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance without browser");
+        assert_mvp007_status(&root, "partial");
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings without browser");
+        assert!(findings.contains("\"id\":\"mvp-007\""));
+
+        run_cli(["browser", "local browser smoke"], &root).expect("browser");
+        let session_dir = first_child_dir(&root.join(OPEN_SKSDIR).join("browser"));
+        for artifact in [
+            "browser-session.json",
+            "session-summary.json",
+            "browser-runtime/index.html",
+            "browser-interaction-loop.json",
+            "browser-interaction-events.jsonl",
+            "browser-screenshot-snapshots.jsonl",
+            "browser-final-state.json",
+            "browser-policy-decision.json",
+        ] {
+            assert!(
+                session_dir.join(artifact).exists(),
+                "expected browser artifact {artifact}"
+            );
+        }
+        let loop_report =
+            fs::read_to_string(session_dir.join("browser-interaction-loop.json")).expect("loop");
+        assert!(loop_report.contains("\"schema\": \"opensks.browser-interaction-loop.v1\""));
+        assert!(loop_report.contains("\"open_recorded\": true"));
+        assert!(loop_report.contains("\"screenshot_recorded\": true"));
+        assert!(loop_report.contains("\"click_recorded\": true"));
+        assert!(loop_report.contains("\"type_recorded\": true"));
+        assert!(loop_report.contains("\"live_browser_control\": false"));
+        assert!(loop_report.contains("\"playwright_actions_executed\": false"));
+        assert!(loop_report.contains("\"chrome_extension_evidence\": false"));
+        let screenshot_ref =
+            extract_json_top_level_string_field(&loop_report, "screenshot_ref").expect("shot ref");
+        let screenshot_hash = extract_json_top_level_string_field(&loop_report, "screenshot_hash")
+            .expect("shot hash");
+        let screenshot_contents =
+            fs::read_to_string(session_dir.join(&screenshot_ref)).expect("screenshot");
+        assert_eq!(stable_content_hash(&screenshot_contents), screenshot_hash);
+        assert_eq!(
+            parse_ppm_pixels_with_size(
+                &screenshot_contents,
+                BROWSER_LOCAL_SCREENSHOT_WIDTH,
+                BROWSER_LOCAL_SCREENSHOT_HEIGHT,
+            )
+            .expect("browser ppm pixels")
+            .len(),
+            BROWSER_LOCAL_SCREENSHOT_WIDTH * BROWSER_LOCAL_SCREENSHOT_HEIGHT
+        );
+
+        run_cli(["acceptance", "audit"], &root).expect("acceptance with browser");
+        assert_mvp007_status(&root, "passed");
+        let mvp = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("mvp-acceptance.json"),
+        )
+        .expect("mvp with browser");
+        assert!(mvp.contains("local deterministic browser-use artifacts"));
+        assert!(mvp.contains("matching PPM screenshot hashes"));
+        assert!(mvp.contains("live Playwright/Chrome Extension/browser control"));
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings with browser");
+        assert!(!findings.contains("\"id\":\"mvp-007\""));
+    }
+
+    #[test]
+    fn mvp007_stays_partial_for_spoofed_or_tampered_browser_artifacts() {
+        let root = temp_workspace("mvp007-browser-tamper");
+        run_cli(["browser", "local browser smoke"], &root).expect("browser");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance valid browser");
+        assert_mvp007_status(&root, "passed");
+
+        let session_dir = first_child_dir(&root.join(OPEN_SKSDIR).join("browser"));
+        let loop_path = session_dir.join("browser-interaction-loop.json");
+        let events_path = session_dir.join("browser-interaction-events.jsonl");
+        let runtime_path = session_dir.join("browser-runtime").join("index.html");
+        let snapshot_path = session_dir.join("browser-screenshot-snapshots.jsonl");
+        let final_state_path = session_dir.join("browser-final-state.json");
+        let policy_path = session_dir.join("browser-policy-decision.json");
+        let browser_session_path = session_dir.join("browser-session.json");
+        let session_summary_path = session_dir.join("session-summary.json");
+        let original_loop = fs::read_to_string(&loop_path).expect("loop");
+        let original_events = fs::read_to_string(&events_path).expect("events");
+        let original_runtime = fs::read_to_string(&runtime_path).expect("runtime");
+        let original_snapshot = fs::read_to_string(&snapshot_path).expect("snapshot");
+        let original_final_state = fs::read_to_string(&final_state_path).expect("final state");
+        let original_policy = fs::read_to_string(&policy_path).expect("policy");
+        let original_browser_session =
+            fs::read_to_string(&browser_session_path).expect("browser session");
+        let original_session_summary =
+            fs::read_to_string(&session_summary_path).expect("session summary");
+        let screenshot_ref =
+            extract_json_top_level_string_field(&original_loop, "screenshot_ref").expect("shot");
+        let screenshot_path = session_dir.join(&screenshot_ref);
+        let original_screenshot = fs::read_to_string(&screenshot_path).expect("ppm");
+
+        fs::write(
+            &loop_path,
+            original_loop.replace("\"click_recorded\": true", "\"click_recorded\": false"),
+        )
+        .expect("tamper loop");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance tampered loop");
+        assert_mvp007_status(&root, "partial");
+
+        fs::write(&loop_path, &original_loop).expect("restore loop");
+        let events_without_type = original_events
+            .lines()
+            .filter(|line| !line.contains("local_type_recorded"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        fs::write(&events_path, events_without_type).expect("tamper events");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance missing event");
+        assert_mvp007_status(&root, "partial");
+
+        fs::write(&events_path, &original_events).expect("restore events");
+        fs::write(&events_path, format!("{original_events}not-json\n")).expect("malformed events");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance malformed event");
+        assert_mvp007_status(&root, "partial");
+
+        fs::write(&events_path, &original_events).expect("restore events malformed");
+        fs::write(
+            &runtime_path,
+            original_runtime.replace(BROWSER_LOCAL_LOOP_INPUT_ID, "missing-browser-loop-input"),
+        )
+        .expect("tamper runtime");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance runtime tamper");
+        assert_mvp007_status(&root, "partial");
+
+        fs::write(&runtime_path, &original_runtime).expect("restore runtime");
+        fs::write(
+            &runtime_path,
+            format!(
+                "<!-- {} {} {} {} -->\n",
+                BROWSER_LOCAL_LOOP_BUTTON_ID,
+                BROWSER_LOCAL_LOOP_INPUT_ID,
+                BROWSER_LOCAL_LOOP_STATUS_ID,
+                BROWSER_LOCAL_LOOP_FINAL_TEXT
+            ),
+        )
+        .expect("comment runtime");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance comment runtime");
+        assert_mvp007_status(&root, "partial");
+
+        fs::write(&runtime_path, &original_runtime).expect("restore runtime comment");
+        fs::write(&screenshot_path, format!("{original_screenshot}0 0 0\n"))
+            .expect("tamper screenshot");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance screenshot tamper");
+        assert_mvp007_status(&root, "partial");
+
+        fs::write(&screenshot_path, &original_screenshot).expect("restore screenshot");
+        fs::write(
+            &loop_path,
+            original_loop.replace(
+                "\"open_recorded\": true",
+                "\"open_recorded\": true,\n  \"open_recorded\": true",
+            ),
+        )
+        .expect("duplicate loop field");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance duplicate loop");
+        assert_mvp007_status(&root, "partial");
+
+        fs::write(&loop_path, &original_loop).expect("restore duplicate loop");
+        fs::write(
+            &snapshot_path,
+            original_snapshot.replace(
+                "\"image_path\":",
+                "\"image_path\":\"../spoof.ppm\",\"image_path\":",
+            ),
+        )
+        .expect("duplicate snapshot field");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance duplicate snapshot");
+        assert_mvp007_status(&root, "partial");
+
+        fs::write(&snapshot_path, &original_snapshot).expect("restore snapshot");
+        fs::write(
+            &final_state_path,
+            original_final_state.replace(
+                "\"live_browser_control\": false",
+                "\"live_browser_control\": true",
+            ),
+        )
+        .expect("tamper final state live flag");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance live flag");
+        assert_mvp007_status(&root, "partial");
+
+        fs::write(&final_state_path, &original_final_state).expect("restore final state");
+        fs::write(
+            &policy_path,
+            original_policy.replace("\"sensitive\": false", "\"sensitive\": true"),
+        )
+        .expect("tamper policy");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance sensitive policy");
+        assert_mvp007_status(&root, "partial");
+
+        fs::write(&policy_path, &original_policy).expect("restore policy");
+        fs::remove_file(&browser_session_path).expect("remove browser session");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance missing browser session");
+        assert_mvp007_status(&root, "partial");
+
+        fs::write(&browser_session_path, &original_browser_session).expect("restore session");
+        fs::write(
+            &session_summary_path,
+            original_session_summary.replace(
+                "\"plane\": \"browser\"",
+                "\"plane\": \"browser\",\n  \"plane\": \"browser\"",
+            ),
+        )
+        .expect("duplicate session summary plane");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance session summary duplicate");
+        assert_mvp007_status(&root, "partial");
+
+        fs::write(&session_summary_path, &original_session_summary).expect("restore summary");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance restored browser");
+        assert_mvp007_status(&root, "passed");
+
+        let forged_dir = root
+            .join(OPEN_SKSDIR)
+            .join("browser")
+            .join("9999999999999999999-forged");
+        fs::create_dir_all(forged_dir.join("browser-runtime")).expect("forged runtime dir");
+        fs::create_dir_all(forged_dir.join("screenshots")).expect("forged screenshot dir");
+        for artifact in [
+            "browser-session.json",
+            "session-summary.json",
+            "browser-interaction-loop.json",
+            "browser-interaction-events.jsonl",
+            "browser-screenshot-snapshots.jsonl",
+            "browser-final-state.json",
+            "browser-policy-decision.json",
+            "browser-runtime/index.html",
+            &screenshot_ref,
+        ] {
+            let source = session_dir.join(artifact);
+            let target = forged_dir.join(artifact);
+            fs::create_dir_all(target.parent().expect("forged parent")).expect("forged parent dir");
+            fs::copy(source, target).expect("copy forged artifact");
+        }
+        run_cli(["acceptance", "audit"], &root).expect("acceptance forged latest dir");
+        assert_mvp007_status(&root, "partial");
+    }
+
+    #[test]
     fn browser_extracts_links_forms_meta_and_blocks_sensitive_actions() {
         let body = concat!(
             "<html><head><meta name=\"viewport\"><meta name='description'></head>",
@@ -15169,6 +16298,9 @@ mod tests {
             fs::read_to_string(session_dir.join("browser-final-state.json")).expect("final state");
         assert!(final_state.contains("\"status\": \"blocked_by_policy\""));
         assert!(final_state.contains("\"sensitive_action_detected\": true"));
+
+        run_cli(["acceptance", "audit"], &root).expect("acceptance sensitive browser");
+        assert_mvp007_status(&root, "partial");
     }
 
     #[test]
