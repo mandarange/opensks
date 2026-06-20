@@ -33,20 +33,23 @@ Current live local slices:
 - `qa run` executes `cargo fmt --check`, `cargo test --no-run`, and `cargo clippy --all-targets --all-features -- -D warnings` when `Cargo.toml` exists.
 - `qa run` also performs a built-in workspace secret scan.
 - `security audit` writes a threat model plus static security findings for prompt injection, MCP allowlist bypass phrasing, supply-chain shell pipes, unsafe actions, and secrets.
-- `cache warm` hashes local text-like cache segments and classifies stable versus dynamic context.
-- `bench` records timed local runtime checks.
-- `auth` discovers provider environment-variable configuration without exposing secret values.
-- `provider list`, `provider probe`, and `provider usage` write provider profiles, local endpoint reachability probes, and zero-leak usage counters.
+- `cache warm` hashes local text-like cache segments, classifies stable versus dynamic context, and writes `cache-hit-report.json` by comparing the current stable prefix with the previous warm snapshot.
+- `bench` records timed local runtime checks plus explicit multi-LLM roster, role-assignment, disagreement, quorum, and collaboration preflight artifacts with hidden fallback disabled.
+- `auth` discovers provider environment-variable configuration without exposing secret values and writes auth policy plus audit artifacts for Keychain-first storage posture, OAuth candidates, API keys, and local endpoints.
+- `provider list`, `provider probe`, `provider usage`, and `provider adapter-check` write provider profiles, first-class/optional adapter capabilities, local endpoint reachability probes, OpenRouter/OpenAI adapter smoke evidence, and zero-leak usage counters.
+- `updater plan` writes stable/latest channel, local signature proof, update boundary, rollback, and final-state artifacts without performing a network install.
+- `acceptance audit` writes MVP/Beta/Production acceptance ledgers and findings so remaining live gaps are explicit rather than inferred from green tests.
 - `voxel index` scans workspace text into code, symbol, design, security, provider, package, and context voxels with stable/dynamic cache classification.
+- Goal missions write `automation-loop.json` to represent goal analysis, context composition, work decomposition, QA, repair, final apply, report, and self-improve stages with explicit live/artifact status.
 - Goal missions write `goal-kind-registry.json` with every PRD section 2.3 goal kind and the selected kind for the run.
 - `browser` brokers safe network observation, extracts title/hash/link/form/meta evidence for HTTP(S) targets, and writes HAR-like/final-state/action-plan/policy-decision artifacts.
-- `computer-use` brokers safe observation, blocks or marks mouse/keyboard and sensitive actions for approval, and writes screenshot/final-state/action-plan/policy-decision artifacts.
+- `computer-use` brokers safe observation, blocks or marks mouse/keyboard and sensitive actions for approval, and writes screenshot/final-state/action-plan/policy-decision plus isolated browser/container observation-loop artifacts.
 - `app-use` brokers native app intents, captures frontmost/running-app inspection state, and blocks or marks sensitive native actions for approval.
-- `app` writes a static `.opensks/app/dashboard.html` plus `gui-data.json` from local PRD, QA/security, Voxel TriWiki, provider, mission, and use-plane artifacts.
-- `design qa` scans local design surfaces and records static accessibility, responsive, and color-token findings.
+- `app` writes a static `.opensks/app/dashboard.html` plus `gui-data.json` from local PRD, QA/security, Voxel TriWiki, provider, mission, and use-plane artifacts, and also writes platform, module, macOS integration, source-note, and product-statement manifests.
+- `design qa` scans local design surfaces, records static accessibility/responsive/color-token findings, and writes `design-visual-diff-report.json` from deterministic source visual signatures between runs.
 - `mcp audit` writes a broker policy that denies raw model tool calls by default.
 - `mcp describe`, `mcp invoke`, and `mcp serve --once` provide a local MCP-style JSON-RPC surface for allowlisted OpenSKS tools.
-- `scheduler run` writes a bounded local scheduler plan, event stream, and final state.
+- `scheduler run` writes a bounded local scheduler plan, event stream, final state, and live `stage-overlap-report.json` from concurrent runtime metadata checks.
 - `worktree create` creates an isolated snapshot under `.opensks/worktrees/.../workspace`.
 - `patch propose` writes a patch envelope plus gate result that blocks final apply until real checks pass.
 

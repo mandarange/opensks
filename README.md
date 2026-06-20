@@ -31,6 +31,9 @@ cargo run -- auth
 cargo run -- provider list
 cargo run -- provider probe
 cargo run -- provider usage
+cargo run -- provider adapter-check
+cargo run -- updater plan
+cargo run -- acceptance audit
 cargo run -- app
 cargo run -- scheduler run "verify local runtime"
 cargo run -- worktree create "worker lane one"
@@ -49,6 +52,7 @@ Each mission currently includes:
 ```text
 goal-loop.json
 goal-state.jsonl
+automation-loop.json
 progress-ledger.json
 stop-policy.json
 tool-plan.json
@@ -60,14 +64,30 @@ prd-coverage.json
 ```
 
 The final seal is intentionally marked `partial`: the current implementation
-proves intake, artifact writing, capability planning, Voxel TriWiki seeding,
-and PRD coverage accounting. Goal runs also write local scheduler, QA/security,
+proves intake, artifact writing, automation-loop planning, capability planning,
+Voxel TriWiki seeding, and PRD coverage accounting. Goal runs also write local scheduler, QA/security,
 worktree-isolation, and patch-gate artifacts. `qa run` executes local Rust
 checks when a Cargo workspace is present and always runs the built-in secret
-scan. `cache warm` hashes local cache segments, `bench` records timed local
-runtime checks, `auth` discovers configured provider environment variables
-without exposing values, and `provider list|probe|usage` writes provider
-profiles, local endpoint reachability probes, and zero-leak usage counters.
+scan. `cache warm` hashes local cache segments and writes a
+`cache-hit-report.json` comparing the current stable prefix with the previous
+warm snapshot; provider cached-token counters are still marked not connected.
+`bench` records timed local runtime checks plus explicit multi-LLM roster,
+role-assignment, disagreement, quorum, and collaboration preflight artifacts
+with hidden fallback disabled. `auth` discovers configured provider environment variables without
+exposing values and writes auth policy plus audit artifacts for Keychain-first
+storage posture, OAuth candidates, API keys, and local endpoints. `provider list|probe|usage` writes provider
+profiles, first-class/optional adapter capabilities, local endpoint
+reachability probes, and zero-leak usage counters. `provider adapter-check`
+writes OpenRouter/OpenAI adapter smoke evidence; authenticated remote checks are
+only attempted when credentials are configured and
+`OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1` is set.
+Run `provider adapter-check` before rerunning `bench` when the collaboration
+preflight should include adapter-check presence evidence.
+`updater plan` writes stable/latest channel, local signature proof, update
+boundary, rollback, and final-state artifacts without performing a network
+install.
+`acceptance audit` writes MVP/Beta/Production acceptance ledgers and findings so
+remaining live gaps are explicit rather than inferred from green tests.
 `voxel index` scans workspace text into code, symbol, design, security,
 provider, package, and context voxels with stable/dynamic cache classification.
 `browser` runs a local policy broker around curl network/page probes for
@@ -75,16 +95,27 @@ HTTP(S) targets, extracting title/hash/link/form/meta evidence while blocking
 or approval-gating sensitive browser actions. `computer-use` runs a local policy
 broker: safe observation can attempt screenshot capture, while mouse/keyboard
 and sensitive actions are blocked or marked approval-only and recorded in
-action-plan/policy-decision artifacts. `app-use` runs the same kind of broker
+action-plan/policy-decision artifacts. It also writes an isolated
+browser/container observation-loop seed and ledger without launching live
+browser control. `app-use` runs the same kind of broker
 for native app intents: safe inspection captures frontmost and running-app
 state, while sensitive native actions are blocked or approval-only.
 `app` writes a static local mission-control dashboard under `.opensks/app`
 that summarizes PRD coverage, QA/security status, Voxel TriWiki counts,
-provider configuration, missions, and browser/computer/app-use sessions.
+provider configuration, missions, and browser/computer/app-use sessions. It
+also writes platform, module, macOS integration, source-note, and product
+statement manifests that preserve PRD product posture without claiming live
+native GUI or updater completion.
+`scheduler run` writes the bounded stage plan, event stream, final state, and a
+live `stage-overlap-report.json` from concurrent local runtime metadata checks;
+production provider/worker overlap tuning is still reported as partial.
 Non-goal computer/app capability commands still create the PRD-named
 audit/session artifacts with explicit non-live status where the full engine does
 not exist yet. `design qa` scans local design surfaces for static
-accessibility, responsive, and color token findings.
+accessibility, responsive, and color token findings, then writes
+`design-visual-diff-report.json` from deterministic source visual signatures
+between runs. Rendered screenshot pixel diff and gpt-image-2 review remain
+non-live.
 `security audit` scans workspace text for secrets,
 prompt-injection-like phrases, MCP allowlist bypass phrasing, unsafe shell
 actions, and supply-chain shell pipes. `mcp describe`, `mcp invoke`, and
@@ -101,7 +132,7 @@ runtime work.
 
 Still not live:
 
-- Remote provider API adapters and OAuth/Keychain integration
+- Remote provider API adapters and live OAuth/Keychain integration
 - External MCP client/server transports beyond the local stdio JSON-RPC
   one-shot surface
 - Full Playwright browser control, screenshots, clicks, typing, and DOM capture
@@ -111,4 +142,4 @@ Still not live:
 - macOS accessibility/app automation beyond brokered inspection and inventory
 - Provider-backed worker execution, repair waves, and final apply transactions
 - Native/live Tauri GUI beyond the static dashboard artifact
-- Signed updater and production-grade acceptance targets
+- Production crypto/notarized updater apply and production-grade acceptance targets

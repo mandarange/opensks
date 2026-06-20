@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::fs;
@@ -173,6 +174,19 @@ struct CommandCheck {
 }
 
 #[derive(Debug, Clone)]
+struct StageOverlapSpan {
+    name: String,
+    command: Vec<String>,
+    status: String,
+    exit_code: Option<i32>,
+    start_ms: u128,
+    end_ms: u128,
+    duration_ms: u128,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Debug, Clone)]
 struct SecretFinding {
     file: String,
     pattern: String,
@@ -185,6 +199,21 @@ struct CacheSegment {
     bytes: u64,
     content_hash: String,
     stability: String,
+}
+
+#[derive(Debug, Clone)]
+struct CachePrefixHitReport {
+    baseline_available: bool,
+    previous_stable_segment_count: usize,
+    current_stable_segment_count: usize,
+    matched_stable_segment_count: usize,
+    current_stable_bytes: u64,
+    matched_stable_bytes: u64,
+    estimated_cached_tokens: u64,
+    estimated_cache_write_tokens: u64,
+    local_hit_percent: f64,
+    target_hit_percent: f64,
+    local_target_met: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -314,10 +343,24 @@ struct ProviderProbe {
 }
 
 #[derive(Debug, Clone)]
+struct ProviderAdapterCheck {
+    name: String,
+    configured: bool,
+    attempted: bool,
+    status: String,
+    endpoint: String,
+    http_code: Option<String>,
+    duration_ms: u128,
+    stderr: String,
+}
+
+#[derive(Debug, Clone)]
 struct DesignSurface {
     path: String,
     kind: String,
     bytes: u64,
+    content_hash: String,
+    visual_signature: String,
     color_tokens: Vec<String>,
 }
 
@@ -328,6 +371,15 @@ struct DesignFinding {
     rule: String,
     severity: String,
     message: String,
+}
+
+#[derive(Debug, Clone)]
+struct DesignVisualDiff {
+    path: String,
+    status: String,
+    previous_signature: Option<String>,
+    current_signature: Option<String>,
+    bytes_delta: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -345,6 +397,14 @@ struct SecurityScanSummary {
     secret_findings: usize,
     security_findings: usize,
     critical_or_warning_findings: usize,
+}
+
+#[derive(Debug, Clone)]
+struct AcceptanceItem {
+    id: &'static str,
+    criterion: &'static str,
+    status: &'static str,
+    evidence: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -404,6 +464,8 @@ where
         "bench" => run_bench_command(&args[1..], cwd),
         "auth" => run_auth_command(&args[1..], cwd),
         "provider" => run_provider_command(&args[1..], cwd),
+        "updater" => run_updater_command(&args[1..], cwd),
+        "acceptance" => run_acceptance_command(&args[1..], cwd),
         "app" => run_app_command(&args[1..], cwd),
         "scheduler" => run_scheduler_command(&args[1..], cwd),
         "worktree" => run_worktree_command(&args[1..], cwd),
@@ -644,6 +706,10 @@ fn run_computer_use_command(args: &[String], cwd: &Path) -> Result<CliOutput, Op
             "computer-session.json",
             "computer-actions.jsonl",
             "screenshots/",
+            "isolated-browser-runtime/",
+            "computer-browser-loop.json",
+            "computer-browser-loop-events.jsonl",
+            "isolated-browser-container.json",
             "computer-action-plan.json",
             "computer-policy-decision.json",
             "computer-final-state.json",
@@ -796,17 +862,26 @@ fn run_cache_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksEr
     fs::create_dir_all(&dir)?;
     let stamp = ClockStamp::now()?;
     let segments = collect_cache_segments(cwd)?;
+    let snapshot_path = dir.join("cache-prefix-snapshot.jsonl");
+    let previous_prefix = read_cache_prefix_snapshot(&snapshot_path)?;
+    let prefix_hit = compute_cache_prefix_hit(&previous_prefix, &segments);
     write_text_atomic(
         &dir.join("cache-warm-report.json"),
         &render_cache_report(&stamp, &segments),
     )?;
     write_text_atomic(
         &dir.join("cache-dashboard.json"),
-        &render_cache_dashboard(&stamp, &segments),
+        &render_cache_dashboard(&stamp, &segments, &prefix_hit),
     )?;
+    write_text_atomic(
+        &dir.join("cache-hit-report.json"),
+        &render_cache_hit_report(&stamp, &prefix_hit),
+    )?;
+    write_text_atomic(&snapshot_path, &render_cache_prefix_snapshot(&segments))?;
     Ok(CliOutput {
         stdout: format!(
-            "warmed cache planning artifacts\nartifacts: {}\n",
+            "warmed cache planning artifacts\nlocal_prefix_hit_percent: {:.2}\nartifacts: {}\n",
+            prefix_hit.local_hit_percent,
             dir.display()
         ),
     })
@@ -875,9 +950,12 @@ fn run_design_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksE
     fs::create_dir_all(&dir)?;
     let stamp = ClockStamp::now()?;
     let (surfaces, findings) = collect_design_qa(cwd)?;
+    let snapshot_path = dir.join("design-visual-snapshots.jsonl");
+    let previous_surfaces = read_design_surface_snapshot(&snapshot_path)?;
+    let visual_diffs = compute_design_visual_diffs(&previous_surfaces, &surfaces);
     write_text_atomic(
         &dir.join("design-qa-report.json"),
-        &render_design_qa_report(&stamp, &surfaces, &findings),
+        &render_design_qa_report(&stamp, &surfaces, &findings, &visual_diffs),
     )?;
     write_text_atomic(
         &dir.join("design-surface-inventory.json"),
@@ -887,11 +965,17 @@ fn run_design_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksE
         &dir.join("design-findings.jsonl"),
         &render_design_findings_jsonl(&stamp, &findings),
     )?;
+    write_text_atomic(
+        &dir.join("design-visual-diff-report.json"),
+        &render_design_visual_diff_report(&stamp, &visual_diffs, !previous_surfaces.is_empty()),
+    )?;
+    write_text_atomic(&snapshot_path, &render_design_surface_snapshot(&surfaces))?;
     Ok(CliOutput {
         stdout: format!(
-            "wrote design QA artifacts\nsurfaces: {}\nfindings: {}\nreport: {}\n",
+            "wrote design QA artifacts\nsurfaces: {}\nfindings: {}\nvisual_diffs: {}\nreport: {}\n",
             surfaces.len(),
             findings.len(),
+            visual_diffs.len(),
             dir.join("design-qa-report.json").display()
         ),
     })
@@ -902,14 +986,42 @@ fn run_bench_command(_args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksE
     fs::create_dir_all(&dir)?;
     let stamp = ClockStamp::now()?;
     let checks = run_local_qa_checks(cwd);
+    let statuses = provider_statuses();
+    let adapter_check_present = cwd
+        .join(OPEN_SKSDIR)
+        .join("providers")
+        .join("provider-adapter-check.json")
+        .exists();
     write_text_atomic(
         &dir.join("benchmark-report.json"),
         &render_benchmark_report(&stamp, &checks),
     )?;
+    write_text_atomic(
+        &dir.join("multi-llm-roster.json"),
+        &render_multi_llm_roster(&stamp),
+    )?;
+    write_text_atomic(
+        &dir.join("role-assignments.json"),
+        &render_role_assignments(&stamp),
+    )?;
+    write_text_atomic(
+        &dir.join("disagreement-report.json"),
+        &render_disagreement_report(&stamp),
+    )?;
+    write_text_atomic(
+        &dir.join("quorum-report.json"),
+        &render_quorum_report(&stamp),
+    )?;
+    write_text_atomic(
+        &dir.join("collaboration-preflight.json"),
+        &render_collaboration_preflight(&stamp, &statuses, adapter_check_present),
+    )?;
     Ok(CliOutput {
         stdout: format!(
-            "wrote benchmark artifact\nreport: {}\n",
-            dir.join("benchmark-report.json").display()
+            "wrote benchmark and multi-LLM artifacts\nartifacts: {}\nreport: {}\npreflight: {}\n",
+            dir.display(),
+            dir.join("benchmark-report.json").display(),
+            dir.join("collaboration-preflight.json").display()
         ),
     })
 }
@@ -926,6 +1038,11 @@ fn run_auth_command(_args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksEr
     write_text_atomic(
         &dir.join("provider-registry.json"),
         &render_provider_registry(&stamp, &statuses, &[]),
+    )?;
+    write_text_atomic(&dir.join("auth-policy.json"), &render_auth_policy(&stamp))?;
+    write_text_atomic(
+        &dir.join("auth-audit-log.jsonl"),
+        &render_auth_audit_event(&stamp, "auth_registry_snapshot"),
     )?;
     Ok(CliOutput {
         stdout: format!(
@@ -994,11 +1111,108 @@ fn run_provider_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSk
                 ),
             })
         }
+        "adapter-check" => {
+            let checks = check_provider_adapters(&dir, &statuses);
+            write_provider_registry_artifacts(&dir, &stamp, &statuses, &[])?;
+            write_text_atomic(
+                &dir.join("provider-adapter-check.json"),
+                &render_provider_adapter_check_report(&stamp, &checks),
+            )?;
+            let attempted = checks.iter().filter(|check| check.attempted).count();
+            Ok(CliOutput {
+                stdout: format!(
+                    "checked remote provider adapters\nadapters: {}\nattempted: {}\nreport: {}\n",
+                    checks.len(),
+                    attempted,
+                    dir.join("provider-adapter-check.json").display()
+                ),
+            })
+        }
         other => Err(OpenSksError::Usage(format!(
             "unknown provider subcommand `{other}`\n\n{}",
             provider_usage()
         ))),
     }
+}
+
+fn run_updater_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
+    require_exact_subcommand(args, "plan", "usage: opensks updater plan")?;
+    let dir = cwd.join(OPEN_SKSDIR).join("updater");
+    fs::create_dir_all(&dir)?;
+    let stamp = ClockStamp::now()?;
+    let manifest = render_update_manifest(&stamp);
+    let manifest_hash = stable_content_hash(&manifest);
+    let signature = local_update_signature(&manifest_hash);
+    write_text_atomic(&dir.join("update-manifest.json"), &manifest)?;
+    write_text_atomic(
+        &dir.join("update-signature.json"),
+        &render_update_signature(&stamp, &manifest_hash, &signature),
+    )?;
+    write_text_atomic(
+        &dir.join("update-channels.json"),
+        &render_update_channels(&stamp),
+    )?;
+    write_text_atomic(
+        &dir.join("rollback-plan.json"),
+        &render_rollback_plan(&stamp),
+    )?;
+    write_text_atomic(
+        &dir.join("update-boundary.json"),
+        &render_update_boundary(&stamp),
+    )?;
+    write_text_atomic(
+        &dir.join("updater-final-state.json"),
+        &render_updater_final_state(&stamp, &manifest_hash, &signature),
+    )?;
+    Ok(CliOutput {
+        stdout: format!(
+            "wrote signed updater plan artifacts\nartifacts: {}\nmanifest_hash: {}\n",
+            dir.display(),
+            manifest_hash
+        ),
+    })
+}
+
+fn run_acceptance_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
+    require_exact_subcommand(args, "audit", "usage: opensks acceptance audit")?;
+    let dir = cwd.join(OPEN_SKSDIR).join("acceptance");
+    fs::create_dir_all(&dir)?;
+    let stamp = ClockStamp::now()?;
+    let mvp = mvp_acceptance_items();
+    let beta = beta_acceptance_items();
+    let production = production_acceptance_items();
+    write_text_atomic(
+        &dir.join("mvp-acceptance.json"),
+        &render_acceptance_report(&stamp, "mvp", &mvp),
+    )?;
+    write_text_atomic(
+        &dir.join("beta-acceptance.json"),
+        &render_acceptance_report(&stamp, "beta", &beta),
+    )?;
+    write_text_atomic(
+        &dir.join("production-acceptance.json"),
+        &render_acceptance_report(&stamp, "production", &production),
+    )?;
+    write_text_atomic(
+        &dir.join("acceptance-summary.json"),
+        &render_acceptance_summary(&stamp, &mvp, &beta, &production),
+    )?;
+    write_text_atomic(
+        &dir.join("acceptance-findings.jsonl"),
+        &render_acceptance_findings_jsonl(&stamp, &mvp, &beta, &production),
+    )?;
+    let (total, passed, partial, failed) =
+        combined_acceptance_counts(&[&mvp[..], &beta[..], &production[..]]);
+    Ok(CliOutput {
+        stdout: format!(
+            "wrote acceptance audit artifacts\ncriteria: {}\npassed: {}\npartial: {}\nfailed: {}\nartifacts: {}\n",
+            total,
+            passed,
+            partial,
+            failed,
+            dir.display()
+        ),
+    })
 }
 
 fn run_app_command(_args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
@@ -1009,6 +1223,26 @@ fn run_app_command(_args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksErr
     write_text_atomic(
         &dir.join("workspace-manifest.json"),
         &render_workspace_manifest(&stamp),
+    )?;
+    write_text_atomic(
+        &dir.join("platform-manifest.json"),
+        &render_platform_manifest(&stamp),
+    )?;
+    write_text_atomic(
+        &dir.join("module-manifest.json"),
+        &render_module_manifest(&stamp),
+    )?;
+    write_text_atomic(
+        &dir.join("macos-integration-manifest.json"),
+        &render_macos_integration_manifest(&stamp),
+    )?;
+    write_text_atomic(
+        &dir.join("source-notes-ledger.json"),
+        &render_source_notes_ledger(&stamp),
+    )?;
+    write_text_atomic(
+        &dir.join("product-statement.json"),
+        &render_product_statement(&stamp),
     )?;
     write_text_atomic(&dir.join("gui-data.json"), &render_gui_data(&stamp, cwd)?)?;
     write_text_atomic(
@@ -1039,6 +1273,7 @@ fn run_scheduler_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenS
     let dir = cwd.join(OPEN_SKSDIR).join("scheduler").join(&run_id);
     fs::create_dir_all(&dir)?;
     let checks = run_local_qa_checks(cwd);
+    let overlap_spans = run_scheduler_overlap_checks(cwd);
     write_text_atomic(
         &dir.join("stage-scheduler.json"),
         &render_scheduler_plan(&stamp, &run_id, &goal),
@@ -1051,11 +1286,16 @@ fn run_scheduler_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenS
         &dir.join("scheduler-final-state.json"),
         &render_scheduler_final_state(&stamp, &run_id, &checks),
     )?;
+    write_text_atomic(
+        &dir.join("stage-overlap-report.json"),
+        &render_stage_overlap_report(&stamp, &run_id, &overlap_spans),
+    )?;
     Ok(CliOutput {
         stdout: format!(
-            "ran local scheduler slice\nrun: {}\nchecks: {}\nartifacts: {}\n",
+            "ran local scheduler slice\nrun: {}\nchecks: {}\noverlap_spans: {}\nartifacts: {}\n",
             run_id,
             checks.len(),
+            overlap_spans.len(),
             dir.display()
         ),
     })
@@ -2949,11 +3189,12 @@ fn plan_computer_action(target: &str) -> ComputerActionDecision {
     ]
     .iter()
     .any(|needle| lower.contains(needle));
-    let interactive = [
-        "click", "type", "drag", "press", "key", "scroll", "paste", "submit", "open",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
+    let interactive = contains_any_action_token(
+        &lower,
+        &[
+            "click", "type", "drag", "press", "key", "scroll", "paste", "submit", "open",
+        ],
+    );
     let wait_requested = lower.contains("wait") || lower.contains("pause");
     let observe_requested = [
         "inspect",
@@ -3010,6 +3251,13 @@ fn plan_computer_action(target: &str) -> ComputerActionDecision {
     }
 }
 
+fn contains_any_action_token(lower: &str, tokens: &[&str]) -> bool {
+    lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .any(|token| tokens.contains(&token))
+}
+
 fn classify_computer_action(lower: &str) -> String {
     for (needle, action) in [
         ("password", "credential_entry"),
@@ -3019,6 +3267,7 @@ fn classify_computer_action(lower: &str) -> String {
         ("drag", "drag"),
         ("press", "key_press"),
         ("scroll", "scroll"),
+        ("open", "open"),
         ("paste", "paste"),
         ("submit", "submit"),
         ("delete", "delete"),
@@ -3057,7 +3306,46 @@ fn write_computer_capture_artifacts(
         &dir.join("computer-action-plan.json"),
         &render_computer_action_plan(session, target, decision),
     )?;
+    let isolated_runtime = write_isolated_browser_runtime(cwd, session, target)?;
+    write_text_atomic(
+        &dir.join("isolated-browser-container.json"),
+        &render_isolated_browser_container(session, target, &isolated_runtime),
+    )?;
+    write_text_atomic(
+        &dir.join("computer-browser-loop.json"),
+        &render_computer_browser_loop(session, target, screenshot, decision, &isolated_runtime),
+    )?;
+    write_text_atomic(
+        &dir.join("computer-browser-loop-events.jsonl"),
+        &render_computer_browser_loop_events(session, screenshot, decision, &isolated_runtime),
+    )?;
     Ok(())
+}
+
+fn write_isolated_browser_runtime(
+    cwd: &Path,
+    session: &CapabilitySession,
+    target: &str,
+) -> Result<PathBuf, OpenSksError> {
+    let runtime_dir = cwd
+        .join(OPEN_SKSDIR)
+        .join(session.plane)
+        .join(&session.id)
+        .join("isolated-browser-runtime");
+    fs::create_dir_all(&runtime_dir)?;
+    let page = format!(
+        concat!(
+            "<!doctype html>\n",
+            "<html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n",
+            "<title>OpenSKS isolated observation loop</title></head>\n",
+            "<body><main><h1>OpenSKS isolated observation loop</h1>\n",
+            "<p data-target=\"{}\">Observation-only browser/container seed.</p>\n",
+            "</main></body></html>\n"
+        ),
+        html_escape_attr(target)
+    );
+    write_text_atomic(&runtime_dir.join("index.html"), &page)?;
+    Ok(runtime_dir)
 }
 
 fn render_computer_final_state(
@@ -3098,6 +3386,103 @@ fn render_computer_final_state(
         decision.sensitive,
         decision.wait_allowed
     )
+}
+
+fn render_isolated_browser_container(
+    session: &CapabilitySession,
+    target: &str,
+    runtime_dir: &Path,
+) -> String {
+    let page_path = runtime_dir.join("index.html");
+    let page_hash = fs::read_to_string(&page_path)
+        .map(|contents| stable_content_hash(&contents))
+        .unwrap_or_else(|_| "unavailable".to_string());
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.isolated-browser-container.v1\",\n",
+            "  \"session_id\": {},\n",
+            "  \"target\": {},\n",
+            "  \"isolation_root\": {},\n",
+            "  \"seed_page\": {},\n",
+            "  \"seed_page_hash\": {},\n",
+            "  \"network_access_enabled\": false,\n",
+            "  \"browser_process_launched\": false,\n",
+            "  \"live_browser_control\": false,\n",
+            "  \"container_status\": \"local_artifact_seeded\"\n",
+            "}}\n"
+        ),
+        json_string(&session.id),
+        json_string(target),
+        json_string(&runtime_dir.display().to_string()),
+        json_string(&page_path.display().to_string()),
+        json_string(&page_hash)
+    )
+}
+
+fn render_computer_browser_loop(
+    session: &CapabilitySession,
+    target: &str,
+    screenshot: &ScreenshotCapture,
+    decision: &ComputerActionDecision,
+    runtime_dir: &Path,
+) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.computer-browser-loop.v1\",\n",
+            "  \"session_id\": {},\n",
+            "  \"target\": {},\n",
+            "  \"status\": \"observation_loop_artifact_recorded\",\n",
+            "  \"isolation_root\": {},\n",
+            "  \"loop_iterations\": 3,\n",
+            "  \"computer_session_ref\": \"computer-session.json\",\n",
+            "  \"computer_final_state_ref\": \"computer-final-state.json\",\n",
+            "  \"browser_container_ref\": \"isolated-browser-container.json\",\n",
+            "  \"browser_seed_ref\": \"isolated-browser-runtime/index.html\",\n",
+            "  \"screenshot_status\": {},\n",
+            "  \"policy_decision\": {},\n",
+            "  \"live_browser_container_control\": false,\n",
+            "  \"browser_click_type_executed\": false,\n",
+            "  \"mouse_keyboard_actions_executed\": false,\n",
+            "  \"requires_approval_before_interaction\": true,\n",
+            "  \"evidence_note\": \"isolated observation-loop artifacts link computer-use policy, screenshot attempt, and local browser/container seed; live browser actions and mouse/keyboard execution remain unverified\"\n",
+            "}}\n"
+        ),
+        json_string(&session.id),
+        json_string(target),
+        json_string(&runtime_dir.display().to_string()),
+        json_string(&screenshot.status),
+        json_string(&decision.decision)
+    )
+}
+
+fn render_computer_browser_loop_events(
+    session: &CapabilitySession,
+    screenshot: &ScreenshotCapture,
+    decision: &ComputerActionDecision,
+    runtime_dir: &Path,
+) -> String {
+    [
+        format!(
+            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"isolated_runtime_created\",\"path\":{},\"executed\":true}}",
+            json_string(&session.id),
+            json_string(&runtime_dir.display().to_string())
+        ),
+        format!(
+            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"computer_observation\",\"screenshot_status\":{},\"executed\":{}}}",
+            json_string(&session.id),
+            json_string(&screenshot.status),
+            screenshot.attempted
+        ),
+        format!(
+            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"interactive_browser_or_mouse_keyboard_action\",\"executed\":false,\"policy_decision\":{},\"approval_required\":true}}",
+            json_string(&session.id),
+            json_string(&decision.decision)
+        ),
+    ]
+    .join("\n")
+        + "\n"
 }
 
 fn render_computer_actions_jsonl(
@@ -3215,6 +3600,98 @@ fn run_local_qa_checks(cwd: &Path) -> Vec<CommandCheck> {
     .into_iter()
     .map(|(name, command)| run_command_check(name, command, cwd))
     .collect()
+}
+
+fn run_scheduler_overlap_checks(cwd: &Path) -> Vec<StageOverlapSpan> {
+    let origin = Instant::now();
+    let commands = [
+        ("runtime-rustc-version", vec!["rustc", "--version"]),
+        ("runtime-cargo-version", vec!["cargo", "--version"]),
+    ];
+    let mut handles = Vec::new();
+
+    for (name, command) in commands {
+        let name = name.to_string();
+        let command = command
+            .into_iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        let fallback_name = name.clone();
+        let fallback_command = command.clone();
+        let cwd = cwd.to_path_buf();
+        let thread_origin = origin;
+        handles.push((
+            fallback_name,
+            fallback_command,
+            std::thread::spawn(move || run_stage_overlap_span(&name, command, &cwd, thread_origin)),
+        ));
+    }
+
+    handles
+        .into_iter()
+        .map(|(name, command, handle)| match handle.join() {
+            Ok(span) => span,
+            Err(_) => StageOverlapSpan {
+                name,
+                command,
+                status: "error".to_string(),
+                exit_code: None,
+                start_ms: 0,
+                end_ms: origin.elapsed().as_millis(),
+                duration_ms: 0,
+                stdout: String::new(),
+                stderr: "scheduler overlap worker panicked".to_string(),
+            },
+        })
+        .collect()
+}
+
+fn run_stage_overlap_span(
+    name: &str,
+    command: Vec<String>,
+    cwd: &Path,
+    origin: Instant,
+) -> StageOverlapSpan {
+    let start_ms = origin.elapsed().as_millis();
+    let started = Instant::now();
+    let mut process_command = process::Command::new(&command[0]);
+    process_command.args(&command[1..]).current_dir(cwd);
+    match process_command.output() {
+        Ok(output) => {
+            let duration_ms = started.elapsed().as_millis();
+            let end_ms = origin.elapsed().as_millis();
+            StageOverlapSpan {
+                name: name.to_string(),
+                command,
+                status: if output.status.success() {
+                    "passed".to_string()
+                } else {
+                    "failed".to_string()
+                },
+                exit_code: output.status.code(),
+                start_ms,
+                end_ms,
+                duration_ms,
+                stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            }
+        }
+        Err(error) => {
+            let duration_ms = started.elapsed().as_millis();
+            let end_ms = origin.elapsed().as_millis();
+            StageOverlapSpan {
+                name: name.to_string(),
+                command,
+                status: "error".to_string(),
+                exit_code: None,
+                start_ms,
+                end_ms,
+                duration_ms,
+                stdout: String::new(),
+                stderr: error.to_string(),
+            }
+        }
+    }
 }
 
 fn run_command_check(name: &str, command: Vec<&str>, cwd: &Path) -> CommandCheck {
@@ -3564,6 +4041,83 @@ fn collect_cache_segments_from_dir(
         }
     }
     Ok(())
+}
+
+fn read_cache_prefix_snapshot(path: &Path) -> Result<Vec<CacheSegment>, OpenSksError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let contents = fs::read_to_string(path)?;
+    let segments = contents
+        .lines()
+        .filter_map(|line| {
+            let path = extract_json_string_field(line, "path")?;
+            let content_hash = extract_json_string_field(line, "content_hash")?;
+            let stability = extract_json_string_field(line, "stability")?;
+            let bytes = extract_json_number_field(line, "bytes").unwrap_or_default() as u64;
+            Some(CacheSegment {
+                name: path.replace('/', "::"),
+                path,
+                bytes,
+                content_hash,
+                stability,
+            })
+        })
+        .collect();
+    Ok(segments)
+}
+
+fn compute_cache_prefix_hit(
+    previous: &[CacheSegment],
+    current: &[CacheSegment],
+) -> CachePrefixHitReport {
+    let previous_stable = previous
+        .iter()
+        .filter(|segment| segment.stability == "stable")
+        .map(|segment| (segment.path.as_str(), segment))
+        .collect::<HashMap<_, _>>();
+    let current_stable = current
+        .iter()
+        .filter(|segment| segment.stability == "stable")
+        .collect::<Vec<_>>();
+    let matched = current_stable
+        .iter()
+        .filter(|segment| {
+            previous_stable
+                .get(segment.path.as_str())
+                .is_some_and(|previous| previous.content_hash == segment.content_hash)
+        })
+        .collect::<Vec<_>>();
+    let current_stable_bytes = current_stable
+        .iter()
+        .map(|segment| segment.bytes)
+        .sum::<u64>();
+    let matched_stable_bytes = matched.iter().map(|segment| segment.bytes).sum::<u64>();
+    let local_hit_percent = if current_stable_bytes == 0 {
+        0.0
+    } else {
+        (matched_stable_bytes as f64 / current_stable_bytes as f64) * 100.0
+    };
+    let target_hit_percent = 95.0;
+    CachePrefixHitReport {
+        baseline_available: !previous_stable.is_empty(),
+        previous_stable_segment_count: previous_stable.len(),
+        current_stable_segment_count: current_stable.len(),
+        matched_stable_segment_count: matched.len(),
+        current_stable_bytes,
+        matched_stable_bytes,
+        estimated_cached_tokens: estimate_tokens_from_bytes(matched_stable_bytes),
+        estimated_cache_write_tokens: estimate_tokens_from_bytes(
+            current_stable_bytes.saturating_sub(matched_stable_bytes),
+        ),
+        local_hit_percent,
+        target_hit_percent,
+        local_target_met: !previous_stable.is_empty() && local_hit_percent >= target_hit_percent,
+    }
+}
+
+fn estimate_tokens_from_bytes(bytes: u64) -> u64 {
+    bytes.saturating_add(3) / 4
 }
 
 fn index_workspace_voxels(cwd: &Path) -> Result<Vec<Voxel>, OpenSksError> {
@@ -3928,15 +4482,134 @@ fn collect_design_qa_from_dir(
         let relative = relative_path(root, &path);
         let kind = design_surface_kind(&path, &contents);
         let color_tokens = extract_color_tokens(&contents);
+        let visual_signature = design_visual_signature(&contents, &color_tokens);
         surfaces.push(DesignSurface {
             path: relative.clone(),
             kind,
             bytes: contents.len() as u64,
+            content_hash: stable_content_hash(&contents),
+            visual_signature,
             color_tokens: color_tokens.iter().take(32).cloned().collect(),
         });
         inspect_design_surface(&relative, &contents, findings);
     }
     Ok(())
+}
+
+fn read_design_surface_snapshot(path: &Path) -> Result<Vec<DesignSurface>, OpenSksError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let contents = fs::read_to_string(path)?;
+    let surfaces = contents
+        .lines()
+        .filter_map(|line| {
+            let path = extract_json_string_field(line, "path")?;
+            let kind =
+                extract_json_string_field(line, "kind").unwrap_or_else(|| "unknown".to_string());
+            let content_hash = extract_json_string_field(line, "content_hash")?;
+            let visual_signature = extract_json_string_field(line, "visual_signature")?;
+            let bytes = extract_json_number_field(line, "bytes").unwrap_or_default() as u64;
+            Some(DesignSurface {
+                path,
+                kind,
+                bytes,
+                content_hash,
+                visual_signature,
+                color_tokens: Vec::new(),
+            })
+        })
+        .collect();
+    Ok(surfaces)
+}
+
+fn compute_design_visual_diffs(
+    previous: &[DesignSurface],
+    current: &[DesignSurface],
+) -> Vec<DesignVisualDiff> {
+    let previous_by_path = previous
+        .iter()
+        .map(|surface| (surface.path.as_str(), surface))
+        .collect::<HashMap<_, _>>();
+    let current_by_path = current
+        .iter()
+        .map(|surface| (surface.path.as_str(), surface))
+        .collect::<HashMap<_, _>>();
+    let mut diffs = Vec::new();
+
+    for surface in current {
+        match previous_by_path.get(surface.path.as_str()) {
+            Some(previous) if previous.visual_signature == surface.visual_signature => {
+                diffs.push(DesignVisualDiff {
+                    path: surface.path.clone(),
+                    status: "unchanged".to_string(),
+                    previous_signature: Some(previous.visual_signature.clone()),
+                    current_signature: Some(surface.visual_signature.clone()),
+                    bytes_delta: surface.bytes as i64 - previous.bytes as i64,
+                });
+            }
+            Some(previous) => {
+                diffs.push(DesignVisualDiff {
+                    path: surface.path.clone(),
+                    status: "changed".to_string(),
+                    previous_signature: Some(previous.visual_signature.clone()),
+                    current_signature: Some(surface.visual_signature.clone()),
+                    bytes_delta: surface.bytes as i64 - previous.bytes as i64,
+                });
+            }
+            None => {
+                diffs.push(DesignVisualDiff {
+                    path: surface.path.clone(),
+                    status: "added".to_string(),
+                    previous_signature: None,
+                    current_signature: Some(surface.visual_signature.clone()),
+                    bytes_delta: surface.bytes as i64,
+                });
+            }
+        }
+    }
+
+    for surface in previous {
+        if !current_by_path.contains_key(surface.path.as_str()) {
+            diffs.push(DesignVisualDiff {
+                path: surface.path.clone(),
+                status: "removed".to_string(),
+                previous_signature: Some(surface.visual_signature.clone()),
+                current_signature: None,
+                bytes_delta: -(surface.bytes as i64),
+            });
+        }
+    }
+
+    diffs.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then(left.status.cmp(&right.status))
+    });
+    diffs
+}
+
+fn design_visual_signature(contents: &str, color_tokens: &[String]) -> String {
+    let mut signature_parts = Vec::new();
+    signature_parts.push(format!("colors={}", color_tokens.join("|")));
+    for line in contents.lines() {
+        let lower = line.trim().to_ascii_lowercase();
+        if lower.contains("class=")
+            || lower.contains("classname")
+            || lower.contains("<img")
+            || lower.contains("<button")
+            || lower.contains("width:")
+            || lower.contains("height:")
+            || lower.contains("display:")
+            || lower.contains("grid")
+            || lower.contains("flex")
+            || lower.contains("color:")
+            || lower.contains("background")
+        {
+            signature_parts.push(lower.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+    }
+    stable_content_hash(&signature_parts.join("\n"))
 }
 
 fn is_design_surface_file(path: &Path) -> bool {
@@ -4298,6 +4971,137 @@ fn provider_probe_endpoint(status: &ProviderStatus) -> Option<String> {
     Some(endpoint)
 }
 
+fn check_provider_adapters(dir: &Path, statuses: &[ProviderStatus]) -> Vec<ProviderAdapterCheck> {
+    statuses
+        .iter()
+        .filter_map(|status| provider_adapter_endpoint(status).map(|endpoint| (status, endpoint)))
+        .map(|(status, endpoint)| check_provider_adapter(dir, status, &endpoint))
+        .collect()
+}
+
+fn check_provider_adapter(
+    dir: &Path,
+    status: &ProviderStatus,
+    endpoint: &str,
+) -> ProviderAdapterCheck {
+    if !status.configured {
+        return ProviderAdapterCheck {
+            name: status.definition.name.to_string(),
+            configured: false,
+            attempted: false,
+            status: "not_configured".to_string(),
+            endpoint: endpoint.to_string(),
+            http_code: None,
+            duration_ms: 0,
+            stderr: String::new(),
+        };
+    }
+    let remote_probe_allowed = env::var("OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE")
+        .ok()
+        .as_deref()
+        == Some("1");
+    if !remote_probe_allowed {
+        return ProviderAdapterCheck {
+            name: status.definition.name.to_string(),
+            configured: true,
+            attempted: false,
+            status: "remote_probe_requires_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1".to_string(),
+            endpoint: endpoint.to_string(),
+            http_code: None,
+            duration_ms: 0,
+            stderr: String::new(),
+        };
+    }
+
+    let Some(secret) = status.configured_value.as_deref() else {
+        return ProviderAdapterCheck {
+            name: status.definition.name.to_string(),
+            configured: false,
+            attempted: false,
+            status: "not_configured".to_string(),
+            endpoint: endpoint.to_string(),
+            http_code: None,
+            duration_ms: 0,
+            stderr: String::new(),
+        };
+    };
+
+    let started = Instant::now();
+    let config_path = dir.join(format!(
+        ".{}-adapter-curl-config.tmp",
+        status
+            .definition
+            .name
+            .replace(' ', "-")
+            .to_ascii_lowercase()
+    ));
+    let config = format!(
+        concat!(
+            "url = \"{}\"\n",
+            "max-time = 10\n",
+            "silent\n",
+            "show-error\n",
+            "output = \"/dev/null\"\n",
+            "write-out = \"%{{http_code}}\"\n",
+            "header = \"Authorization: Bearer {}\"\n"
+        ),
+        endpoint, secret
+    );
+    let output = fs::write(&config_path, config).and_then(|_| {
+        process::Command::new("curl")
+            .arg("--config")
+            .arg(&config_path)
+            .output()
+    });
+    let _ = fs::remove_file(&config_path);
+
+    match output {
+        Ok(output) => {
+            let http_code = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let status_text = if output.status.success() && http_code.starts_with('2') {
+                "adapter_models_endpoint_reachable"
+            } else if http_code == "401" || http_code == "403" {
+                "adapter_auth_failed"
+            } else {
+                "adapter_remote_error"
+            };
+            ProviderAdapterCheck {
+                name: status.definition.name.to_string(),
+                configured: true,
+                attempted: true,
+                status: status_text.to_string(),
+                endpoint: endpoint.to_string(),
+                http_code: if http_code.is_empty() {
+                    None
+                } else {
+                    Some(http_code)
+                },
+                duration_ms: started.elapsed().as_millis(),
+                stderr,
+            }
+        }
+        Err(error) => ProviderAdapterCheck {
+            name: status.definition.name.to_string(),
+            configured: true,
+            attempted: true,
+            status: "adapter_check_error".to_string(),
+            endpoint: endpoint.to_string(),
+            http_code: None,
+            duration_ms: started.elapsed().as_millis(),
+            stderr: error.to_string(),
+        },
+    }
+}
+
+fn provider_adapter_endpoint(status: &ProviderStatus) -> Option<String> {
+    match status.definition.name {
+        "OpenRouter" => Some("https://openrouter.ai/api/v1/models".to_string()),
+        "OpenAI" => Some("https://api.openai.com/v1/models".to_string()),
+        _ => None,
+    }
+}
+
 fn is_local_http_endpoint(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     lower.starts_with("http://127.0.0.1")
@@ -4459,7 +5263,11 @@ fn render_cache_report(stamp: &ClockStamp, segments: &[CacheSegment]) -> String 
     )
 }
 
-fn render_cache_dashboard(stamp: &ClockStamp, segments: &[CacheSegment]) -> String {
+fn render_cache_dashboard(
+    stamp: &ClockStamp,
+    segments: &[CacheSegment],
+    prefix_hit: &CachePrefixHitReport,
+) -> String {
     let total_bytes: u64 = segments.iter().map(|segment| segment.bytes).sum();
     format!(
         concat!(
@@ -4468,7 +5276,9 @@ fn render_cache_dashboard(stamp: &ClockStamp, segments: &[CacheSegment]) -> Stri
             "  \"generated_at\": {},\n",
             "  \"metrics\": {},\n",
             "  \"live_provider_metrics\": false,\n",
-            "  \"local_segment_metrics\": {{\"segments\":{},\"bytes\":{}}}\n",
+            "  \"provider_cache_hit_percent\": null,\n",
+            "  \"local_warm_prefix_hit_percent\": {:.2},\n",
+            "  \"local_segment_metrics\": {{\"segments\":{},\"bytes\":{},\"stable_prefix_bytes\":{},\"matched_stable_prefix_bytes\":{},\"estimated_cached_tokens\":{},\"estimated_cache_write_tokens\":{}}}\n",
             "}}\n"
         ),
         stamp.json(),
@@ -4481,9 +5291,82 @@ fn render_cache_dashboard(stamp: &ClockStamp, segments: &[CacheSegment]) -> Stri
             "estimated_cost_saved",
             "ttft_correlation"
         ]),
+        prefix_hit.local_hit_percent,
         segments.len(),
-        total_bytes
+        total_bytes,
+        prefix_hit.current_stable_bytes,
+        prefix_hit.matched_stable_bytes,
+        prefix_hit.estimated_cached_tokens,
+        prefix_hit.estimated_cache_write_tokens
     )
+}
+
+fn render_cache_hit_report(stamp: &ClockStamp, prefix_hit: &CachePrefixHitReport) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.cache-hit-report.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"scope\": \"local_stable_prefix\",\n",
+            "  \"target_hit_percent\": {:.2},\n",
+            "  \"baseline_available\": {},\n",
+            "  \"local_target_met\": {},\n",
+            "  \"provider_metrics_available\": false,\n",
+            "  \"provider_metrics_status\": \"not_connected\",\n",
+            "  \"provider_metrics_note\": \"provider cached-token counters are not collected by this artifact-only local CLI slice\",\n",
+            "  \"previous_stable_segment_count\": {},\n",
+            "  \"current_stable_segment_count\": {},\n",
+            "  \"matched_stable_segment_count\": {},\n",
+            "  \"current_stable_bytes\": {},\n",
+            "  \"matched_stable_bytes\": {},\n",
+            "  \"estimated_cached_tokens\": {},\n",
+            "  \"estimated_cache_write_tokens\": {},\n",
+            "  \"local_hit_percent\": {:.2},\n",
+            "  \"status\": {}\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        prefix_hit.target_hit_percent,
+        prefix_hit.baseline_available,
+        prefix_hit.local_target_met,
+        prefix_hit.previous_stable_segment_count,
+        prefix_hit.current_stable_segment_count,
+        prefix_hit.matched_stable_segment_count,
+        prefix_hit.current_stable_bytes,
+        prefix_hit.matched_stable_bytes,
+        prefix_hit.estimated_cached_tokens,
+        prefix_hit.estimated_cache_write_tokens,
+        prefix_hit.local_hit_percent,
+        json_string(if prefix_hit.local_target_met {
+            "local_target_met_provider_unverified"
+        } else if prefix_hit.baseline_available {
+            "local_target_missed_provider_unverified"
+        } else {
+            "baseline_missing_provider_unverified"
+        })
+    )
+}
+
+fn render_cache_prefix_snapshot(segments: &[CacheSegment]) -> String {
+    let rows = segments
+        .iter()
+        .filter(|segment| segment.stability == "stable")
+        .map(|segment| {
+            format!(
+                "{{\"path\":{},\"bytes\":{},\"content_hash\":{},\"stability\":{}}}",
+                json_string(&segment.path),
+                segment.bytes,
+                json_string(&segment.content_hash),
+                json_string(&segment.stability)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if rows.is_empty() {
+        String::new()
+    } else {
+        rows + "\n"
+    }
 }
 
 fn render_qa_report(stamp: &ClockStamp, checks: &[CommandCheck]) -> String {
@@ -4724,7 +5607,8 @@ fn render_scheduler_plan(stamp: &ClockStamp, run_id: &str, goal: &str) -> String
             "  \"goal\": {},\n",
             "  \"bounded_parallelism\": true,\n",
             "  \"stages\": {},\n",
-            "  \"rebalance_policy\": \"serial parent integration; workers use isolated workspaces or patch envelopes\"\n",
+            "  \"rebalance_policy\": \"serial parent integration; workers use isolated workspaces or patch envelopes\",\n",
+            "  \"overlap_report\": \"stage-overlap-report.json\"\n",
             "}}\n"
         ),
         json_string(run_id),
@@ -4736,6 +5620,7 @@ fn render_scheduler_plan(stamp: &ClockStamp, run_id: &str, goal: &str) -> String
             "capability_planning",
             "worker_lane_allocation",
             "local_qa",
+            "overlap_measurement",
             "security_scan",
             "final_state"
         ])
@@ -4788,6 +5673,94 @@ fn render_scheduler_final_state(
         json_string(if failed == 0 { "passed" } else { "failed" }),
         render_checks_json(checks)
     )
+}
+
+fn render_stage_overlap_report(
+    stamp: &ClockStamp,
+    run_id: &str,
+    spans: &[StageOverlapSpan],
+) -> String {
+    let total_stage_ms = spans.iter().map(|span| span.duration_ms).sum::<u128>();
+    let first_start_ms = spans.iter().map(|span| span.start_ms).min().unwrap_or(0);
+    let last_end_ms = spans.iter().map(|span| span.end_ms).max().unwrap_or(0);
+    let wall_clock_ms = last_end_ms.saturating_sub(first_start_ms);
+    let overlap_saved_ms = total_stage_ms.saturating_sub(wall_clock_ms);
+    let overlap_ratio = if total_stage_ms == 0 {
+        0.0
+    } else {
+        overlap_saved_ms as f64 / total_stage_ms as f64
+    };
+    let target_ratio = 0.10;
+    let all_passed = spans.iter().all(|span| span.status == "passed");
+    let observed_parallel_execution = spans.len() > 1;
+    let overlap_observed = overlap_saved_ms > 0;
+    let target_met = all_passed && overlap_ratio >= target_ratio;
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.stage-overlap-report.v1\",\n",
+            "  \"run_id\": {},\n",
+            "  \"generated_at\": {},\n",
+            "  \"parallelizable_stage_count\": {},\n",
+            "  \"observed_parallel_execution\": {},\n",
+            "  \"overlap_observed\": {},\n",
+            "  \"target_ratio\": {:.2},\n",
+            "  \"overlap_ratio\": {:.4},\n",
+            "  \"total_stage_ms\": {},\n",
+            "  \"wall_clock_ms\": {},\n",
+            "  \"overlap_saved_ms\": {},\n",
+            "  \"target_met\": {},\n",
+            "  \"measurement_note\": \"independent runtime metadata stages are executed concurrently; production provider/worker overlap tuning remains incomplete\",\n",
+            "  \"spans\": {}\n",
+            "}}\n"
+        ),
+        json_string(run_id),
+        stamp.json(),
+        spans.len(),
+        observed_parallel_execution,
+        overlap_observed,
+        target_ratio,
+        overlap_ratio,
+        total_stage_ms,
+        wall_clock_ms,
+        overlap_saved_ms,
+        target_met,
+        render_stage_overlap_spans_json(spans)
+    )
+}
+
+fn render_stage_overlap_spans_json(spans: &[StageOverlapSpan]) -> String {
+    let rows = spans
+        .iter()
+        .map(|span| {
+            let command = span
+                .command
+                .iter()
+                .map(|value| json_string(value))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                concat!(
+                    "{{\"name\":{},\"command\":[{}],\"status\":{},",
+                    "\"exit_code\":{},\"start_ms\":{},\"end_ms\":{},",
+                    "\"duration_ms\":{},\"stdout\":{},\"stderr\":{}}}"
+                ),
+                json_string(&span.name),
+                command,
+                json_string(&span.status),
+                span.exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "null".to_string()),
+                span.start_ms,
+                span.end_ms,
+                span.duration_ms,
+                json_string(&truncate_for_json(&span.stdout, 4000)),
+                json_string(&truncate_for_json(&span.stderr, 4000))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{rows}]")
 }
 
 fn render_worktree_isolation(
@@ -4860,10 +5833,17 @@ fn render_design_qa_report(
     stamp: &ClockStamp,
     surfaces: &[DesignSurface],
     findings: &[DesignFinding],
+    visual_diffs: &[DesignVisualDiff],
 ) -> String {
     let warnings = findings
         .iter()
         .filter(|finding| finding.severity == "warning")
+        .count();
+    let changed_visual_surfaces = visual_diffs
+        .iter()
+        .filter(|diff| {
+            diff.status == "changed" || diff.status == "added" || diff.status == "removed"
+        })
         .count();
     let status = if warnings == 0 {
         "passed_static_scan"
@@ -4878,9 +5858,13 @@ fn render_design_qa_report(
             "  \"status\": {},\n",
             "  \"checks\": {},\n",
             "  \"static_scan_executed\": true,\n",
+            "  \"source_visual_diff_executed\": true,\n",
+            "  \"screenshot_diff_executed\": false,\n",
             "  \"surface_count\": {},\n",
             "  \"finding_count\": {},\n",
             "  \"warning_count\": {},\n",
+            "  \"visual_diff_count\": {},\n",
+            "  \"changed_visual_surface_count\": {},\n",
             "  \"live_image_or_screenshot_evidence\": false,\n",
             "  \"evidence\": {}\n",
             "}}\n"
@@ -4899,7 +5883,14 @@ fn render_design_qa_report(
         surfaces.len(),
         findings.len(),
         warnings,
-        json_array(&["design-surface-inventory.json", "design-findings.jsonl"])
+        visual_diffs.len(),
+        changed_visual_surfaces,
+        json_array(&[
+            "design-surface-inventory.json",
+            "design-findings.jsonl",
+            "design-visual-diff-report.json",
+            "design-visual-snapshots.jsonl"
+        ])
     )
 }
 
@@ -4910,11 +5901,13 @@ fn render_design_surface_inventory(stamp: &ClockStamp, surfaces: &[DesignSurface
             format!(
                 concat!(
                     "{{\"path\":{},\"kind\":{},\"bytes\":{},",
-                    "\"color_tokens\":{}}}"
+                    "\"content_hash\":{},\"visual_signature\":{},\"color_tokens\":{}}}"
                 ),
                 json_string(&surface.path),
                 json_string(&surface.kind),
                 surface.bytes,
+                json_string(&surface.content_hash),
+                json_string(&surface.visual_signature),
                 json_vec(&surface.color_tokens)
             )
         })
@@ -4931,6 +5924,111 @@ fn render_design_surface_inventory(stamp: &ClockStamp, surfaces: &[DesignSurface
         stamp.json(),
         rows
     )
+}
+
+fn render_design_visual_diff_report(
+    stamp: &ClockStamp,
+    visual_diffs: &[DesignVisualDiff],
+    baseline_available: bool,
+) -> String {
+    let changed = visual_diffs
+        .iter()
+        .filter(|diff| diff.status == "changed")
+        .count();
+    let added = visual_diffs
+        .iter()
+        .filter(|diff| diff.status == "added")
+        .count();
+    let removed = visual_diffs
+        .iter()
+        .filter(|diff| diff.status == "removed")
+        .count();
+    let unchanged = visual_diffs
+        .iter()
+        .filter(|diff| diff.status == "unchanged")
+        .count();
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.design-visual-diff-report.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"baseline_available\": {},\n",
+            "  \"source_visual_diff_executed\": true,\n",
+            "  \"screenshot_diff_executed\": false,\n",
+            "  \"image_generation_review_executed\": false,\n",
+            "  \"live_image_or_screenshot_evidence\": false,\n",
+            "  \"status\": {},\n",
+            "  \"summary\": {{\"total\":{},\"changed\":{},\"added\":{},\"removed\":{},\"unchanged\":{}}},\n",
+            "  \"evidence_note\": \"compares deterministic source-derived visual signatures; rendered screenshots and gpt-image-2 review remain unverified\",\n",
+            "  \"diffs\": {}\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        baseline_available,
+        json_string(if baseline_available {
+            "source_visual_diff_recorded"
+        } else {
+            "baseline_seeded"
+        }),
+        visual_diffs.len(),
+        changed,
+        added,
+        removed,
+        unchanged,
+        render_design_visual_diffs_json(visual_diffs)
+    )
+}
+
+fn render_design_visual_diffs_json(visual_diffs: &[DesignVisualDiff]) -> String {
+    let rows = visual_diffs
+        .iter()
+        .map(|diff| {
+            format!(
+                concat!(
+                    "{{\"path\":{},\"status\":{},\"previous_signature\":{},",
+                    "\"current_signature\":{},\"bytes_delta\":{}}}"
+                ),
+                json_string(&diff.path),
+                json_string(&diff.status),
+                diff.previous_signature
+                    .as_ref()
+                    .map(|signature| json_string(signature))
+                    .unwrap_or_else(|| "null".to_string()),
+                diff.current_signature
+                    .as_ref()
+                    .map(|signature| json_string(signature))
+                    .unwrap_or_else(|| "null".to_string()),
+                diff.bytes_delta
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{rows}]")
+}
+
+fn render_design_surface_snapshot(surfaces: &[DesignSurface]) -> String {
+    let rows = surfaces
+        .iter()
+        .map(|surface| {
+            format!(
+                concat!(
+                    "{{\"path\":{},\"kind\":{},\"bytes\":{},",
+                    "\"content_hash\":{},\"visual_signature\":{}}}"
+                ),
+                json_string(&surface.path),
+                json_string(&surface.kind),
+                surface.bytes,
+                json_string(&surface.content_hash),
+                json_string(&surface.visual_signature)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if rows.is_empty() {
+        String::new()
+    } else {
+        rows + "\n"
+    }
 }
 
 fn render_design_findings_jsonl(stamp: &ClockStamp, findings: &[DesignFinding]) -> String {
@@ -4991,10 +6089,238 @@ fn render_benchmark_report(stamp: &ClockStamp, checks: &[CommandCheck]) -> Strin
             "multi-llm-roster.json",
             "role-assignments.json",
             "disagreement-report.json",
-            "quorum-report.json"
+            "quorum-report.json",
+            "collaboration-preflight.json"
         ]),
         render_checks_json(checks)
     )
+}
+
+fn render_multi_llm_roster(stamp: &ClockStamp) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.multi-llm-roster.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"live_multi_llm_execution\": false,\n",
+            "  \"no_hidden_fallback\": true,\n",
+            "  \"model_families\": [\n",
+            "    {{\"family\":\"glm\",\"preferred_roles\":{},\"pipeline\":\"many_parallel_patch_workers_plus_high_judge\"}},\n",
+            "    {{\"family\":\"gpt\",\"preferred_roles\":{},\"pipeline\":\"fewer_strong_workers_plus_stable_finalizer\"}},\n",
+            "    {{\"family\":\"claude\",\"preferred_roles\":{},\"pipeline\":\"review_security_planning\"}},\n",
+            "    {{\"family\":\"gemini\",\"preferred_roles\":{},\"pipeline\":\"huge_context_plus_multimodal_design\"}},\n",
+            "    {{\"family\":\"local\",\"preferred_roles\":{},\"pipeline\":\"privacy_scout_static_verifier\"}}\n",
+            "  ],\n",
+            "  \"source\": \"PRD v3 sections 1.8, 1.9, and 11\"\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_array(&["patch_worker", "judge"]),
+        json_array(&["planner", "patch_worker", "finalizer"]),
+        json_array(&["planner", "verifier", "security_reviewer"]),
+        json_array(&["verifier", "design_reviewer", "large_context_reader"]),
+        json_array(&["privacy_scout", "static_verifier"])
+    )
+}
+
+fn render_role_assignments(stamp: &ClockStamp) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.role-assignments.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"assignment_mode\": \"explicit_artifact_mvp\",\n",
+            "  \"no_hidden_fallback\": true,\n",
+            "  \"roles\": [\n",
+            "    {{\"role\":\"planner\",\"preferred_families\":{},\"fallback_policy\":\"explicit_user_visible_roster_only\"}},\n",
+            "    {{\"role\":\"patch_worker\",\"preferred_families\":{},\"fallback_policy\":\"explicit_user_visible_roster_only\"}},\n",
+            "    {{\"role\":\"verifier\",\"preferred_families\":{},\"fallback_policy\":\"explicit_user_visible_roster_only\"}},\n",
+            "    {{\"role\":\"judge\",\"preferred_families\":{},\"fallback_policy\":\"strongest_available_from_roster\"}},\n",
+            "    {{\"role\":\"finalizer\",\"preferred_families\":{},\"fallback_policy\":\"explicit_user_visible_roster_only\"}},\n",
+            "    {{\"role\":\"design_reviewer\",\"preferred_families\":{},\"fallback_policy\":\"requires_multimodal_or_unverified\"}},\n",
+            "    {{\"role\":\"security_reviewer\",\"preferred_families\":{},\"fallback_policy\":\"explicit_user_visible_roster_only\"}}\n",
+            "  ]\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_array(&["gpt", "claude"]),
+        json_array(&["glm", "local", "gpt"]),
+        json_array(&["claude", "gemini", "local"]),
+        json_array(&["gpt", "claude", "gemini"]),
+        json_array(&["gpt"]),
+        json_array(&["gpt", "gemini"]),
+        json_array(&["claude", "local"])
+    )
+}
+
+fn render_disagreement_report(stamp: &ClockStamp) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.disagreement-report.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"live_disagreements_observed\": false,\n",
+            "  \"status\": \"artifact_mvp_no_live_workers\",\n",
+            "  \"tracked_axes\": {},\n",
+            "  \"resolution_policy\": \"judge_or_human_visible_escalation_before_final_apply\"\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_array(&[
+            "requirements_interpretation",
+            "patch_correctness",
+            "security_risk",
+            "design_risk",
+            "verification_sufficiency"
+        ])
+    )
+}
+
+fn render_quorum_report(stamp: &ClockStamp) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.quorum-report.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"live_quorum_evaluated\": false,\n",
+            "  \"minimum_review_roles\": {},\n",
+            "  \"final_apply_requires\": {},\n",
+            "  \"hidden_fallback_allowed\": false\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_array(&["planner", "verifier", "judge"]),
+        json_array(&[
+            "explicit_roster",
+            "passing_verification",
+            "resolved_disagreements",
+            "final_seal"
+        ])
+    )
+}
+
+fn render_collaboration_preflight(
+    stamp: &ClockStamp,
+    statuses: &[ProviderStatus],
+    adapter_check_present: bool,
+) -> String {
+    let configured_count = statuses.iter().filter(|status| status.configured).count();
+    let remote_configured_count = statuses
+        .iter()
+        .filter(|status| status.configured && status.definition.kind != "local")
+        .count();
+    let configured_provider_names = statuses
+        .iter()
+        .filter(|status| status.configured)
+        .map(|status| status.definition.name.to_string())
+        .collect::<Vec<_>>();
+    let missing_credentials = statuses
+        .iter()
+        .filter(|status| !status.configured)
+        .map(|status| status.definition.env_var.to_string())
+        .collect::<Vec<_>>();
+    let remote_probe_opt_in = env::var("OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE")
+        .ok()
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    let eligible_roles = if configured_count == 0 {
+        json_array(&["artifact_planner", "static_verifier"])
+    } else {
+        json_array(&["planner", "verifier", "judge", "finalizer"])
+    };
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.collaboration-preflight.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"scope\": \"multi_llm_collaboration_preflight\",\n",
+            "  \"no_hidden_fallback\": true,\n",
+            "  \"live_multi_llm_execution\": false,\n",
+            "  \"live_multi_provider_worker_collaboration\": false,\n",
+            "  \"live_execution_ready\": false,\n",
+            "  \"preflight_ready\": true,\n",
+            "  \"readiness_status\": \"artifact_preflight_only\",\n",
+            "  \"configured_provider_count\": {},\n",
+            "  \"configured_provider_names\": {},\n",
+            "  \"remote_configured_provider_count\": {},\n",
+            "  \"adapter_check_report_present\": {},\n",
+            "  \"remote_probe_opt_in\": {},\n",
+            "  \"remote_probe_policy\": {},\n",
+            "  \"eligible_roles\": {},\n",
+            "  \"blocked_roles\": {},\n",
+            "  \"missing_credentials\": {},\n",
+            "  \"missing_requirements\": {},\n",
+            "  \"unverified\": {},\n",
+            "  \"artifact_refs\": {},\n",
+            "  \"providers\": {},\n",
+            "  \"status_reason\": \"explicit collaboration readiness/preflight exists; live multi-provider workers, disagreements, quorum, and final apply are not executed\"\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        configured_count,
+        json_vec(&configured_provider_names),
+        remote_configured_count,
+        adapter_check_present,
+        remote_probe_opt_in,
+        json_string(if remote_probe_opt_in {
+            "remote_adapter_probe_opted_in"
+        } else {
+            "remote_adapter_probe_requires_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE"
+        }),
+        eligible_roles,
+        json_array(&[
+            "live_patch_worker_execution",
+            "live_disagreement_resolution",
+            "live_quorum_vote",
+            "live_final_apply"
+        ]),
+        json_vec(&missing_credentials),
+        json_array(&[
+            "live_provider_worker_runtime",
+            "live_disagreement_transcript",
+            "live_quorum_vote",
+            "final_apply_transaction"
+        ]),
+        json_array(&[
+            "live_remote_provider_api_calls",
+            "live_multi_provider_worker_collaboration",
+            "live_disagreement_resolution",
+            "live_quorum_evaluation"
+        ]),
+        json_array(&[
+            "multi-llm-roster.json",
+            "role-assignments.json",
+            "disagreement-report.json",
+            "quorum-report.json",
+            "../auth/auth-policy.json",
+            "../providers/provider-adapter-check.json"
+        ]),
+        render_collaboration_provider_readiness(statuses)
+    )
+}
+
+fn render_collaboration_provider_readiness(statuses: &[ProviderStatus]) -> String {
+    let rows = statuses
+        .iter()
+        .map(|status| {
+            format!(
+                concat!(
+                    "{{\"name\":{},\"kind\":{},\"credential_env\":{},",
+                    "\"configured\":{},\"secret_value_exposed\":false,",
+                    "\"model_profile\":{},\"cache_support\":{},\"auth_method\":{},",
+                    "\"live_worker_enabled\":false}}"
+                ),
+                json_string(status.definition.name),
+                json_string(status.definition.kind),
+                json_string(status.definition.env_var),
+                status.configured,
+                json_string(status.definition.model_profile),
+                json_string(status.definition.cache_support),
+                json_string(status.definition.auth_method)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{rows}]")
 }
 
 fn render_auth_registry(stamp: &ClockStamp, statuses: &[ProviderStatus]) -> String {
@@ -5024,6 +6350,54 @@ fn render_auth_registry(stamp: &ClockStamp, statuses: &[ProviderStatus]) -> Stri
             "workspace_scoped_credentials"
         ]),
         render_provider_statuses_json(statuses)
+    )
+}
+
+fn render_auth_policy(stamp: &ClockStamp) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.auth-policy.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"key_storage_preference\": {},\n",
+            "  \"auth_methods\": {},\n",
+            "  \"oauth_candidates\": {},\n",
+            "  \"api_key_providers\": {},\n",
+            "  \"local_endpoint_providers\": {},\n",
+            "  \"workspace_scoped_credentials\": true,\n",
+            "  \"audit_log\": \"auth-audit-log.jsonl\",\n",
+            "  \"live_keychain_integration\": false,\n",
+            "  \"secret_values_exposed\": false\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_array(&[
+            "macos_keychain_first",
+            "encrypted_file_fallback_planned",
+            "environment_discovery_current"
+        ]),
+        json_array(&[
+            "api_key",
+            "oauth_candidate",
+            "browser_login_bridge_planned",
+            "local_endpoint",
+            "enterprise_gateway_planned"
+        ]),
+        json_array(&["OpenAI", "Claude"]),
+        json_array(&["OpenRouter", "OpenAI", "Claude", "Gemini", "Codex LB"]),
+        json_array(&["Ollama", "LM Studio", "OpenAI-compatible local endpoints"])
+    )
+}
+
+fn render_auth_audit_event(stamp: &ClockStamp, event: &str) -> String {
+    format!(
+        concat!(
+            "{{\"schema\":\"opensks.auth-audit-event.v1\",",
+            "\"at\":{},\"event\":{},\"workspace_scoped\":true,",
+            "\"secret_value_exposed\":false,\"live_keychain_integration\":false}}\n"
+        ),
+        stamp.json(),
+        json_string(event)
     )
 }
 
@@ -5083,10 +6457,38 @@ fn write_provider_registry_artifacts(
         &render_provider_registry(stamp, statuses, probes),
     )?;
     write_text_atomic(
+        &dir.join("provider-capabilities.json"),
+        &render_provider_capabilities(stamp, statuses),
+    )?;
+    write_text_atomic(
         &dir.join("provider-dashboard.json"),
         &render_provider_dashboard(stamp, statuses, probes),
     )?;
     Ok(())
+}
+
+fn render_provider_capabilities(stamp: &ClockStamp, statuses: &[ProviderStatus]) -> String {
+    let configured = statuses.iter().filter(|status| status.configured).count();
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.provider-capabilities.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"configured_count\": {},\n",
+            "  \"first_class_providers\": [{{\"name\":\"OpenRouter\",\"role\":\"multi_provider_router\",\"glm_routing\":true,\"provider_routing\":true,\"cache_metrics_expected\":true}}],\n",
+            "  \"optional_adapters\": [{{\"name\":\"Codex LB\",\"core_required\":false,\"profile\":\"optional-codex-load-balancer\"}}],\n",
+            "  \"oauth_candidates\": {},\n",
+            "  \"local_providers\": {},\n",
+            "  \"openai_compatible_endpoints\": true,\n",
+            "  \"secret_values_exposed\": false,\n",
+            "  \"live_remote_api_calls\": false\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        configured,
+        json_array(&["OpenAI", "Claude"]),
+        json_array(&["Ollama", "LM Studio", "OpenAI-compatible local endpoints"])
+    )
 }
 
 fn render_provider_profiles_json(statuses: &[ProviderStatus]) -> String {
@@ -5104,6 +6506,506 @@ fn render_provider_profiles_json(statuses: &[ProviderStatus]) -> String {
                 json_string(status.definition.auth_method),
                 json_string(status.definition.kind),
                 status.configured
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{rows}]")
+}
+
+fn trusted_update_signer_fingerprint() -> &'static str {
+    "opensks-local-dev-trusted-signer-v1"
+}
+
+fn local_update_signature(manifest_hash: &str) -> String {
+    stable_content_hash(&format!(
+        "{}:{}",
+        trusted_update_signer_fingerprint(),
+        manifest_hash
+    ))
+}
+
+fn render_update_manifest(stamp: &ClockStamp) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.update-manifest.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"current_version\": {},\n",
+            "  \"channels\": {},\n",
+            "  \"default_channel\": \"stable\",\n",
+            "  \"artifacts\": {},\n",
+            "  \"requires_signature\": true,\n",
+            "  \"requires_rollback_plan\": true,\n",
+            "  \"network_install_enabled\": false\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_string(env!("CARGO_PKG_VERSION")),
+        json_array(&["stable", "latest"]),
+        json_array(&["opensks-cli", "app-bundle-candidate", "manifest"])
+    )
+}
+
+fn render_update_signature(stamp: &ClockStamp, manifest_hash: &str, signature: &str) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.update-signature.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"manifest_hash\": {},\n",
+            "  \"trusted_signer_fingerprint\": {},\n",
+            "  \"signature\": {},\n",
+            "  \"algorithm\": \"fnv1a64-local-dev-proof-not-production-crypto\",\n",
+            "  \"production_crypto_live\": false\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_string(manifest_hash),
+        json_string(trusted_update_signer_fingerprint()),
+        json_string(signature)
+    )
+}
+
+fn render_update_channels(stamp: &ClockStamp) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.update-channels.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"channels\": [\n",
+            "    {{\"name\":\"stable\",\"auto_apply\":false,\"requires_signature\":true,\"rollback_required\":true}},\n",
+            "    {{\"name\":\"latest\",\"auto_apply\":false,\"requires_signature\":true,\"rollback_required\":true}}\n",
+            "  ]\n",
+            "}}\n"
+        ),
+        stamp.json()
+    )
+}
+
+fn render_rollback_plan(stamp: &ClockStamp) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.rollback-plan.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"current_version\": {},\n",
+            "  \"rollback_slots\": {},\n",
+            "  \"restore_strategy\": \"preserve_previous_manifest_and_binary_before_apply\",\n",
+            "  \"apply_transaction_live\": false\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_string(env!("CARGO_PKG_VERSION")),
+        json_array(&[
+            "previous-stable",
+            "previous-latest",
+            "manual-operator-restore"
+        ])
+    )
+}
+
+fn render_update_boundary(stamp: &ClockStamp) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.update-boundary.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"auto_download\": false,\n",
+            "  \"auto_apply\": false,\n",
+            "  \"requires_operator_approval\": true,\n",
+            "  \"requires_verified_signature\": true,\n",
+            "  \"requires_rollback_plan\": true,\n",
+            "  \"signed_updater_live\": \"local_manifest_signature_artifact_only\"\n",
+            "}}\n"
+        ),
+        stamp.json()
+    )
+}
+
+fn render_updater_final_state(stamp: &ClockStamp, manifest_hash: &str, signature: &str) -> String {
+    let expected = local_update_signature(manifest_hash);
+    let verified = expected == signature;
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.updater-final-state.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"status\": {},\n",
+            "  \"manifest_hash\": {},\n",
+            "  \"signature_verified\": {},\n",
+            "  \"channels_present\": {},\n",
+            "  \"rollback_plan_present\": true,\n",
+            "  \"network_or_install_performed\": false\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_string(if verified {
+            "verified_artifact_plan"
+        } else {
+            "signature_mismatch"
+        }),
+        json_string(manifest_hash),
+        verified,
+        json_array(&["stable", "latest"])
+    )
+}
+
+fn mvp_acceptance_items() -> Vec<AcceptanceItem> {
+    vec![
+        acceptance_item(
+            "mvp-001",
+            "Rust engine runs.",
+            "passed",
+            "cargo test and cargo run commands execute the Rust CLI.",
+        ),
+        acceptance_item(
+            "mvp-002",
+            "Goal loop runs direct and naruto tasks.",
+            "passed",
+            "goal/run/naruto route through start_goal_loop and status tests verify final seal reads.",
+        ),
+        acceptance_item(
+            "mvp-003",
+            "Voxel TriWiki stores repo/requirement/proof voxels.",
+            "passed",
+            "voxel index and goal mission voxels write code, requirement, proof, cache, provider, design, and security voxels.",
+        ),
+        acceptance_item(
+            "mvp-004",
+            "OpenRouter/OpenAI provider adapters work.",
+            "partial",
+            "provider adapter-check implements OpenRouter/OpenAI /models smoke paths with secret-redacted artifacts; live remote checks require configured credentials and OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1.",
+        ),
+        acceptance_item(
+            "mvp-005",
+            "MCP client connects to local MCP server.",
+            "passed",
+            "mcp serve --once and mcp invoke exercise the local JSON-RPC broker.",
+        ),
+        acceptance_item(
+            "mvp-006",
+            "MCP server exposes OpenSKS goal/status/resource tools.",
+            "passed",
+            "mcp-server-descriptor.json exposes goal status, final seal, resources, prompts, QA, and repo search tools.",
+        ),
+        acceptance_item(
+            "mvp-007",
+            "Browser use can open page, screenshot, click, type.",
+            "partial",
+            "browser can probe HTTP(S), extract title/hash/link/form/meta, and block sensitive actions; Playwright screenshot/click/type execution is not live.",
+        ),
+        acceptance_item(
+            "mvp-008",
+            "App use can inspect macOS accessibility tree.",
+            "partial",
+            "app-use captures frontmost/running-app inspection on macOS when available, but full Accessibility API tree/action execution is not live.",
+        ),
+        acceptance_item(
+            "mvp-009",
+            "Worktree isolation works.",
+            "passed",
+            "worktree create copies an isolated workspace snapshot under .opensks/worktrees.",
+        ),
+        acceptance_item(
+            "mvp-010",
+            "Final seal exists.",
+            "passed",
+            "goal missions write final-seal.json and goal status reads it.",
+        ),
+        acceptance_item(
+            "mvp-011",
+            "GUI shows mission status and worker lanes.",
+            "partial",
+            "static dashboard shows mission/session status and use-plane counts; native live worker waterfall/lanes are not live.",
+        ),
+    ]
+}
+
+fn beta_acceptance_items() -> Vec<AcceptanceItem> {
+    vec![
+        acceptance_item(
+            "beta-001",
+            "MCP broker enforces permissions.",
+            "passed",
+            "mcp audit writes broker policy denying raw model tool calls by default.",
+        ),
+        acceptance_item(
+            "beta-002",
+            "Computer-use loop works in isolated browser/container.",
+            "partial",
+            "computer-use writes isolated browser/container seed artifacts and an observation-loop ledger; live browser control and mouse/keyboard execution remain unverified.",
+        ),
+        acceptance_item(
+            "beta-003",
+            "Design QA screenshot diff works.",
+            "partial",
+            "design qa records deterministic source visual-signature diffs between runs; live rendered screenshot pixel diff, browser capture, and gpt-image-2 review remain unverified.",
+        ),
+        acceptance_item(
+            "beta-004",
+            "Voxel TriWiki improves cache layout.",
+            "partial",
+            "voxel/cache artifacts classify stable and dynamic context, but measured cache-layout improvement loop is not live.",
+        ),
+        acceptance_item(
+            "beta-005",
+            "Token dashboard tracks provider cache hit.",
+            "partial",
+            "cache-hit-report.json and cache/provider dashboards expose local warm-prefix hit counters, but live provider cached-token metrics are not collected.",
+        ),
+        acceptance_item(
+            "beta-006",
+            "Multi-LLM collaboration works.",
+            "partial",
+            "collaboration-preflight.json joins roster, role, provider, auth, adapter, disagreement, and quorum readiness; live multi-provider worker collaboration is not executed.",
+        ),
+    ]
+}
+
+fn production_acceptance_items() -> Vec<AcceptanceItem> {
+    vec![
+        acceptance_item(
+            "prod-001",
+            "cache hit warm prefix >= 95%",
+            "partial",
+            "cache-hit-report.json measures local stable-prefix reuse against the previous warm snapshot; provider cache-hit percentage is not live.",
+        ),
+        acceptance_item(
+            "prod-002",
+            "stage overlap targets met",
+            "partial",
+            "scheduler stage-overlap-report.json records live concurrent stage spans and overlap metrics; production tuning targets are not fully met.",
+        ),
+        acceptance_item(
+            "prod-003",
+            "requirement coverage >= 95%",
+            "partial",
+            "PRD coverage ledger tracks artifact coverage, but live acceptance coverage remains below production criteria.",
+        ),
+        acceptance_item(
+            "prod-004",
+            "secret leak artifact rate = 0",
+            "partial",
+            "local QA/security scans currently report zero findings, but production-rate evidence across releases is not available.",
+        ),
+        acceptance_item(
+            "prod-005",
+            "final seal trustworthy",
+            "partial",
+            "final seal artifacts exist and are read by status, but full H-proof/live route gate trust is not complete.",
+        ),
+        acceptance_item(
+            "prod-006",
+            "signed updates",
+            "partial",
+            "updater plan writes local signature/channel/rollback artifacts; production crypto/notarized apply is not live.",
+        ),
+    ]
+}
+
+fn acceptance_item(
+    id: &'static str,
+    criterion: &'static str,
+    status: &'static str,
+    evidence: &'static str,
+) -> AcceptanceItem {
+    AcceptanceItem {
+        id,
+        criterion,
+        status,
+        evidence,
+    }
+}
+
+fn render_acceptance_report(stamp: &ClockStamp, tier: &str, items: &[AcceptanceItem]) -> String {
+    let (total, passed, partial, failed) = acceptance_counts(items);
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.acceptance-report.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"tier\": {},\n",
+            "  \"summary\": {{\"total\":{},\"passed\":{},\"partial\":{},\"failed\":{}}},\n",
+            "  \"all_passed\": {},\n",
+            "  \"criteria\": {}\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_string(tier),
+        total,
+        passed,
+        partial,
+        failed,
+        failed == 0 && partial == 0,
+        render_acceptance_items(items)
+    )
+}
+
+fn render_acceptance_summary(
+    stamp: &ClockStamp,
+    mvp: &[AcceptanceItem],
+    beta: &[AcceptanceItem],
+    production: &[AcceptanceItem],
+) -> String {
+    let (total, passed, partial, failed) = combined_acceptance_counts(&[mvp, beta, production]);
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.acceptance-summary.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"summary\": {{\"total\":{},\"passed\":{},\"partial\":{},\"failed\":{}}},\n",
+            "  \"goal_complete\": false,\n",
+            "  \"tiers\": {{\"mvp\":{},\"beta\":{},\"production\":{}}}\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        total,
+        passed,
+        partial,
+        failed,
+        acceptance_tier_status(mvp),
+        acceptance_tier_status(beta),
+        acceptance_tier_status(production)
+    )
+}
+
+fn render_acceptance_findings_jsonl(
+    stamp: &ClockStamp,
+    mvp: &[AcceptanceItem],
+    beta: &[AcceptanceItem],
+    production: &[AcceptanceItem],
+) -> String {
+    let mut rows = Vec::new();
+    for (tier, items) in [("mvp", mvp), ("beta", beta), ("production", production)] {
+        for item in items
+            .iter()
+            .filter(|item| item.status == "partial" || item.status == "failed")
+        {
+            rows.push(format!(
+                concat!(
+                    "{{\"schema\":\"opensks.acceptance-finding.v1\",",
+                    "\"at\":{},\"tier\":{},\"id\":{},\"status\":{},",
+                    "\"criterion\":{},\"evidence\":{}}}"
+                ),
+                stamp.json(),
+                json_string(tier),
+                json_string(item.id),
+                json_string(item.status),
+                json_string(item.criterion),
+                json_string(item.evidence)
+            ));
+        }
+    }
+    rows.join("\n") + "\n"
+}
+
+fn render_acceptance_items(items: &[AcceptanceItem]) -> String {
+    let rows = items
+        .iter()
+        .map(|item| {
+            format!(
+                "{{\"id\":{},\"criterion\":{},\"status\":{},\"evidence\":{}}}",
+                json_string(item.id),
+                json_string(item.criterion),
+                json_string(item.status),
+                json_string(item.evidence)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{rows}]")
+}
+
+fn acceptance_tier_status(items: &[AcceptanceItem]) -> String {
+    let (_, _, partial, failed) = acceptance_counts(items);
+    let status = if failed > 0 {
+        "failed"
+    } else if partial > 0 {
+        "partial"
+    } else {
+        "passed"
+    };
+    json_string(status)
+}
+
+fn acceptance_counts(items: &[AcceptanceItem]) -> (usize, usize, usize, usize) {
+    let total = items.len();
+    let passed = items.iter().filter(|item| item.status == "passed").count();
+    let partial = items.iter().filter(|item| item.status == "partial").count();
+    let failed = items.iter().filter(|item| item.status == "failed").count();
+    (total, passed, partial, failed)
+}
+
+fn combined_acceptance_counts(groups: &[&[AcceptanceItem]]) -> (usize, usize, usize, usize) {
+    groups.iter().fold(
+        (0, 0, 0, 0),
+        |(total_acc, passed_acc, partial_acc, failed_acc), group| {
+            let (total, passed, partial, failed) = acceptance_counts(group);
+            (
+                total_acc + total,
+                passed_acc + passed,
+                partial_acc + partial,
+                failed_acc + failed,
+            )
+        },
+    )
+}
+
+fn render_provider_adapter_check_report(
+    stamp: &ClockStamp,
+    checks: &[ProviderAdapterCheck],
+) -> String {
+    let attempted = checks.iter().filter(|check| check.attempted).count();
+    let reachable = checks
+        .iter()
+        .filter(|check| check.status == "adapter_models_endpoint_reachable")
+        .count();
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.provider-adapter-check.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"remote_probe_opt_in\": {},\n",
+            "  \"secret_value_exposed\": false,\n",
+            "  \"summary\": {{\"total\":{},\"attempted\":{},\"reachable\":{}}},\n",
+            "  \"adapters\": {}\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        env::var("OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE")
+            .ok()
+            .as_deref()
+            == Some("1"),
+        checks.len(),
+        attempted,
+        reachable,
+        render_provider_adapter_checks_json(checks)
+    )
+}
+
+fn render_provider_adapter_checks_json(checks: &[ProviderAdapterCheck]) -> String {
+    let rows = checks
+        .iter()
+        .map(|check| {
+            format!(
+                concat!(
+                    "{{\"name\":{},\"configured\":{},\"attempted\":{},",
+                    "\"status\":{},\"endpoint\":{},\"http_code\":{},",
+                    "\"duration_ms\":{},\"secret_value_exposed\":false,\"stderr\":{}}}"
+                ),
+                json_string(&check.name),
+                check.configured,
+                check.attempted,
+                json_string(&check.status),
+                json_string(&check.endpoint),
+                check
+                    .http_code
+                    .as_deref()
+                    .map(json_string)
+                    .unwrap_or_else(|| "null".to_string()),
+                check.duration_ms,
+                json_string(&check.stderr)
             )
         })
         .collect::<Vec<_>>()
@@ -5432,6 +7334,136 @@ fn render_workspace_manifest(stamp: &ClockStamp) -> String {
     )
 }
 
+fn render_platform_manifest(stamp: &ClockStamp) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.platform-manifest.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"primary_platform\": \"macOS\",\n",
+            "  \"secondary_platform\": \"Linux\",\n",
+            "  \"future_platforms\": {},\n",
+            "  \"primary_runtime\": {},\n",
+            "  \"gui_candidate\": \"Tauri v2 with Rust engine core and WebView frontend\",\n",
+            "  \"live_native_gui\": false\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_array(&["Windows"]),
+        json_array(&[
+            "Rust",
+            "Tokio",
+            "content-addressed-cache",
+            "worktree-isolation",
+            "stage-scheduler",
+            "event-sourced-artifacts"
+        ])
+    )
+}
+
+fn render_module_manifest(stamp: &ClockStamp) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.module-manifest.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"module_categories\": {},\n",
+            "  \"commercial_open_source_concepts\": {},\n",
+            "  \"live_plugin_marketplace\": false\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_array(&[
+            "mcp_server",
+            "provider_adapter",
+            "tool_driver",
+            "scheduler_strategy",
+            "qa_plugin",
+            "design_plugin"
+        ]),
+        json_array(&[
+            "modular_provider_profiles",
+            "brokered_tool_surfaces",
+            "local_artifact_dashboards",
+            "extension_ready_manifest_boundaries"
+        ])
+    )
+}
+
+fn render_macos_integration_manifest(stamp: &ClockStamp) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.macos-integration-manifest.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"macos_first\": true,\n",
+            "  \"keychain_posture\": \"macos_keychain_first_policy_artifact\",\n",
+            "  \"accessibility_posture\": \"brokered_inspection_artifact\",\n",
+            "  \"app_automation_posture\": \"policy_broker_artifact\",\n",
+            "  \"apple_silicon_posture\": \"rust_native_runtime_candidate\",\n",
+            "  \"menu_bar_live\": false,\n",
+            "  \"global_shortcut_live\": false,\n",
+            "  \"signed_update_live\": false\n",
+            "}}\n"
+        ),
+        stamp.json()
+    )
+}
+
+fn render_source_notes_ledger(stamp: &ClockStamp) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.source-notes-ledger.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"foundations\": {},\n",
+            "  \"mapped_artifacts\": {},\n",
+            "  \"live_external_claim_verification\": false\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_array(&[
+            "Model Context Protocol",
+            "OpenAI computer use",
+            "Playwright",
+            "macOS automation",
+            "OpenRouter",
+            "SKS Codex"
+        ]),
+        json_array(&[
+            "mcp-server-descriptor.json",
+            "computer-final-state.json",
+            "browser-final-state.json",
+            "app-final-state.json",
+            "provider-capabilities.json",
+            "final-seal.json"
+        ])
+    )
+}
+
+fn render_product_statement(stamp: &ClockStamp) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.product-statement.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"statement\": {},\n",
+            "  \"completion_claim\": \"artifact_mvp_not_full_product_completion\"\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_string(concat!(
+            "OpenSKS is a Rust-native autonomous coding OS built around ",
+            "goal-loop engineering, Voxel TriWiki memory, MCP capability ",
+            "orchestration, and safe computer/browser/app use. It keeps large ",
+            "context cache-stable, coordinates multiple LLMs and tools through ",
+            "a policy broker, executes real parallel coding and QA stages, and ",
+            "proves every completion with artifacts, coverage, security audits, ",
+            "and a final seal."
+        ))
+    )
+}
+
 fn write_prd_coverage(cwd: &Path) -> Result<PathBuf, OpenSksError> {
     let dir = cwd.join(OPEN_SKSDIR);
     fs::create_dir_all(&dir)?;
@@ -5506,15 +7538,15 @@ fn prd_requirements() -> Vec<PrdRequirement> {
             "P00-002",
             "0",
             "macOS first, Linux second, Windows later platform stance is represented.",
-            "planned_artifact",
-            "auth/app/workspace manifests",
+            "artifact_mvp",
+            "platform-manifest.json records macOS first, Linux second, Windows later stance",
         ),
         req(
             "P00-003",
             "0",
             "Tokio/content-addressed cache/worktree/stage scheduler/event-sourced runtime are represented.",
             "artifact_mvp",
-            "cache artifacts, local stage scheduler, isolated workspace snapshots, and event-sourced JSONL",
+            "cache artifacts, local stage scheduler, stage-overlap-report.json, isolated workspace snapshots, and event-sourced JSONL",
         ),
         req(
             "P00-004",
@@ -5528,14 +7560,14 @@ fn prd_requirements() -> Vec<PrdRequirement> {
             "1.1",
             "Cache-stable context rather than blind token reduction.",
             "artifact_mvp",
-            "cache-warm-report.json with hashed local stable/dynamic segments",
+            "cache-warm-report.json and cache-hit-report.json with hashed local stable/dynamic segments and warm-prefix reuse metrics",
         ),
         req(
             "P01-002",
             "1.2",
             "Automation from goal analysis through self-improve.",
-            "planned_artifact",
-            "PRD coverage and command artifacts",
+            "artifact_mvp",
+            "automation-loop.json represents goal analysis through self-improve stages with live/artifact status",
         ),
         req(
             "P01-003",
@@ -5556,7 +7588,7 @@ fn prd_requirements() -> Vec<PrdRequirement> {
             "1.5",
             "Design/image generation QA loop.",
             "artifact_mvp",
-            "design static scan artifacts for surfaces, accessibility heuristics, responsive risks, and color tokens",
+            "design static scan artifacts plus design-visual-diff-report.json for source visual-signature diffs; live screenshot/gpt-image-2 review remains unverified",
         ),
         req(
             "P01-006",
@@ -5570,42 +7602,42 @@ fn prd_requirements() -> Vec<PrdRequirement> {
             "1.7",
             "Rust engine, bounded scheduler, content-addressed context, provider cache, overlap metrics.",
             "artifact_mvp",
-            "local scheduler, timed local checks, and content-addressed cache segments",
+            "local scheduler, timed local checks, stage-overlap-report.json overlap metrics, and content-addressed cache segments",
         ),
         req(
             "P01-008",
             "1.8",
             "Dynamic model-specific pipelines.",
-            "planned_artifact",
-            "benchmark-report.json",
+            "artifact_mvp",
+            "benchmark-report.json, multi-llm-roster.json, and collaboration-preflight.json model-family pipeline profiles",
         ),
         req(
             "P01-009",
             "1.9",
             "Multi-LLM collaboration roles.",
-            "planned_artifact",
-            "benchmark-report.json",
+            "artifact_mvp",
+            "role-assignments.json maps planner, worker, verifier, judge, finalizer, design, and security roles",
         ),
         req(
             "P01-010",
             "1.10",
             "OpenRouter first-class provider.",
-            "planned_artifact",
-            "provider-registry.json",
+            "artifact_mvp",
+            "provider-capabilities.json marks OpenRouter as first-class multi-provider router",
         ),
         req(
             "P01-011",
             "1.11",
             "Codex LB optional adapter; core independent.",
-            "planned_artifact",
-            "provider-registry.json",
+            "artifact_mvp",
+            "provider-capabilities.json marks Codex LB as optional with core_required=false",
         ),
         req(
             "P01-012",
             "1.12",
             "GPT and Claude OAuth where possible.",
-            "planned_artifact",
-            "auth-registry.json",
+            "artifact_mvp",
+            "auth-policy.json lists OpenAI and Claude as OAuth candidates without exposing secrets",
         ),
         req(
             "P01-013",
@@ -5618,15 +7650,15 @@ fn prd_requirements() -> Vec<PrdRequirement> {
             "P01-014",
             "1.14",
             "Authentication manager with Keychain/OAuth/API key/audit.",
-            "planned_artifact",
-            "auth-registry.json",
+            "artifact_mvp",
+            "auth-registry.json, auth-policy.json, and auth-audit-log.jsonl cover key storage, OAuth candidates, API keys, and audit events",
         ),
         req(
             "P01-015",
             "1.15",
             "Token/cost/cache usage dashboard.",
             "artifact_mvp",
-            "cache-dashboard.json plus provider usage-dashboard.json with zero-leak usage counters",
+            "cache-dashboard.json, cache-hit-report.json, and provider usage-dashboard.json with zero-leak usage counters",
         ),
         req(
             "P01-016",
@@ -5646,22 +7678,22 @@ fn prd_requirements() -> Vec<PrdRequirement> {
             "P01-018",
             "1.18",
             "Modular commercial/open-source concepts.",
-            "planned_artifact",
-            "workspace-manifest.json",
+            "artifact_mvp",
+            "module-manifest.json records MCP servers, provider adapters, tool drivers, scheduler strategies, QA plugins, and design plugins",
         ),
         req(
             "P01-019",
             "1.19",
             "macOS-specific Keychain/accessibility/app automation/update posture.",
-            "planned_artifact",
-            "auth/app-use/app manifests",
+            "artifact_mvp",
+            "macos-integration-manifest.json records Keychain, accessibility, app automation, Apple Silicon, menu bar, shortcut, and signed-update posture",
         ),
         req(
             "P01-020",
             "1.20",
             "Signed updater with channels and rollback.",
-            "missing_live_implementation",
-            "not implemented",
+            "artifact_mvp",
+            "updater plan writes update manifest, local signature proof, stable/latest channels, rollback plan, and update boundary artifacts",
         ),
         req(
             "P02-001",
@@ -5822,7 +7854,7 @@ fn prd_requirements() -> Vec<PrdRequirement> {
             "6.3",
             "Computer-use screenshot/action loop/actions/security.",
             "artifact_mvp",
-            "computer-use policy broker, safe observation screenshot capture attempt, action plan, action ledger, and final-state artifacts",
+            "computer-use policy broker, safe observation screenshot capture attempt, isolated browser/container observation-loop artifacts, action plan, action ledger, and final-state artifacts",
         ),
         req(
             "P06-003",
@@ -5850,7 +7882,7 @@ fn prd_requirements() -> Vec<PrdRequirement> {
             "8",
             "Code, browser, app, design, security QA categories.",
             "artifact_mvp",
-            "qa-report.json with live local code QA, security scan, browser/app artifacts, and design static scan artifacts",
+            "qa-report.json with live local code QA, security scan, browser/app artifacts, design static scan artifacts, and design-visual-diff-report.json",
         ),
         req(
             "P09-001",
@@ -5870,8 +7902,8 @@ fn prd_requirements() -> Vec<PrdRequirement> {
             "P11-001",
             "11",
             "Multi-LLM role assignment, artifacts, no hidden fallback.",
-            "planned_artifact",
-            "benchmark-report.json",
+            "artifact_mvp",
+            "multi-llm-roster.json, role-assignments.json, disagreement-report.json, quorum-report.json, and collaboration-preflight.json with no hidden fallback",
         ),
         req(
             "P12-001",
@@ -5920,35 +7952,35 @@ fn prd_requirements() -> Vec<PrdRequirement> {
             "18",
             "MVP acceptance criteria.",
             "missing_live_implementation",
-            "many live adapters/GUI/browser/app criteria still not implemented",
+            "acceptance-summary.json and mvp-acceptance.json report remaining partial/failed MVP criteria",
         ),
         req(
             "P18-002",
             "18",
             "Beta acceptance criteria.",
             "missing_live_implementation",
-            "not implemented",
+            "acceptance-summary.json and beta-acceptance.json report remaining failed beta criteria",
         ),
         req(
             "P18-003",
             "18",
             "Production acceptance criteria.",
             "missing_live_implementation",
-            "not implemented",
+            "acceptance-summary.json and production-acceptance.json report remaining failed production criteria",
         ),
         req(
             "P19-001",
             "19",
             "Source-note foundations are represented as implementation assumptions.",
-            "planned_artifact",
-            "coverage ledger and plane artifacts",
+            "artifact_mvp",
+            "source-notes-ledger.json maps PRD source-note foundations to local artifacts",
         ),
         req(
             "P20-001",
             "20",
             "Final product statement direction is preserved.",
-            "planned_artifact",
-            "README and coverage ledger",
+            "artifact_mvp",
+            "product-statement.json preserves the PRD final product statement with artifact-MVP honesty",
         ),
     ]
 }
@@ -6021,6 +8053,7 @@ pub fn start_goal_loop(config: &GoalRunConfig, cwd: &Path) -> Result<GoalRunResu
 
     let goal_loop = render_goal_loop_json(&goal, &mission_id, &config.mode, &stamp, &tool_plan);
     let goal_state = render_goal_state_jsonl(&goal, &mission_id, &stamp, &config.mode);
+    let automation_loop = render_automation_loop_json(&goal, &mission_id, &stamp, &config.mode);
     let progress_ledger = render_progress_ledger_json(&goal, &mission_id, &stamp, &config.mode);
     let stop_policy_json = render_stop_policy_json(&goal.stop_policy, &mission_id, &goal.id);
     let tool_plan_json = render_tool_plan_json(&tool_plan, &mission_id, &goal.id);
@@ -6039,6 +8072,7 @@ pub fn start_goal_loop(config: &GoalRunConfig, cwd: &Path) -> Result<GoalRunResu
 
     write_text_atomic(&mission_dir.join("goal-loop.json"), &goal_loop)?;
     write_text_atomic(&mission_dir.join("goal-state.jsonl"), &goal_state)?;
+    write_text_atomic(&mission_dir.join("automation-loop.json"), &automation_loop)?;
     write_text_atomic(&mission_dir.join("progress-ledger.json"), &progress_ledger)?;
     write_text_atomic(&mission_dir.join("stop-policy.json"), &stop_policy_json)?;
     write_text_atomic(&mission_dir.join("tool-plan.json"), &tool_plan_json)?;
@@ -6548,6 +8582,54 @@ fn render_goal_state_jsonl(
     lines.join("\n") + "\n"
 }
 
+fn render_automation_loop_json(
+    goal: &Goal,
+    mission_id: &str,
+    stamp: &ClockStamp,
+    mode: &ExecutionMode,
+) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.automation-loop.v1\",\n",
+            "  \"mission_id\": {},\n",
+            "  \"goal_id\": {},\n",
+            "  \"generated_at\": {},\n",
+            "  \"execution_mode\": {},\n",
+            "  \"stages\": {},\n",
+            "  \"artifact_mvp_status\": {{\n",
+            "    \"goal_analysis\": true,\n",
+            "    \"context_composition\": true,\n",
+            "    \"work_decomposition\": true,\n",
+            "    \"tool_invocation_plan\": true,\n",
+            "    \"qa\": true,\n",
+            "    \"repair_wave\": \"artifact_gate_only\",\n",
+            "    \"final_apply\": \"no_op_or_patch_gate_only\",\n",
+            "    \"self_improve\": \"represented_by_memory_update_stage\"\n",
+            "  }},\n",
+            "  \"live_provider_workers\": false,\n",
+            "  \"live_self_improve_engine\": false\n",
+            "}}\n"
+        ),
+        json_string(mission_id),
+        json_string(&goal.id),
+        stamp.json(),
+        json_string(mode.as_str()),
+        json_array(&[
+            "goal_analysis",
+            "context_composition",
+            "work_decomposition",
+            "parallel_worker_execution",
+            "tool_invocation",
+            "qa",
+            "repair_wave",
+            "final_apply",
+            "report",
+            "self_improve"
+        ])
+    )
+}
+
 fn render_progress_ledger_json(
     goal: &Goal,
     mission_id: &str,
@@ -6773,9 +8855,11 @@ fn render_final_seal_json(
         json_array(&[
             "goal-loop.json written",
             "goal-state.jsonl written",
+            "automation-loop.json written",
             "progress-ledger.json written",
             "stop-policy.json written",
             "tool-plan.json written",
+            "goal-kind-registry.json written",
             "voxel-triwiki.json written",
             "qa-report.json written",
             "security-audit.json written",
@@ -6798,6 +8882,7 @@ fn render_final_seal_json(
         json_array(&[
             "goal-loop.json",
             "goal-state.jsonl",
+            "automation-loop.json",
             "progress-ledger.json",
             "stop-policy.json",
             "tool-plan.json",
@@ -6899,6 +8984,14 @@ fn json_string(value: &str) -> String {
     }
     out.push('"');
     out
+}
+
+fn html_escape_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn read_runtime_artifact(cwd: &Path, relative: &str) -> String {
@@ -7025,7 +9118,9 @@ fn usage() -> &'static str {
         "  opensks security audit\n",
         "  opensks bench\n",
         "  opensks auth\n",
-        "  opensks provider list|probe|usage\n",
+        "  opensks provider list|probe|usage|adapter-check\n",
+        "  opensks updater plan\n",
+        "  opensks acceptance audit\n",
         "  opensks app\n",
         "  opensks scheduler run \"<goal>\"\n",
         "  opensks worktree create \"<worker label>\"\n",
@@ -7050,7 +9145,8 @@ fn provider_usage() -> &'static str {
     concat!(
         "usage: opensks provider list\n",
         "       opensks provider probe\n",
-        "       opensks provider usage\n"
+        "       opensks provider usage\n",
+        "       opensks provider adapter-check\n"
     )
 }
 
@@ -7116,9 +9212,11 @@ mod tests {
         for artifact in [
             "goal-loop.json",
             "goal-state.jsonl",
+            "automation-loop.json",
             "progress-ledger.json",
             "stop-policy.json",
             "tool-plan.json",
+            "goal-kind-registry.json",
             "voxel-triwiki.json",
             "voxels.jsonl",
             "qa-report.json",
@@ -7150,6 +9248,11 @@ mod tests {
                     .expect("stop policy")
                     .contains("\"max_waves\": 2")
         );
+        let automation =
+            fs::read_to_string(mission_dir.join("automation-loop.json")).expect("automation");
+        assert!(automation.contains("\"schema\": \"opensks.automation-loop.v1\""));
+        assert!(automation.contains("self_improve"));
+        assert!(automation.contains("\"live_self_improve_engine\": false"));
     }
 
     #[test]
@@ -7231,12 +9334,18 @@ mod tests {
     #[test]
     fn cli_v3_plane_commands_write_named_artifacts() {
         let root = temp_workspace("cli-v3");
+        fs::write(
+            root.join("README.md"),
+            "Stable context fixture for cache warm-prefix reuse.\n",
+        )
+        .expect("write cache fixture");
         run_cli(["mcp", "add", "local-demo", "stdio://demo"], &root).expect("mcp add");
         run_cli(["mcp", "audit"], &root).expect("mcp audit");
         run_cli(["browser", "local browser smoke"], &root).expect("browser");
         run_cli(["computer-use", "inspect desktop"], &root).expect("computer-use");
         run_cli(["app-use", "inspect Finder"], &root).expect("app-use");
         run_cli(["cache", "warm"], &root).expect("cache warm");
+        run_cli(["cache", "warm"], &root).expect("cache warm recheck");
         run_cli(["qa", "run"], &root).expect("qa run");
         run_cli(["design", "qa"], &root).expect("design qa");
         run_cli(["security", "audit"], &root).expect("security audit");
@@ -7245,6 +9354,9 @@ mod tests {
         run_cli(["provider", "list"], &root).expect("provider list");
         run_cli(["provider", "probe"], &root).expect("provider probe");
         run_cli(["provider", "usage"], &root).expect("provider usage");
+        run_cli(["provider", "adapter-check"], &root).expect("provider adapter-check");
+        run_cli(["updater", "plan"], &root).expect("updater plan");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance audit");
         run_cli(["app"], &root).expect("app");
         run_cli(["scheduler", "run", "local QA"], &root).expect("scheduler run");
         run_cli(["worktree", "create", "worker one"], &root).expect("worktree create");
@@ -7259,6 +9371,8 @@ mod tests {
             "mcp/mcp-broker-policy.json",
             "cache/cache-warm-report.json",
             "cache/cache-dashboard.json",
+            "cache/cache-hit-report.json",
+            "cache/cache-prefix-snapshot.jsonl",
             "qa/qa-report.json",
             "qa/security-audit.json",
             "qa/security-findings.jsonl",
@@ -7268,27 +9382,125 @@ mod tests {
             "design/design-qa-report.json",
             "design/design-surface-inventory.json",
             "design/design-findings.jsonl",
+            "design/design-visual-diff-report.json",
+            "design/design-visual-snapshots.jsonl",
             "bench/benchmark-report.json",
+            "bench/multi-llm-roster.json",
+            "bench/role-assignments.json",
+            "bench/disagreement-report.json",
+            "bench/quorum-report.json",
+            "bench/collaboration-preflight.json",
             "auth/auth-registry.json",
+            "auth/auth-policy.json",
+            "auth/auth-audit-log.jsonl",
             "auth/provider-registry.json",
             "providers/provider-registry.json",
+            "providers/provider-capabilities.json",
+            "providers/provider-adapter-check.json",
             "providers/provider-dashboard.json",
             "providers/provider-probe-report.json",
             "providers/usage-dashboard.json",
             "providers/usage-ledger.jsonl",
+            "updater/update-manifest.json",
+            "updater/update-signature.json",
+            "updater/update-channels.json",
+            "updater/rollback-plan.json",
+            "updater/update-boundary.json",
+            "updater/updater-final-state.json",
+            "acceptance/mvp-acceptance.json",
+            "acceptance/beta-acceptance.json",
+            "acceptance/production-acceptance.json",
+            "acceptance/acceptance-summary.json",
+            "acceptance/acceptance-findings.jsonl",
             "app/gui-manifest.json",
             "app/workspace-manifest.json",
+            "app/platform-manifest.json",
+            "app/module-manifest.json",
+            "app/macos-integration-manifest.json",
+            "app/source-notes-ledger.json",
+            "app/product-statement.json",
             "app/gui-data.json",
             "app/dashboard.html",
         ] {
             assert!(open.join(artifact).exists(), "expected artifact {artifact}");
         }
 
+        let roster = fs::read_to_string(open.join("bench/multi-llm-roster.json")).expect("roster");
+        assert!(roster.contains("\"schema\": \"opensks.multi-llm-roster.v1\""));
+        assert!(roster.contains("\"no_hidden_fallback\": true"));
+        let cache_hit =
+            fs::read_to_string(open.join("cache/cache-hit-report.json")).expect("cache hit");
+        assert!(cache_hit.contains("\"schema\": \"opensks.cache-hit-report.v1\""));
+        assert!(cache_hit.contains("\"provider_metrics_available\": false"));
+        assert!(cache_hit.contains("\"local_target_met\": true"));
+        let assignments =
+            fs::read_to_string(open.join("bench/role-assignments.json")).expect("roles");
+        assert!(assignments.contains("\"planner\""));
+        assert!(assignments.contains("\"security_reviewer\""));
+        let quorum = fs::read_to_string(open.join("bench/quorum-report.json")).expect("quorum");
+        assert!(quorum.contains("\"hidden_fallback_allowed\": false"));
+        let collaboration = fs::read_to_string(open.join("bench/collaboration-preflight.json"))
+            .expect("collaboration preflight");
+        assert!(collaboration.contains("\"schema\": \"opensks.collaboration-preflight.v1\""));
+        assert!(collaboration.contains("\"no_hidden_fallback\": true"));
+        assert!(collaboration.contains("\"live_multi_llm_execution\": false"));
+        assert!(collaboration.contains("\"live_multi_provider_worker_collaboration\": false"));
+        assert!(collaboration.contains("\"live_execution_ready\": false"));
+        assert!(collaboration.contains("\"secret_value_exposed\":false"));
+        let auth_policy = fs::read_to_string(open.join("auth/auth-policy.json")).expect("auth");
+        assert!(auth_policy.contains("\"schema\": \"opensks.auth-policy.v1\""));
+        assert!(auth_policy.contains("macos_keychain_first"));
+        assert!(auth_policy.contains("OpenAI"));
+        assert!(auth_policy.contains("Claude"));
+        let provider_capabilities =
+            fs::read_to_string(open.join("providers/provider-capabilities.json")).expect("caps");
+        assert!(provider_capabilities.contains("\"schema\": \"opensks.provider-capabilities.v1\""));
+        assert!(provider_capabilities.contains("OpenRouter"));
+        assert!(provider_capabilities.contains("\"core_required\":false"));
+        let updater_state =
+            fs::read_to_string(open.join("updater/updater-final-state.json")).expect("updater");
+        assert!(updater_state.contains("\"schema\": \"opensks.updater-final-state.v1\""));
+        assert!(updater_state.contains("\"signature_verified\": true"));
+        let rollback =
+            fs::read_to_string(open.join("updater/rollback-plan.json")).expect("rollback");
+        assert!(rollback.contains("\"schema\": \"opensks.rollback-plan.v1\""));
+        assert!(rollback.contains("previous-stable"));
+        let acceptance = fs::read_to_string(open.join("acceptance/acceptance-summary.json"))
+            .expect("acceptance");
+        assert!(acceptance.contains("\"schema\": \"opensks.acceptance-summary.v1\""));
+        assert!(acceptance.contains("\"goal_complete\": false"));
+        let mvp = fs::read_to_string(open.join("acceptance/mvp-acceptance.json")).expect("mvp");
+        assert!(mvp.contains("OpenRouter/OpenAI provider adapters work."));
+        assert!(mvp.contains("\"status\":\"partial\""));
+        let platform =
+            fs::read_to_string(open.join("app/platform-manifest.json")).expect("platform");
+        assert!(platform.contains("\"primary_platform\": \"macOS\""));
+        assert!(platform.contains("Linux"));
+        let module_manifest =
+            fs::read_to_string(open.join("app/module-manifest.json")).expect("modules");
+        assert!(module_manifest.contains("provider_adapter"));
+        let macos_manifest =
+            fs::read_to_string(open.join("app/macos-integration-manifest.json")).expect("macos");
+        assert!(macos_manifest.contains("\"macos_first\": true"));
+        assert!(macos_manifest.contains("\"signed_update_live\": false"));
+        let source_notes =
+            fs::read_to_string(open.join("app/source-notes-ledger.json")).expect("source notes");
+        assert!(source_notes.contains("Model Context Protocol"));
+        let product_statement =
+            fs::read_to_string(open.join("app/product-statement.json")).expect("statement");
+        assert!(product_statement.contains("Rust-native autonomous coding OS"));
+
         assert!(
             first_child_dir(&open.join("scheduler"))
                 .join("stage-scheduler.json")
                 .exists()
         );
+        let overlap_report = fs::read_to_string(
+            first_child_dir(&open.join("scheduler")).join("stage-overlap-report.json"),
+        )
+        .expect("stage overlap report");
+        assert!(overlap_report.contains("\"schema\": \"opensks.stage-overlap-report.v1\""));
+        assert!(overlap_report.contains("\"observed_parallel_execution\": true"));
         assert!(
             first_child_dir(&open.join("worktrees"))
                 .join("worktree-isolation.json")
@@ -7334,6 +9546,25 @@ mod tests {
                 .join("computer-action-plan.json")
                 .exists()
         );
+        let computer_session_dir = first_child_dir(&open.join("computer-use"));
+        for artifact in [
+            "isolated-browser-container.json",
+            "computer-browser-loop.json",
+            "computer-browser-loop-events.jsonl",
+            "isolated-browser-runtime/index.html",
+        ] {
+            assert!(
+                computer_session_dir.join(artifact).exists(),
+                "expected computer-use artifact {artifact}"
+            );
+        }
+        let computer_loop =
+            fs::read_to_string(computer_session_dir.join("computer-browser-loop.json"))
+                .expect("computer browser loop");
+        assert!(computer_loop.contains("\"schema\": \"opensks.computer-browser-loop.v1\""));
+        assert!(computer_loop.contains("\"live_browser_container_control\": false"));
+        assert!(computer_loop.contains("\"browser_click_type_executed\": false"));
+        assert!(computer_loop.contains("\"mouse_keyboard_actions_executed\": false"));
         assert!(
             first_child_dir(&open.join("app-use"))
                 .join("app-session.json")
@@ -7422,6 +9653,27 @@ mod tests {
     }
 
     #[test]
+    fn bench_collaboration_preflight_tracks_adapter_artifact_without_live_execution() {
+        let root = temp_workspace("bench-preflight");
+        run_cli(["provider", "adapter-check"], &root).expect("provider adapter");
+        run_cli(["bench"], &root).expect("bench");
+
+        let preflight = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("bench")
+                .join("collaboration-preflight.json"),
+        )
+        .expect("collaboration preflight");
+        assert!(preflight.contains("\"schema\": \"opensks.collaboration-preflight.v1\""));
+        assert!(preflight.contains("\"adapter_check_report_present\": true"));
+        assert!(preflight.contains("\"no_hidden_fallback\": true"));
+        assert!(preflight.contains("\"live_multi_llm_execution\": false"));
+        assert!(preflight.contains("\"live_multi_provider_worker_collaboration\": false"));
+        assert!(preflight.contains("\"live_execution_ready\": false"));
+        assert!(preflight.contains("\"secret_value_exposed\":false"));
+    }
+
+    #[test]
     fn provider_commands_write_zero_leak_registry_probe_and_usage() {
         let root = temp_workspace("provider");
         let list = run_cli(["provider", "list"], &root).expect("provider list");
@@ -7432,6 +9684,9 @@ mod tests {
 
         let usage = run_cli(["provider", "usage"], &root).expect("provider usage");
         assert!(usage.stdout.contains("usage ledger"));
+
+        let adapter = run_cli(["provider", "adapter-check"], &root).expect("provider adapter");
+        assert!(adapter.stdout.contains("checked remote provider adapters"));
 
         let dir = root.join(OPEN_SKSDIR).join("providers");
         let registry =
@@ -7446,6 +9701,13 @@ mod tests {
             fs::read_to_string(dir.join("provider-probe-report.json")).expect("probe report");
         assert!(probe_report.contains("\"schema\": \"opensks.provider-probe-report.v1\""));
         assert!(probe_report.contains("\"scope\""));
+
+        let adapter_report =
+            fs::read_to_string(dir.join("provider-adapter-check.json")).expect("adapter report");
+        assert!(adapter_report.contains("\"schema\": \"opensks.provider-adapter-check.v1\""));
+        assert!(adapter_report.contains("OpenRouter"));
+        assert!(adapter_report.contains("OpenAI"));
+        assert!(adapter_report.contains("\"secret_value_exposed\":false"));
 
         let usage_ledger =
             fs::read_to_string(dir.join("usage-ledger.jsonl")).expect("usage ledger");
@@ -7515,6 +9777,32 @@ mod tests {
             fs::read_to_string(session_dir.join("computer-actions.jsonl")).expect("actions");
         assert!(actions.contains("credential_entry"));
         assert!(actions.contains("denied_sensitive_action"));
+
+        let loop_report =
+            fs::read_to_string(session_dir.join("computer-browser-loop.json")).expect("loop");
+        assert!(loop_report.contains("\"schema\": \"opensks.computer-browser-loop.v1\""));
+        assert!(loop_report.contains("\"live_browser_container_control\": false"));
+        assert!(loop_report.contains("\"browser_click_type_executed\": false"));
+        assert!(loop_report.contains("\"mouse_keyboard_actions_executed\": false"));
+
+        let container = fs::read_to_string(session_dir.join("isolated-browser-container.json"))
+            .expect("container");
+        assert!(container.contains("\"schema\": \"opensks.isolated-browser-container.v1\""));
+        assert!(container.contains("\"browser_process_launched\": false"));
+    }
+
+    #[test]
+    fn computer_use_policy_matches_interactive_tokens_not_substrings() {
+        let opensks_observation = plan_computer_action("inspect OpenSKS desktop");
+        assert_eq!(opensks_observation.decision, "allowed_observation_only");
+        assert_eq!(opensks_observation.requested_action, "observe_screenshot");
+
+        let opened_observation = plan_computer_action("inspect opened window state");
+        assert_eq!(opened_observation.decision, "allowed_observation_only");
+
+        let open_action = plan_computer_action("open browser");
+        assert_eq!(open_action.decision, "approval_required_for_mouse_keyboard");
+        assert_eq!(open_action.requested_action, "open");
     }
 
     #[test]
@@ -7586,10 +9874,14 @@ mod tests {
 
         let output = run_cli(["design", "qa"], &root).expect("design qa");
         assert!(output.stdout.contains("surfaces: 1"));
+        let output = run_cli(["design", "qa"], &root).expect("design qa recheck");
+        assert!(output.stdout.contains("visual_diffs: 1"));
 
         let dir = root.join(OPEN_SKSDIR).join("design");
         let report = fs::read_to_string(dir.join("design-qa-report.json")).expect("report");
         assert!(report.contains("\"static_scan_executed\": true"));
+        assert!(report.contains("\"source_visual_diff_executed\": true"));
+        assert!(report.contains("\"screenshot_diff_executed\": false"));
         assert!(report.contains("\"surface_count\": 1"));
         assert!(report.contains("\"status\": \"findings\""));
 
@@ -7603,6 +9895,31 @@ mod tests {
         assert!(findings.contains("image_alt_missing"));
         assert!(findings.contains("button_accessible_name_missing"));
         assert!(findings.contains("large_fixed_width"));
+
+        let visual_diff =
+            fs::read_to_string(dir.join("design-visual-diff-report.json")).expect("visual diff");
+        assert!(visual_diff.contains("\"schema\": \"opensks.design-visual-diff-report.v1\""));
+        assert!(visual_diff.contains("\"baseline_available\": true"));
+        assert!(visual_diff.contains("\"source_visual_diff_executed\": true"));
+        assert!(visual_diff.contains("\"screenshot_diff_executed\": false"));
+        assert!(visual_diff.contains("\"status\":\"unchanged\""));
+
+        fs::write(
+            root.join("index.html"),
+            concat!(
+                "<html><head></head><body>\n",
+                "<img src=\"hero.png\">\n",
+                "<button><span></span></button>\n",
+                "<style>.panel { width: 1040px; color: #888888; }</style>\n",
+                "</body></html>\n"
+            ),
+        )
+        .expect("mutate design fixture");
+        run_cli(["design", "qa"], &root).expect("design qa changed");
+        let changed_diff = fs::read_to_string(dir.join("design-visual-diff-report.json"))
+            .expect("changed visual diff");
+        assert!(changed_diff.contains("\"status\":\"changed\""));
+        assert!(changed_diff.contains("index.html"));
     }
 
     #[test]
