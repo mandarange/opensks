@@ -173,10 +173,13 @@ partial and is still a gap.
 Non-goal computer/app capability commands still create the PRD-named
 audit/session artifacts with explicit non-live status where the full engine does
 not exist yet. `design qa` scans local design surfaces for static
-accessibility, responsive, and color token findings, then writes
-`design-visual-diff-report.json` from deterministic source visual signatures
-between runs. Rendered screenshot pixel diff and gpt-image-2 review remain
-non-live.
+accessibility, responsive, and color token findings. The scoped `beta-003`
+pass is deterministic local raster screenshot artifact plus pixel diff evidence:
+it writes local PPM screenshot artifacts, `design-screenshot-snapshots.jsonl`,
+and `design-screenshot-diff-report.json` from the local renderer state between
+runs. This does not claim live browser-rendered screenshot capture, Chrome
+Extension evidence, gpt-image-2/ImageGen review, Product Design plugin visual
+comparison, or external design service execution.
 `security audit` scans workspace text for secrets,
 prompt-injection-like phrases, MCP allowlist bypass phrasing, unsafe shell
 actions, and supply-chain shell pipes, then writes the same
@@ -199,7 +202,9 @@ Still not live:
 - External MCP client/server transports beyond the local stdio JSON-RPC
   one-shot surface
 - Full Playwright browser control, screenshots, clicks, typing, and DOM capture
-- Rendered screenshot visual diff and image-generation design review
+- Live browser-rendered screenshots, Chrome Extension evidence, gpt-image-2/
+  ImageGen review, Product Design plugin visual comparison, and external design
+  service execution
 - Dynamic dependency vulnerability resolution and sandboxed exploit testing
 - Desktop mouse/keyboard action execution beyond brokered policy decisions
 - macOS accessibility/app automation beyond brokered inspection and inventory

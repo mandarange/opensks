@@ -20,6 +20,10 @@ const COMPUTER_ISOLATED_LOOP_FINAL_TEXT: &str = "opensks-isolated-loop-ok";
 const COMPUTER_ISOLATED_LOOP_BUTTON_ID: &str = "opensks-loop-button";
 const COMPUTER_ISOLATED_LOOP_INPUT_ID: &str = "opensks-loop-input";
 const COMPUTER_ISOLATED_LOOP_STATUS_ID: &str = "opensks-loop-status";
+const DESIGN_SCREENSHOT_WIDTH: usize = 32;
+const DESIGN_SCREENSHOT_HEIGHT: usize = 32;
+const DESIGN_SCREENSHOT_MODE: &str = "deterministic_local_raster_artifact";
+const DESIGN_SCREENSHOT_RENDERER: &str = "opensks_local_source_rasterizer_v1";
 const PRD_SOURCE_PATH: &str =
     "/Users/weklem/Desktop/opensks_prd_v3_goal_loop_mcp_computer_use_voxel_triwiki.md";
 
@@ -396,6 +400,32 @@ struct DesignVisualDiff {
     previous_signature: Option<String>,
     current_signature: Option<String>,
     bytes_delta: i64,
+}
+
+#[derive(Debug, Clone)]
+struct DesignScreenshotArtifact {
+    path: String,
+    kind: String,
+    image_path: String,
+    width: usize,
+    height: usize,
+    pixel_count: usize,
+    screenshot_hash: String,
+    content_hash: String,
+    visual_signature: String,
+}
+
+#[derive(Debug, Clone)]
+struct DesignScreenshotDiff {
+    path: String,
+    status: String,
+    previous_screenshot_hash: Option<String>,
+    current_screenshot_hash: Option<String>,
+    previous_image_path: Option<String>,
+    current_image_path: Option<String>,
+    pixel_count: usize,
+    pixel_changed_count: usize,
+    image_artifacts_present: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1098,9 +1128,23 @@ fn run_design_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksE
     let snapshot_path = dir.join("design-visual-snapshots.jsonl");
     let previous_surfaces = read_design_surface_snapshot(&snapshot_path)?;
     let visual_diffs = compute_design_visual_diffs(&previous_surfaces, &surfaces);
+    let screenshot_snapshot_path = dir.join("design-screenshot-snapshots.jsonl");
+    let previous_screenshots = read_design_screenshot_snapshot(&screenshot_snapshot_path)?;
+    let current_screenshots = write_design_screenshot_artifacts(&dir, &surfaces)?;
+    let screenshot_diffs =
+        compute_design_screenshot_diffs(&dir, &previous_screenshots, &current_screenshots);
+    let screenshot_baseline_available = !previous_screenshots.is_empty();
+    let screenshot_diff_executed = !surfaces.is_empty();
     write_text_atomic(
         &dir.join("design-qa-report.json"),
-        &render_design_qa_report(&stamp, &surfaces, &findings, &visual_diffs),
+        &render_design_qa_report(
+            &stamp,
+            &surfaces,
+            &findings,
+            &visual_diffs,
+            screenshot_diff_executed,
+            screenshot_baseline_available,
+        ),
     )?;
     write_text_atomic(
         &dir.join("design-surface-inventory.json"),
@@ -1112,9 +1156,28 @@ fn run_design_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksE
     )?;
     write_text_atomic(
         &dir.join("design-visual-diff-report.json"),
-        &render_design_visual_diff_report(&stamp, &visual_diffs, !previous_surfaces.is_empty()),
+        &render_design_visual_diff_report(
+            &stamp,
+            &visual_diffs,
+            !previous_surfaces.is_empty(),
+            screenshot_diff_executed,
+        ),
+    )?;
+    write_text_atomic(
+        &dir.join("design-screenshot-diff-report.json"),
+        &render_design_screenshot_diff_report(
+            &stamp,
+            &screenshot_diffs,
+            &current_screenshots,
+            screenshot_baseline_available,
+            screenshot_diff_executed,
+        ),
     )?;
     write_text_atomic(&snapshot_path, &render_design_surface_snapshot(&surfaces))?;
+    write_text_atomic(
+        &screenshot_snapshot_path,
+        &render_design_screenshot_snapshot(&current_screenshots),
+    )?;
     Ok(CliOutput {
         stdout: format!(
             "wrote design QA artifacts\nsurfaces: {}\nfindings: {}\nvisual_diffs: {}\nreport: {}\n",
@@ -4868,6 +4931,284 @@ fn compute_design_visual_diffs(
     diffs
 }
 
+fn read_design_screenshot_snapshot(
+    path: &Path,
+) -> Result<Vec<DesignScreenshotArtifact>, OpenSksError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let contents = fs::read_to_string(path)?;
+    let snapshots = contents
+        .lines()
+        .filter_map(|line| {
+            if !json_string_field_equals(line, "schema", "opensks.design-screenshot-snapshot.v1") {
+                return None;
+            }
+            let path = extract_json_string_field(line, "path")?;
+            let kind = extract_json_string_field(line, "kind")?;
+            let image_path = extract_json_string_field(line, "image_path")?;
+            let width = extract_json_number_field(line, "width")?;
+            let height = extract_json_number_field(line, "height")?;
+            let pixel_count = extract_json_number_field(line, "pixel_count")?;
+            let screenshot_hash = extract_json_string_field(line, "screenshot_hash")?;
+            let content_hash = extract_json_string_field(line, "content_hash")?;
+            let visual_signature = extract_json_string_field(line, "visual_signature")?;
+            Some(DesignScreenshotArtifact {
+                path,
+                kind,
+                image_path,
+                width,
+                height,
+                pixel_count,
+                screenshot_hash,
+                content_hash,
+                visual_signature,
+            })
+        })
+        .collect();
+    Ok(snapshots)
+}
+
+fn write_design_screenshot_artifacts(
+    design_dir: &Path,
+    surfaces: &[DesignSurface],
+) -> Result<Vec<DesignScreenshotArtifact>, OpenSksError> {
+    let screenshot_dir = design_dir.join("screenshots");
+    fs::create_dir_all(&screenshot_dir)?;
+    let mut artifacts = Vec::new();
+    for surface in surfaces {
+        let ppm = render_design_screenshot_ppm(surface);
+        let screenshot_hash = stable_content_hash(&ppm);
+        let image_path = design_screenshot_image_path(surface, &screenshot_hash);
+        write_text_atomic(&design_dir.join(&image_path), &ppm)?;
+        artifacts.push(DesignScreenshotArtifact {
+            path: surface.path.clone(),
+            kind: surface.kind.clone(),
+            image_path,
+            width: DESIGN_SCREENSHOT_WIDTH,
+            height: DESIGN_SCREENSHOT_HEIGHT,
+            pixel_count: DESIGN_SCREENSHOT_WIDTH * DESIGN_SCREENSHOT_HEIGHT,
+            screenshot_hash,
+            content_hash: surface.content_hash.clone(),
+            visual_signature: surface.visual_signature.clone(),
+        });
+    }
+    Ok(artifacts)
+}
+
+fn design_screenshot_image_path(surface: &DesignSurface, screenshot_hash: &str) -> String {
+    let path_hash = stable_content_hash(&surface.path)
+        .replace("fnv1a64:", "")
+        .replace(':', "-");
+    let image_hash = screenshot_hash.replace("fnv1a64:", "").replace(':', "-");
+    format!("screenshots/design-screenshot-{path_hash}-{image_hash}.ppm")
+}
+
+fn render_design_screenshot_ppm(surface: &DesignSurface) -> String {
+    let mut out = format!(
+        concat!(
+            "P3\n",
+            "# OpenSKS deterministic local raster screenshot artifact\n",
+            "# source_path={}\n",
+            "# renderer={}\n",
+            "{} {}\n",
+            "255\n"
+        ),
+        surface.path, DESIGN_SCREENSHOT_RENDERER, DESIGN_SCREENSHOT_WIDTH, DESIGN_SCREENSHOT_HEIGHT
+    );
+    let seed = stable_content_hash_u64(&format!(
+        "{}|{}|{}|{}",
+        surface.path, surface.kind, surface.content_hash, surface.visual_signature
+    ));
+    for y in 0..DESIGN_SCREENSHOT_HEIGHT {
+        for x in 0..DESIGN_SCREENSHOT_WIDTH {
+            let value = stable_content_hash_u64(&format!(
+                "{seed:016x}|{}|{}|{}|{}",
+                x, y, surface.visual_signature, surface.content_hash
+            ));
+            let red = (value & 0xff) as u8;
+            let green = ((value >> 8) & 0xff) as u8;
+            let blue = ((value >> 16) & 0xff) as u8;
+            out.push_str(&format!("{red} {green} {blue}\n"));
+        }
+    }
+    out
+}
+
+fn compute_design_screenshot_diffs(
+    design_dir: &Path,
+    previous: &[DesignScreenshotArtifact],
+    current: &[DesignScreenshotArtifact],
+) -> Vec<DesignScreenshotDiff> {
+    let previous_by_path = previous
+        .iter()
+        .map(|surface| (surface.path.as_str(), surface))
+        .collect::<HashMap<_, _>>();
+    let current_by_path = current
+        .iter()
+        .map(|surface| (surface.path.as_str(), surface))
+        .collect::<HashMap<_, _>>();
+    let mut diffs = Vec::new();
+
+    for artifact in current {
+        match previous_by_path.get(artifact.path.as_str()) {
+            Some(previous_artifact) => {
+                let (pixel_changed_count, pixel_count, image_artifacts_present) =
+                    compare_design_screenshot_pixels(design_dir, previous_artifact, artifact);
+                diffs.push(DesignScreenshotDiff {
+                    path: artifact.path.clone(),
+                    status: if previous_artifact.screenshot_hash == artifact.screenshot_hash {
+                        "unchanged".to_string()
+                    } else {
+                        "changed".to_string()
+                    },
+                    previous_screenshot_hash: Some(previous_artifact.screenshot_hash.clone()),
+                    current_screenshot_hash: Some(artifact.screenshot_hash.clone()),
+                    previous_image_path: Some(previous_artifact.image_path.clone()),
+                    current_image_path: Some(artifact.image_path.clone()),
+                    pixel_count,
+                    pixel_changed_count,
+                    image_artifacts_present,
+                });
+            }
+            None => {
+                let image_artifacts_present =
+                    design_screenshot_file_hash_matches(design_dir, artifact);
+                diffs.push(DesignScreenshotDiff {
+                    path: artifact.path.clone(),
+                    status: "added".to_string(),
+                    previous_screenshot_hash: None,
+                    current_screenshot_hash: Some(artifact.screenshot_hash.clone()),
+                    previous_image_path: None,
+                    current_image_path: Some(artifact.image_path.clone()),
+                    pixel_count: artifact.pixel_count,
+                    pixel_changed_count: artifact.pixel_count,
+                    image_artifacts_present,
+                });
+            }
+        }
+    }
+
+    for artifact in previous {
+        if !current_by_path.contains_key(artifact.path.as_str()) {
+            let image_artifacts_present = design_screenshot_file_hash_matches(design_dir, artifact);
+            diffs.push(DesignScreenshotDiff {
+                path: artifact.path.clone(),
+                status: "removed".to_string(),
+                previous_screenshot_hash: Some(artifact.screenshot_hash.clone()),
+                current_screenshot_hash: None,
+                previous_image_path: Some(artifact.image_path.clone()),
+                current_image_path: None,
+                pixel_count: artifact.pixel_count,
+                pixel_changed_count: artifact.pixel_count,
+                image_artifacts_present,
+            });
+        }
+    }
+
+    diffs.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then(left.status.cmp(&right.status))
+    });
+    diffs
+}
+
+fn compare_design_screenshot_pixels(
+    design_dir: &Path,
+    previous: &DesignScreenshotArtifact,
+    current: &DesignScreenshotArtifact,
+) -> (usize, usize, bool) {
+    let previous_path = design_dir.join(&previous.image_path);
+    let current_path = design_dir.join(&current.image_path);
+    let Ok(previous_ppm) = fs::read_to_string(previous_path) else {
+        return (
+            current.pixel_count.max(previous.pixel_count),
+            current.pixel_count.max(previous.pixel_count),
+            false,
+        );
+    };
+    let Ok(current_ppm) = fs::read_to_string(current_path) else {
+        return (
+            current.pixel_count.max(previous.pixel_count),
+            current.pixel_count.max(previous.pixel_count),
+            false,
+        );
+    };
+    if stable_content_hash(&previous_ppm) != previous.screenshot_hash
+        || stable_content_hash(&current_ppm) != current.screenshot_hash
+    {
+        return (
+            current.pixel_count.max(previous.pixel_count),
+            current.pixel_count.max(previous.pixel_count),
+            false,
+        );
+    }
+    let Some(previous_pixels) = parse_ppm_pixels(&previous_ppm) else {
+        return (
+            current.pixel_count.max(previous.pixel_count),
+            current.pixel_count.max(previous.pixel_count),
+            false,
+        );
+    };
+    let Some(current_pixels) = parse_ppm_pixels(&current_ppm) else {
+        return (
+            current.pixel_count.max(previous.pixel_count),
+            current.pixel_count.max(previous.pixel_count),
+            false,
+        );
+    };
+    let pixel_count = previous_pixels.len().max(current_pixels.len());
+    let common_changed = previous_pixels
+        .iter()
+        .zip(current_pixels.iter())
+        .filter(|(previous, current)| previous != current)
+        .count();
+    let length_delta = previous_pixels.len().abs_diff(current_pixels.len());
+    (common_changed + length_delta, pixel_count, true)
+}
+
+fn design_screenshot_file_hash_matches(
+    design_dir: &Path,
+    artifact: &DesignScreenshotArtifact,
+) -> bool {
+    let Ok(contents) = fs::read_to_string(design_dir.join(&artifact.image_path)) else {
+        return false;
+    };
+    stable_content_hash(&contents) == artifact.screenshot_hash
+        && parse_ppm_pixels(&contents).is_some_and(|pixels| pixels.len() == artifact.pixel_count)
+}
+
+fn parse_ppm_pixels(contents: &str) -> Option<Vec<(u8, u8, u8)>> {
+    let tokens = contents
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .flat_map(|line| line.split_whitespace())
+        .collect::<Vec<_>>();
+    if tokens.len() < 4 || tokens.first().copied() != Some("P3") {
+        return None;
+    }
+    let width = tokens.get(1)?.parse::<usize>().ok()?;
+    let height = tokens.get(2)?.parse::<usize>().ok()?;
+    let max_value = tokens.get(3)?.parse::<usize>().ok()?;
+    if width != DESIGN_SCREENSHOT_WIDTH || height != DESIGN_SCREENSHOT_HEIGHT || max_value != 255 {
+        return None;
+    }
+    let values = tokens[4..]
+        .iter()
+        .map(|token| token.parse::<u8>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    if values.len() != width * height * 3 {
+        return None;
+    }
+    Some(
+        values
+            .chunks_exact(3)
+            .map(|chunk| (chunk[0], chunk[1], chunk[2]))
+            .collect(),
+    )
+}
+
 fn design_visual_signature(contents: &str, color_tokens: &[String]) -> String {
     let mut signature_parts = Vec::new();
     signature_parts.push(format!("colors={}", color_tokens.join("|")));
@@ -6419,6 +6760,8 @@ fn render_design_qa_report(
     surfaces: &[DesignSurface],
     findings: &[DesignFinding],
     visual_diffs: &[DesignVisualDiff],
+    screenshot_diff_executed: bool,
+    screenshot_baseline_available: bool,
 ) -> String {
     let warnings = findings
         .iter()
@@ -6444,7 +6787,10 @@ fn render_design_qa_report(
             "  \"checks\": {},\n",
             "  \"static_scan_executed\": true,\n",
             "  \"source_visual_diff_executed\": true,\n",
-            "  \"screenshot_diff_executed\": false,\n",
+            "  \"screenshot_diff_executed\": {},\n",
+            "  \"screenshot_diff_mode\": {},\n",
+            "  \"screenshot_baseline_available\": {},\n",
+            "  \"live_browser_capture_executed\": false,\n",
             "  \"surface_count\": {},\n",
             "  \"finding_count\": {},\n",
             "  \"warning_count\": {},\n",
@@ -6465,6 +6811,9 @@ fn render_design_qa_report(
             "color_token_static_scan",
             "auto_ui_patch"
         ]),
+        screenshot_diff_executed,
+        json_string(DESIGN_SCREENSHOT_MODE),
+        screenshot_baseline_available,
         surfaces.len(),
         findings.len(),
         warnings,
@@ -6474,7 +6823,10 @@ fn render_design_qa_report(
             "design-surface-inventory.json",
             "design-findings.jsonl",
             "design-visual-diff-report.json",
-            "design-visual-snapshots.jsonl"
+            "design-visual-snapshots.jsonl",
+            "design-screenshot-diff-report.json",
+            "design-screenshot-snapshots.jsonl",
+            "screenshots/*.ppm"
         ])
     )
 }
@@ -6515,6 +6867,7 @@ fn render_design_visual_diff_report(
     stamp: &ClockStamp,
     visual_diffs: &[DesignVisualDiff],
     baseline_available: bool,
+    screenshot_diff_executed: bool,
 ) -> String {
     let changed = visual_diffs
         .iter()
@@ -6539,17 +6892,23 @@ fn render_design_visual_diff_report(
             "  \"generated_at\": {},\n",
             "  \"baseline_available\": {},\n",
             "  \"source_visual_diff_executed\": true,\n",
-            "  \"screenshot_diff_executed\": false,\n",
+            "  \"screenshot_diff_executed\": {},\n",
+            "  \"screenshot_diff_mode\": {},\n",
+            "  \"screenshot_diff_report_ref\": \"design-screenshot-diff-report.json\",\n",
+            "  \"live_browser_capture_executed\": false,\n",
             "  \"image_generation_review_executed\": false,\n",
+            "  \"gpt_image_review_executed\": false,\n",
             "  \"live_image_or_screenshot_evidence\": false,\n",
             "  \"status\": {},\n",
             "  \"summary\": {{\"total\":{},\"changed\":{},\"added\":{},\"removed\":{},\"unchanged\":{}}},\n",
-            "  \"evidence_note\": \"compares deterministic source-derived visual signatures; rendered screenshots and gpt-image-2 review remain unverified\",\n",
+            "  \"evidence_note\": \"compares deterministic source-derived visual signatures plus local raster screenshot artifacts; live browser-rendered screenshots, Chrome Extension evidence, Product Design visual comparison, and gpt-image-2 review remain unverified\",\n",
             "  \"diffs\": {}\n",
             "}}\n"
         ),
         stamp.json(),
         baseline_available,
+        screenshot_diff_executed,
+        json_string(DESIGN_SCREENSHOT_MODE),
         json_string(if baseline_available {
             "source_visual_diff_recorded"
         } else {
@@ -6591,6 +6950,138 @@ fn render_design_visual_diffs_json(visual_diffs: &[DesignVisualDiff]) -> String 
     format!("[{rows}]")
 }
 
+fn render_design_screenshot_diff_report(
+    stamp: &ClockStamp,
+    screenshot_diffs: &[DesignScreenshotDiff],
+    current_screenshots: &[DesignScreenshotArtifact],
+    baseline_available: bool,
+    screenshot_diff_executed: bool,
+) -> String {
+    let changed = screenshot_diffs
+        .iter()
+        .filter(|diff| diff.status == "changed")
+        .count();
+    let added = screenshot_diffs
+        .iter()
+        .filter(|diff| diff.status == "added")
+        .count();
+    let removed = screenshot_diffs
+        .iter()
+        .filter(|diff| diff.status == "removed")
+        .count();
+    let unchanged = screenshot_diffs
+        .iter()
+        .filter(|diff| diff.status == "unchanged")
+        .count();
+    let pixel_count_total = screenshot_diffs
+        .iter()
+        .map(|diff| diff.pixel_count)
+        .sum::<usize>();
+    let pixel_changed_count_total = screenshot_diffs
+        .iter()
+        .map(|diff| diff.pixel_changed_count)
+        .sum::<usize>();
+    let missing_image_artifact_count = screenshot_diffs
+        .iter()
+        .filter(|diff| !diff.image_artifacts_present)
+        .count();
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.design-screenshot-diff-report.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"baseline_available\": {},\n",
+            "  \"screenshot_diff_executed\": {},\n",
+            "  \"screenshot_diff_mode\": {},\n",
+            "  \"renderer\": {},\n",
+            "  \"live_browser_capture_executed\": false,\n",
+            "  \"chrome_extension_evidence\": false,\n",
+            "  \"image_generation_review_executed\": false,\n",
+            "  \"gpt_image_review_executed\": false,\n",
+            "  \"product_design_visual_comparison_executed\": false,\n",
+            "  \"external_design_service_executed\": false,\n",
+            "  \"live_image_or_screenshot_evidence\": false,\n",
+            "  \"screenshot_snapshot_count\": {},\n",
+            "  \"screenshot_diff_count\": {},\n",
+            "  \"pixel_count_total\": {},\n",
+            "  \"pixel_changed_count_total\": {},\n",
+            "  \"missing_image_artifact_count\": {},\n",
+            "  \"status\": {},\n",
+            "  \"summary\": {{\"total\":{},\"changed\":{},\"added\":{},\"removed\":{},\"unchanged\":{}}},\n",
+            "  \"evidence_note\": \"deterministic local PPM screenshot artifacts and pixel diffs only; live browser-rendered screenshot capture, Chrome Extension evidence, Product Design visual comparison, external design service execution, and gpt-image-2 review remain false\",\n",
+            "  \"diffs\": {}\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        baseline_available,
+        screenshot_diff_executed,
+        json_string(DESIGN_SCREENSHOT_MODE),
+        json_string(DESIGN_SCREENSHOT_RENDERER),
+        current_screenshots.len(),
+        screenshot_diffs.len(),
+        pixel_count_total,
+        pixel_changed_count_total,
+        missing_image_artifact_count,
+        json_string(if !screenshot_diff_executed {
+            "no_design_surfaces"
+        } else if !baseline_available {
+            "baseline_seeded"
+        } else if missing_image_artifact_count > 0 {
+            "missing_image_artifacts"
+        } else if changed > 0 || added > 0 || removed > 0 {
+            "changed"
+        } else {
+            "unchanged"
+        }),
+        screenshot_diffs.len(),
+        changed,
+        added,
+        removed,
+        unchanged,
+        render_design_screenshot_diffs_json(screenshot_diffs)
+    )
+}
+
+fn render_design_screenshot_diffs_json(screenshot_diffs: &[DesignScreenshotDiff]) -> String {
+    let rows = screenshot_diffs
+        .iter()
+        .map(|diff| {
+            format!(
+                concat!(
+                    "{{\"path\":{},\"status\":{},",
+                    "\"previous_screenshot_hash\":{},\"current_screenshot_hash\":{},",
+                    "\"previous_image_path\":{},\"current_image_path\":{},",
+                    "\"pixel_count\":{},\"pixel_changed_count\":{},",
+                    "\"image_artifacts_present\":{}}}"
+                ),
+                json_string(&diff.path),
+                json_string(&diff.status),
+                diff.previous_screenshot_hash
+                    .as_ref()
+                    .map(|hash| json_string(hash))
+                    .unwrap_or_else(|| "null".to_string()),
+                diff.current_screenshot_hash
+                    .as_ref()
+                    .map(|hash| json_string(hash))
+                    .unwrap_or_else(|| "null".to_string()),
+                diff.previous_image_path
+                    .as_ref()
+                    .map(|path| json_string(path))
+                    .unwrap_or_else(|| "null".to_string()),
+                diff.current_image_path
+                    .as_ref()
+                    .map(|path| json_string(path))
+                    .unwrap_or_else(|| "null".to_string()),
+                diff.pixel_count,
+                diff.pixel_changed_count,
+                diff.image_artifacts_present
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{rows}]")
+}
+
 fn render_design_surface_snapshot(surfaces: &[DesignSurface]) -> String {
     let rows = surfaces
         .iter()
@@ -6605,6 +7096,40 @@ fn render_design_surface_snapshot(surfaces: &[DesignSurface]) -> String {
                 surface.bytes,
                 json_string(&surface.content_hash),
                 json_string(&surface.visual_signature)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if rows.is_empty() {
+        String::new()
+    } else {
+        rows + "\n"
+    }
+}
+
+fn render_design_screenshot_snapshot(screenshots: &[DesignScreenshotArtifact]) -> String {
+    let rows = screenshots
+        .iter()
+        .map(|screenshot| {
+            format!(
+                concat!(
+                    "{{\"schema\":\"opensks.design-screenshot-snapshot.v1\",",
+                    "\"path\":{},\"kind\":{},\"image_path\":{},",
+                    "\"width\":{},\"height\":{},\"pixel_count\":{},",
+                    "\"screenshot_hash\":{},\"content_hash\":{},",
+                    "\"visual_signature\":{},\"renderer\":{},\"mode\":{}}}"
+                ),
+                json_string(&screenshot.path),
+                json_string(&screenshot.kind),
+                json_string(&screenshot.image_path),
+                screenshot.width,
+                screenshot.height,
+                screenshot.pixel_count,
+                json_string(&screenshot.screenshot_hash),
+                json_string(&screenshot.content_hash),
+                json_string(&screenshot.visual_signature),
+                json_string(DESIGN_SCREENSHOT_RENDERER),
+                json_string(DESIGN_SCREENSHOT_MODE)
             )
         })
         .collect::<Vec<_>>()
@@ -7808,6 +8333,352 @@ fn computer_loop_events_prove_isolated_open_click_type(
         && json_top_level_bool_field_equals(interactive, "external_web_control", false)
 }
 
+fn beta003_design_qa_screenshot_diff_gate_passed(cwd: &Path) -> bool {
+    let design_dir = cwd.join(OPEN_SKSDIR).join("design");
+    let Ok(qa_report) = fs::read_to_string(design_dir.join("design-qa-report.json")) else {
+        return false;
+    };
+    let Ok(visual_report) = fs::read_to_string(design_dir.join("design-visual-diff-report.json"))
+    else {
+        return false;
+    };
+    let Ok(screenshot_report) =
+        fs::read_to_string(design_dir.join("design-screenshot-diff-report.json"))
+    else {
+        return false;
+    };
+    let Ok(screenshot_snapshot) =
+        fs::read_to_string(design_dir.join("design-screenshot-snapshots.jsonl"))
+    else {
+        return false;
+    };
+
+    let Some(qa_surface_count) = extract_json_top_level_number_field(&qa_report, "surface_count")
+    else {
+        return false;
+    };
+    let Some(snapshot_count) =
+        extract_json_top_level_number_field(&screenshot_report, "screenshot_snapshot_count")
+    else {
+        return false;
+    };
+    let Some(diff_count) =
+        extract_json_top_level_number_field(&screenshot_report, "screenshot_diff_count")
+    else {
+        return false;
+    };
+    let Some(pixel_count_total) =
+        extract_json_top_level_number_field(&screenshot_report, "pixel_count_total")
+    else {
+        return false;
+    };
+    let Some(missing_image_artifact_count) =
+        extract_json_top_level_number_field(&screenshot_report, "missing_image_artifact_count")
+    else {
+        return false;
+    };
+
+    qa_surface_count > 0
+        && snapshot_count == qa_surface_count
+        && diff_count == snapshot_count
+        && pixel_count_total > 0
+        && missing_image_artifact_count == 0
+        && json_top_level_string_field_equals(&qa_report, "schema", "opensks.design-qa-report.v1")
+        && json_top_level_bool_field_equals(&qa_report, "static_scan_executed", true)
+        && json_top_level_bool_field_equals(&qa_report, "source_visual_diff_executed", true)
+        && json_top_level_bool_field_equals(&qa_report, "screenshot_diff_executed", true)
+        && json_top_level_string_field_equals(
+            &qa_report,
+            "screenshot_diff_mode",
+            DESIGN_SCREENSHOT_MODE,
+        )
+        && json_top_level_bool_field_equals(&qa_report, "screenshot_baseline_available", true)
+        && json_top_level_bool_field_equals(&qa_report, "live_browser_capture_executed", false)
+        && json_top_level_bool_field_equals(&qa_report, "live_image_or_screenshot_evidence", false)
+        && design_report_forbidden_live_flags_false(&qa_report)
+        && json_top_level_string_field_equals(
+            &visual_report,
+            "schema",
+            "opensks.design-visual-diff-report.v1",
+        )
+        && json_top_level_bool_field_equals(&visual_report, "baseline_available", true)
+        && json_top_level_bool_field_equals(&visual_report, "source_visual_diff_executed", true)
+        && json_top_level_bool_field_equals(&visual_report, "screenshot_diff_executed", true)
+        && json_top_level_string_field_equals(
+            &visual_report,
+            "screenshot_diff_mode",
+            DESIGN_SCREENSHOT_MODE,
+        )
+        && json_top_level_string_field_equals(
+            &visual_report,
+            "screenshot_diff_report_ref",
+            "design-screenshot-diff-report.json",
+        )
+        && json_top_level_bool_field_equals(&visual_report, "live_browser_capture_executed", false)
+        && json_top_level_bool_field_equals(
+            &visual_report,
+            "image_generation_review_executed",
+            false,
+        )
+        && json_top_level_bool_field_equals(&visual_report, "gpt_image_review_executed", false)
+        && json_top_level_bool_field_equals(
+            &visual_report,
+            "live_image_or_screenshot_evidence",
+            false,
+        )
+        && design_report_forbidden_live_flags_false(&visual_report)
+        && json_top_level_string_field_equals(
+            &screenshot_report,
+            "schema",
+            "opensks.design-screenshot-diff-report.v1",
+        )
+        && json_top_level_bool_field_equals(&screenshot_report, "baseline_available", true)
+        && json_top_level_bool_field_equals(&screenshot_report, "screenshot_diff_executed", true)
+        && json_top_level_string_field_equals(
+            &screenshot_report,
+            "screenshot_diff_mode",
+            DESIGN_SCREENSHOT_MODE,
+        )
+        && json_top_level_string_field_equals(
+            &screenshot_report,
+            "renderer",
+            DESIGN_SCREENSHOT_RENDERER,
+        )
+        && json_top_level_bool_field_equals(
+            &screenshot_report,
+            "live_browser_capture_executed",
+            false,
+        )
+        && json_top_level_bool_field_equals(&screenshot_report, "chrome_extension_evidence", false)
+        && json_top_level_bool_field_equals(
+            &screenshot_report,
+            "image_generation_review_executed",
+            false,
+        )
+        && json_top_level_bool_field_equals(&screenshot_report, "gpt_image_review_executed", false)
+        && json_top_level_bool_field_equals(
+            &screenshot_report,
+            "product_design_visual_comparison_executed",
+            false,
+        )
+        && json_top_level_bool_field_equals(
+            &screenshot_report,
+            "external_design_service_executed",
+            false,
+        )
+        && json_top_level_bool_field_equals(
+            &screenshot_report,
+            "live_image_or_screenshot_evidence",
+            false,
+        )
+        && design_report_forbidden_live_flags_false(&screenshot_report)
+        && design_screenshot_diff_rows_valid(
+            &design_dir,
+            &screenshot_report,
+            diff_count,
+            pixel_count_total,
+        )
+        && design_screenshot_snapshot_artifacts_valid(
+            &design_dir,
+            &screenshot_snapshot,
+            snapshot_count,
+        )
+}
+
+fn design_report_forbidden_live_flags_false(report: &str) -> bool {
+    [
+        "live_browser_capture_executed",
+        "chrome_extension_evidence",
+        "image_generation_review_executed",
+        "gpt_image_review_executed",
+        "product_design_visual_comparison_executed",
+        "external_design_service_executed",
+        "live_image_or_screenshot_evidence",
+    ]
+    .iter()
+    .all(|field| {
+        json_top_level_field_absent(report, field)
+            || json_top_level_bool_field_equals(report, field, false)
+    })
+}
+
+fn design_screenshot_diff_rows_valid(
+    design_dir: &Path,
+    report: &str,
+    expected_count: usize,
+    expected_pixel_count_total: usize,
+) -> bool {
+    let rows = extract_json_top_level_array_objects(report, "diffs");
+    if rows.len() != expected_count || rows.is_empty() {
+        return false;
+    }
+    let mut pixel_total = 0usize;
+    for row in rows {
+        let Some(status) = extract_json_top_level_string_field(&row, "status") else {
+            return false;
+        };
+        if !matches!(
+            status.as_str(),
+            "unchanged" | "changed" | "added" | "removed"
+        ) {
+            return false;
+        }
+        let Some(pixel_count) = extract_json_top_level_number_field(&row, "pixel_count") else {
+            return false;
+        };
+        let Some(pixel_changed_count) =
+            extract_json_top_level_number_field(&row, "pixel_changed_count")
+        else {
+            return false;
+        };
+        if pixel_count == 0 || pixel_changed_count > pixel_count {
+            return false;
+        }
+        pixel_total += pixel_count;
+        if !json_top_level_bool_field_equals(&row, "image_artifacts_present", true)
+            || extract_json_top_level_string_field(&row, "path").is_none()
+        {
+            return false;
+        }
+
+        let previous_path = extract_json_top_level_string_field(&row, "previous_image_path");
+        let previous_hash = extract_json_top_level_string_field(&row, "previous_screenshot_hash");
+        let current_path = extract_json_top_level_string_field(&row, "current_image_path");
+        let current_hash = extract_json_top_level_string_field(&row, "current_screenshot_hash");
+
+        match status.as_str() {
+            "added" => {
+                if previous_path.is_some() || previous_hash.is_some() {
+                    return false;
+                }
+                let (Some(path), Some(hash)) = (current_path.as_deref(), current_hash.as_deref())
+                else {
+                    return false;
+                };
+                if !design_screenshot_report_image_hash_matches(design_dir, path, hash) {
+                    return false;
+                }
+            }
+            "removed" => {
+                if current_path.is_some() || current_hash.is_some() {
+                    return false;
+                }
+                let (Some(path), Some(hash)) = (previous_path.as_deref(), previous_hash.as_deref())
+                else {
+                    return false;
+                };
+                if !design_screenshot_report_image_hash_matches(design_dir, path, hash) {
+                    return false;
+                }
+            }
+            "unchanged" | "changed" => {
+                let (
+                    Some(previous_path),
+                    Some(previous_hash),
+                    Some(current_path),
+                    Some(current_hash),
+                ) = (
+                    previous_path.as_deref(),
+                    previous_hash.as_deref(),
+                    current_path.as_deref(),
+                    current_hash.as_deref(),
+                )
+                else {
+                    return false;
+                };
+                if !design_screenshot_report_image_hash_matches(
+                    design_dir,
+                    previous_path,
+                    previous_hash,
+                ) || !design_screenshot_report_image_hash_matches(
+                    design_dir,
+                    current_path,
+                    current_hash,
+                ) {
+                    return false;
+                }
+                if status == "unchanged" && previous_hash != current_hash {
+                    return false;
+                }
+                if status == "changed" && previous_hash == current_hash {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    pixel_total == expected_pixel_count_total
+}
+
+fn design_screenshot_report_image_hash_matches(
+    design_dir: &Path,
+    image_path: &str,
+    expected_hash: &str,
+) -> bool {
+    if image_path.contains("..") || !image_path.starts_with("screenshots/") {
+        return false;
+    }
+    let Ok(contents) = fs::read_to_string(design_dir.join(image_path)) else {
+        return false;
+    };
+    stable_content_hash(&contents) == expected_hash
+        && parse_ppm_pixels(&contents).is_some_and(|pixels| {
+            pixels.len() == DESIGN_SCREENSHOT_WIDTH * DESIGN_SCREENSHOT_HEIGHT
+        })
+}
+
+fn design_screenshot_snapshot_artifacts_valid(
+    design_dir: &Path,
+    snapshot: &str,
+    expected_count: usize,
+) -> bool {
+    let mut count = 0usize;
+    for line in snapshot.lines().filter(|line| !line.trim().is_empty()) {
+        count += 1;
+        if !json_top_level_string_field_equals(
+            line,
+            "schema",
+            "opensks.design-screenshot-snapshot.v1",
+        ) || !json_top_level_string_field_equals(line, "renderer", DESIGN_SCREENSHOT_RENDERER)
+            || !json_top_level_string_field_equals(line, "mode", DESIGN_SCREENSHOT_MODE)
+            || !json_top_level_number_field_equals(line, "width", DESIGN_SCREENSHOT_WIDTH)
+            || !json_top_level_number_field_equals(line, "height", DESIGN_SCREENSHOT_HEIGHT)
+            || !json_top_level_number_field_equals(
+                line,
+                "pixel_count",
+                DESIGN_SCREENSHOT_WIDTH * DESIGN_SCREENSHOT_HEIGHT,
+            )
+        {
+            return false;
+        }
+        let Some(image_path) = extract_json_top_level_string_field(line, "image_path") else {
+            return false;
+        };
+        let Some(screenshot_hash) = extract_json_top_level_string_field(line, "screenshot_hash")
+        else {
+            return false;
+        };
+        if image_path.contains("..") || !image_path.starts_with("screenshots/") {
+            return false;
+        }
+        let Ok(contents) = fs::read_to_string(design_dir.join(&image_path)) else {
+            return false;
+        };
+        if stable_content_hash(&contents) != screenshot_hash
+            || parse_ppm_pixels(&contents).is_none_or(|pixels| {
+                pixels.len() != DESIGN_SCREENSHOT_WIDTH * DESIGN_SCREENSHOT_HEIGHT
+            })
+            || extract_json_top_level_string_field(line, "path").is_none()
+            || extract_json_top_level_string_field(line, "kind").is_none()
+            || extract_json_top_level_string_field(line, "content_hash").is_none()
+            || extract_json_top_level_string_field(line, "visual_signature").is_none()
+        {
+            return false;
+        }
+    }
+    count == expected_count && count > 0
+}
+
 fn accessibility_top_level_application_node_present(accessibility: &str) -> bool {
     extract_json_top_level_array_objects(accessibility, "nodes")
         .iter()
@@ -7829,6 +8700,18 @@ fn beta_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
         (
             "partial",
             "beta-002 requires computer-use artifacts isolated-browser-container.json, computer-browser-loop.json, computer-browser-loop-events.jsonl, isolated-browser-runtime/index.html, computer-policy-decision.json, and computer-final-state.json proving deterministic synthetic local HTML open/click/type event records while live browser control, external web control, and mouse/keyboard execution remain false.",
+        )
+    };
+    let beta_003_passed = beta003_design_qa_screenshot_diff_gate_passed(cwd);
+    let (beta_003_status, beta_003_evidence) = if beta_003_passed {
+        (
+            "passed",
+            "design qa deterministic local raster screenshot artifacts prove pixel diff evidence through design-screenshot-diff-report.json, design-screenshot-snapshots.jsonl, and matching PPM hashes; live browser-rendered screenshots, Chrome Extension evidence, Product Design visual comparison, external design services, and gpt-image-2 review remain false.",
+        )
+    } else {
+        (
+            "partial",
+            "beta-003 requires design qa to run at least twice with a baseline, write design-screenshot-diff-report.json, design-screenshot-snapshots.jsonl, and local PPM screenshot artifacts with matching hashes, screenshot_diff_executed=true, missing_image_artifact_count=0, and all live browser/gpt/Product Design/external visual evidence flags false.",
         )
     };
     let beta_004_passed = beta004_cache_layout_gate_passed(cwd);
@@ -7871,8 +8754,8 @@ fn beta_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
         acceptance_item(
             "beta-003",
             "Design QA screenshot diff works.",
-            "partial",
-            "design qa records deterministic source visual-signature diffs between runs; live rendered screenshot pixel diff, browser capture, and gpt-image-2 review remain unverified.",
+            beta_003_status,
+            beta_003_evidence,
         ),
         acceptance_item(
             "beta-004",
@@ -8484,6 +9367,10 @@ fn json_top_level_string_field_equals(input: &str, key: &str, expected: &str) ->
 fn json_top_level_bool_field_equals(input: &str, key: &str, expected: bool) -> bool {
     extract_json_top_level_raw_field(input, key).as_deref()
         == Some(if expected { "true" } else { "false" })
+}
+
+fn json_top_level_number_field_equals(input: &str, key: &str, expected: usize) -> bool {
+    extract_json_top_level_number_field(input, key) == Some(expected)
 }
 
 fn json_top_level_null_field_equals(input: &str, key: &str) -> bool {
@@ -11187,12 +12074,17 @@ fn append_text(path: &Path, contents: &str) -> Result<(), OpenSksError> {
 }
 
 fn stable_content_hash(value: &str) -> String {
+    let hash = stable_content_hash_u64(value);
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn stable_content_hash_u64(value: &str) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in value.bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    format!("fnv1a64:{hash:016x}")
+    hash
 }
 
 fn json_array(values: &[&str]) -> String {
@@ -11526,6 +12418,21 @@ mod tests {
                 "\"id\":\"beta-002\",\"criterion\":\"Computer-use loop works in isolated browser/container.\",\"status\":\"{expected_status}\""
             )),
             "expected beta-002 status {expected_status}, got {beta}"
+        );
+    }
+
+    fn assert_beta003_status(root: &Path, expected_status: &str) {
+        let beta = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta acceptance");
+        assert!(
+            beta.contains(&format!(
+                "\"id\":\"beta-003\",\"criterion\":\"Design QA screenshot diff works.\",\"status\":\"{expected_status}\""
+            )),
+            "expected beta-003 status {expected_status}, got {beta}"
         );
     }
 
@@ -14288,7 +15195,13 @@ mod tests {
         let report = fs::read_to_string(dir.join("design-qa-report.json")).expect("report");
         assert!(report.contains("\"static_scan_executed\": true"));
         assert!(report.contains("\"source_visual_diff_executed\": true"));
-        assert!(report.contains("\"screenshot_diff_executed\": false"));
+        assert!(report.contains("\"screenshot_diff_executed\": true"));
+        assert!(report.contains(&format!(
+            "\"screenshot_diff_mode\": \"{}\"",
+            DESIGN_SCREENSHOT_MODE
+        )));
+        assert!(report.contains("\"screenshot_baseline_available\": true"));
+        assert!(report.contains("\"live_browser_capture_executed\": false"));
         assert!(report.contains("\"surface_count\": 1"));
         assert!(report.contains("\"status\": \"findings\""));
 
@@ -14308,8 +15221,48 @@ mod tests {
         assert!(visual_diff.contains("\"schema\": \"opensks.design-visual-diff-report.v1\""));
         assert!(visual_diff.contains("\"baseline_available\": true"));
         assert!(visual_diff.contains("\"source_visual_diff_executed\": true"));
-        assert!(visual_diff.contains("\"screenshot_diff_executed\": false"));
+        assert!(visual_diff.contains("\"screenshot_diff_executed\": true"));
+        assert!(
+            visual_diff
+                .contains("\"screenshot_diff_report_ref\": \"design-screenshot-diff-report.json\"")
+        );
+        assert!(visual_diff.contains("\"live_browser_capture_executed\": false"));
+        assert!(visual_diff.contains("\"gpt_image_review_executed\": false"));
         assert!(visual_diff.contains("\"status\":\"unchanged\""));
+        let screenshot_diff = fs::read_to_string(dir.join("design-screenshot-diff-report.json"))
+            .expect("screenshot diff");
+        assert!(
+            screenshot_diff.contains("\"schema\": \"opensks.design-screenshot-diff-report.v1\"")
+        );
+        assert!(screenshot_diff.contains("\"baseline_available\": true"));
+        assert!(screenshot_diff.contains("\"screenshot_diff_executed\": true"));
+        assert!(
+            screenshot_diff.contains(&format!("\"renderer\": \"{}\"", DESIGN_SCREENSHOT_RENDERER))
+        );
+        assert!(screenshot_diff.contains("\"screenshot_snapshot_count\": 1"));
+        assert!(screenshot_diff.contains("\"missing_image_artifact_count\": 0"));
+        assert!(screenshot_diff.contains("\"pixel_changed_count_total\": 0"));
+        assert!(screenshot_diff.contains("\"status\": \"unchanged\""));
+
+        let screenshot_snapshot = fs::read_to_string(dir.join("design-screenshot-snapshots.jsonl"))
+            .expect("screenshot snapshot");
+        let snapshot_line = screenshot_snapshot.lines().next().expect("snapshot line");
+        assert!(json_string_field_equals(
+            snapshot_line,
+            "schema",
+            "opensks.design-screenshot-snapshot.v1"
+        ));
+        let image_path =
+            extract_json_string_field(snapshot_line, "image_path").expect("image path");
+        let screenshot_hash =
+            extract_json_string_field(snapshot_line, "screenshot_hash").expect("hash");
+        let image_contents =
+            fs::read_to_string(dir.join(image_path)).expect("screenshot ppm artifact");
+        assert_eq!(stable_content_hash(&image_contents), screenshot_hash);
+        assert_eq!(
+            parse_ppm_pixels(&image_contents).expect("ppm pixels").len(),
+            DESIGN_SCREENSHOT_WIDTH * DESIGN_SCREENSHOT_HEIGHT
+        );
 
         fs::write(
             root.join("index.html"),
@@ -14327,6 +15280,182 @@ mod tests {
             .expect("changed visual diff");
         assert!(changed_diff.contains("\"status\":\"changed\""));
         assert!(changed_diff.contains("index.html"));
+        let changed_screenshot_diff =
+            fs::read_to_string(dir.join("design-screenshot-diff-report.json"))
+                .expect("changed screenshot diff");
+        assert!(changed_screenshot_diff.contains("\"status\": \"changed\""));
+        assert!(!changed_screenshot_diff.contains("\"pixel_changed_count_total\": 0"));
+    }
+
+    #[test]
+    fn beta003_requires_artifact_bound_design_screenshot_diff_gate() {
+        let root = temp_workspace("beta003-design-screenshot");
+        fs::write(
+            root.join("index.html"),
+            concat!(
+                "<html><head><meta name=\"viewport\" content=\"width=device-width\"></head><body>\n",
+                "<button aria-label=\"Save\">Save</button>\n",
+                "<style>.panel { width: 720px; color: #222222; background: #f8f8f8; }</style>\n",
+                "</body></html>\n"
+            ),
+        )
+        .expect("write design fixture");
+
+        run_cli(["acceptance", "audit"], &root).expect("acceptance without design qa");
+        assert_beta003_status(&root, "partial");
+        run_cli(["design", "qa"], &root).expect("first design qa");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance first design qa");
+        assert_beta003_status(&root, "partial");
+        run_cli(["design", "qa"], &root).expect("second design qa");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance second design qa");
+        assert_beta003_status(&root, "passed");
+
+        let beta = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta");
+        assert!(beta.contains("deterministic local raster screenshot artifacts"));
+        assert!(beta.contains("matching PPM hashes"));
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings");
+        assert!(!findings.contains("\"id\":\"beta-003\""));
+    }
+
+    #[test]
+    fn beta003_stays_partial_for_spoofed_or_tampered_design_screenshot_artifacts() {
+        let root = temp_workspace("beta003-design-tamper");
+        fs::write(
+            root.join("index.html"),
+            concat!(
+                "<html><head><meta name=\"viewport\" content=\"width=device-width\"></head><body>\n",
+                "<button aria-label=\"Save\">Save</button>\n",
+                "<style>.panel { width: 720px; color: #222222; background: #f8f8f8; }</style>\n",
+                "</body></html>\n"
+            ),
+        )
+        .expect("write design fixture");
+        run_cli(["design", "qa"], &root).expect("first design qa");
+        run_cli(["design", "qa"], &root).expect("second design qa");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance valid design qa");
+        assert_beta003_status(&root, "passed");
+
+        let design_dir = root.join(OPEN_SKSDIR).join("design");
+        let report_path = design_dir.join("design-screenshot-diff-report.json");
+        let visual_path = design_dir.join("design-visual-diff-report.json");
+        let snapshot_path = design_dir.join("design-screenshot-snapshots.jsonl");
+        let original_report = fs::read_to_string(&report_path).expect("screenshot report");
+        let original_visual = fs::read_to_string(&visual_path).expect("visual report");
+        let original_snapshot = fs::read_to_string(&snapshot_path).expect("snapshot");
+        let snapshot_line = original_snapshot.lines().next().expect("snapshot line");
+        let image_path =
+            extract_json_string_field(snapshot_line, "image_path").expect("image path");
+        let image_file = design_dir.join(&image_path);
+        let original_image = fs::read_to_string(&image_file).expect("ppm image");
+
+        fs::write(
+            &report_path,
+            original_report.replace(
+                "\"baseline_available\": true",
+                "\"baseline_available\": false",
+            ),
+        )
+        .expect("tamper baseline");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance tampered baseline");
+        assert_beta003_status(&root, "partial");
+
+        fs::write(&report_path, &original_report).expect("restore report");
+        fs::write(
+            &report_path,
+            original_report.replace(
+                "\"screenshot_diff_executed\": true",
+                "\"screenshot_diff_executed\": true,\n  \"screenshot_diff_executed\": true",
+            ),
+        )
+        .expect("tamper duplicate field");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance duplicate field");
+        assert_beta003_status(&root, "partial");
+
+        fs::write(&report_path, &original_report).expect("restore duplicate");
+        let empty_diffs_report = original_report.replace(
+            &extract_json_top_level_raw_field(&original_report, "diffs").expect("diffs raw"),
+            "[]",
+        );
+        fs::write(&report_path, empty_diffs_report).expect("tamper empty diffs");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance empty diffs");
+        assert_beta003_status(&root, "partial");
+
+        fs::write(&report_path, &original_report).expect("restore empty diffs");
+        fs::write(&image_file, format!("{original_image}0 0 0\n")).expect("tamper image hash");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance image hash mismatch");
+        assert_beta003_status(&root, "partial");
+
+        fs::write(&image_file, &original_image).expect("restore image");
+        fs::write(
+            &snapshot_path,
+            original_snapshot.replace(
+                "\"screenshot_hash\":",
+                "\"screenshot_hash\":\"fnv1a64:0000000000000000\",\"screenshot_hash\":",
+            ),
+        )
+        .expect("tamper duplicate snapshot hash");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance duplicate snapshot");
+        assert_beta003_status(&root, "partial");
+
+        fs::write(&snapshot_path, &original_snapshot).expect("restore snapshot");
+        fs::write(
+            &report_path,
+            original_report.replace(
+                "\"live_image_or_screenshot_evidence\": false",
+                "\"live_image_or_screenshot_evidence\": true",
+            ),
+        )
+        .expect("tamper live evidence");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance live evidence");
+        assert_beta003_status(&root, "partial");
+
+        fs::write(&report_path, &original_report).expect("restore report after live evidence");
+        let qa_path = design_dir.join("design-qa-report.json");
+        let original_qa = fs::read_to_string(&qa_path).expect("qa report");
+        fs::write(
+            &qa_path,
+            original_qa.replace(
+                "\"live_browser_capture_executed\": false",
+                "\"live_browser_capture_executed\": false,\n  \"product_design_visual_comparison_executed\": true",
+            ),
+        )
+        .expect("tamper qa product design flag");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance qa product design flag");
+        assert_beta003_status(&root, "partial");
+
+        fs::write(&qa_path, &original_qa).expect("restore qa report");
+        fs::write(
+            &visual_path,
+            original_visual.replace(
+                "\"gpt_image_review_executed\": false",
+                "\"gpt_image_review_executed\": true",
+            ),
+        )
+        .expect("tamper gpt visual");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance gpt visual");
+        assert_beta003_status(&root, "partial");
+
+        fs::write(&visual_path, &original_visual).expect("restore visual report");
+        fs::write(
+            &visual_path,
+            original_visual.replace(
+                "\"live_browser_capture_executed\": false",
+                "\"live_browser_capture_executed\": false,\n  \"external_design_service_executed\": true",
+            ),
+        )
+        .expect("tamper external visual");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance external visual");
+        assert_beta003_status(&root, "partial");
     }
 
     #[test]
