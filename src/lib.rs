@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process;
+use std::process::{self, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const OPEN_SKSDIR: &str = ".opensks";
@@ -5965,7 +5965,7 @@ fn check_provider_adapters(dir: &Path, statuses: &[ProviderStatus]) -> Vec<Provi
 }
 
 fn check_provider_adapter(
-    dir: &Path,
+    _dir: &Path,
     status: &ProviderStatus,
     endpoint: &str,
 ) -> ProviderAdapterCheck {
@@ -6012,14 +6012,6 @@ fn check_provider_adapter(
     };
 
     let started = Instant::now();
-    let config_path = dir.join(format!(
-        ".{}-adapter-curl-config.tmp",
-        status
-            .definition
-            .name
-            .replace(' ', "-")
-            .to_ascii_lowercase()
-    ));
     let config = format!(
         concat!(
             "url = \"{}\"\n",
@@ -6032,13 +6024,20 @@ fn check_provider_adapter(
         ),
         endpoint, secret
     );
-    let output = fs::write(&config_path, config).and_then(|_| {
-        process::Command::new("curl")
-            .arg("--config")
-            .arg(&config_path)
-            .output()
-    });
-    let _ = fs::remove_file(&config_path);
+    let output = process::Command::new("curl")
+        .args(["--config", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            let mut stdin = child.stdin.take().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "curl stdin unavailable")
+            })?;
+            stdin.write_all(config.as_bytes())?;
+            drop(stdin);
+            child.wait_with_output()
+        });
 
     match output {
         Ok(output) => {
@@ -6080,9 +6079,13 @@ fn check_provider_adapter(
 }
 
 fn provider_adapter_endpoint(status: &ProviderStatus) -> Option<String> {
-    match status.definition.name {
-        "OpenRouter" => Some("https://openrouter.ai/api/v1/models".to_string()),
-        "OpenAI" => Some("https://api.openai.com/v1/models".to_string()),
+    provider_adapter_expected_endpoint(status.definition.name).map(str::to_string)
+}
+
+fn provider_adapter_expected_endpoint(name: &str) -> Option<&'static str> {
+    match name {
+        "OpenRouter" => Some("https://openrouter.ai/api/v1/models"),
+        "OpenAI" => Some("https://api.openai.com/v1/models"),
         _ => None,
     }
 }
@@ -8394,6 +8397,18 @@ fn render_updater_final_state(stamp: &ClockStamp, manifest_hash: &str, signature
 }
 
 fn mvp_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
+    let mvp_004_passed = mvp004_provider_adapter_gate_passed(cwd);
+    let (mvp_004_status, mvp_004_evidence) = if mvp_004_passed {
+        (
+            "passed",
+            "provider-adapter-check.json proves opt-in remote /models adapter checks for OpenRouter and OpenAI: schema=opensks.provider-adapter-check.v1, remote_probe_opt_in=true, summary total/attempted/reachable=2, no secret leak indicators, exact OpenRouter/OpenAI endpoints, and both adapter rows configured=true, attempted=true, status=adapter_models_endpoint_reachable, secret_value_exposed=false, with 2xx http_code.",
+        )
+    } else {
+        (
+            "partial",
+            "mvp-004 requires .opensks/providers/provider-adapter-check.json with schema=opensks.provider-adapter-check.v1, remote_probe_opt_in=true, summary total/attempted/reachable=2, no secret leak indicators, exact OpenRouter/OpenAI /models endpoints, and exactly one OpenRouter plus one OpenAI adapter row configured=true, attempted=true, status=adapter_models_endpoint_reachable, secret_value_exposed=false, with 2xx http_code.",
+        )
+    };
     let mvp_007_passed = mvp007_browser_local_loop_gate_passed(cwd);
     let (mvp_007_status, mvp_007_evidence) = if mvp_007_passed {
         (
@@ -8440,8 +8455,8 @@ fn mvp_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
         acceptance_item(
             "mvp-004",
             "OpenRouter/OpenAI provider adapters work.",
-            "partial",
-            "provider adapter-check implements OpenRouter/OpenAI /models smoke paths with secret-redacted artifacts; live remote checks require configured credentials and OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1.",
+            mvp_004_status,
+            mvp_004_evidence,
         ),
         acceptance_item(
             "mvp-005",
@@ -8486,6 +8501,102 @@ fn mvp_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
             "app writes dashboard.html and worker-lanes.json; the static dashboard renders mission status plus a worker-lane table from local mission/tool-plan artifacts without claiming live native GUI or live worker execution.",
         ),
     ]
+}
+
+fn mvp004_provider_adapter_gate_passed(cwd: &Path) -> bool {
+    let Ok(report) = fs::read_to_string(
+        cwd.join(OPEN_SKSDIR)
+            .join("providers")
+            .join("provider-adapter-check.json"),
+    ) else {
+        return false;
+    };
+    if !json_top_level_string_field_equals(&report, "schema", "opensks.provider-adapter-check.v1")
+        || !json_top_level_bool_field_equals(&report, "remote_probe_opt_in", true)
+        || !json_top_level_bool_field_equals(&report, "secret_value_exposed", false)
+        || !provider_adapter_report_has_no_secret_leak(&report)
+        || !provider_adapter_summary_gate_passed(&report)
+    {
+        return false;
+    }
+    let adapters = extract_json_top_level_array_objects(&report, "adapters");
+    if adapters.len() != 2 {
+        return false;
+    }
+    ["OpenRouter", "OpenAI"]
+        .iter()
+        .all(|name| match provider_adapter_expected_endpoint(name) {
+            Some(endpoint) => provider_adapter_row_gate_passed(&adapters, name, endpoint),
+            None => false,
+        })
+}
+
+fn provider_adapter_summary_gate_passed(report: &str) -> bool {
+    let Some(summary) = extract_json_top_level_raw_field(report, "summary") else {
+        return false;
+    };
+    json_top_level_number_field_equals(&summary, "total", 2)
+        && json_top_level_number_field_equals(&summary, "attempted", 2)
+        && json_top_level_number_field_equals(&summary, "reachable", 2)
+}
+
+fn provider_adapter_report_has_no_secret_leak(report: &str) -> bool {
+    let lower = report.to_ascii_lowercase();
+    let marker_view = lower.replace("\\\"", "\"");
+    !json_bool_field_true_anywhere(&marker_view, "secret_value_exposed")
+        && !lower.contains("authorization")
+        && !lower.contains("bearer")
+        && !lower.contains("sk-")
+        && !lower.contains("api_key=")
+        && !lower.contains("api-key")
+}
+
+fn json_bool_field_true_anywhere(input: &str, key: &str) -> bool {
+    let needle = format!("\"{key}\"");
+    let mut offset = 0usize;
+    while let Some(relative) = input[offset..].find(&needle) {
+        let after_key = offset + relative + needle.len();
+        let after_space = skip_json_whitespace(input, after_key);
+        if input[after_space..].starts_with(':') {
+            let value_start = skip_json_whitespace(input, after_space + 1);
+            if input[value_start..].starts_with("true") {
+                return true;
+            }
+        }
+        offset = after_key;
+    }
+    false
+}
+
+fn provider_adapter_row_gate_passed(
+    adapters: &[String],
+    expected_name: &str,
+    expected_endpoint: &str,
+) -> bool {
+    let matching = adapters
+        .iter()
+        .filter(|adapter| {
+            json_top_level_string_field_equals(adapter, "name", expected_name)
+                && json_top_level_bool_field_equals(adapter, "configured", true)
+                && json_top_level_bool_field_equals(adapter, "attempted", true)
+                && json_top_level_string_field_equals(adapter, "endpoint", expected_endpoint)
+                && json_top_level_string_field_equals(
+                    adapter,
+                    "status",
+                    "adapter_models_endpoint_reachable",
+                )
+                && json_top_level_bool_field_equals(adapter, "secret_value_exposed", false)
+                && extract_json_top_level_raw_field(adapter, "http_code")
+                    .as_deref()
+                    .is_some_and(provider_adapter_http_code_is_2xx)
+        })
+        .count();
+    matching == 1
+}
+
+fn provider_adapter_http_code_is_2xx(raw: &str) -> bool {
+    let code = raw.trim().trim_matches('"');
+    code.len() == 3 && code.starts_with('2') && code.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn mvp007_browser_local_loop_gate_passed(cwd: &Path) -> bool {
@@ -13912,6 +14023,21 @@ mod tests {
         );
     }
 
+    fn assert_mvp004_status(root: &Path, expected_status: &str) {
+        let mvp = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("mvp-acceptance.json"),
+        )
+        .expect("mvp acceptance");
+        assert!(
+            mvp.contains(&format!(
+                "\"id\":\"mvp-004\",\"criterion\":\"OpenRouter/OpenAI provider adapters work.\",\"status\":\"{expected_status}\""
+            )),
+            "expected mvp-004 status {expected_status}, got {mvp}"
+        );
+    }
+
     fn assert_beta006_status(root: &Path, expected_status: &str) {
         let beta = fs::read_to_string(
             root.join(OPEN_SKSDIR)
@@ -13925,6 +14051,29 @@ mod tests {
             )),
             "expected beta-006 status {expected_status}, got {beta}"
         );
+    }
+
+    fn write_provider_adapter_check_fixture(root: &Path, report: &str) {
+        let dir = root.join(OPEN_SKSDIR).join("providers");
+        fs::create_dir_all(&dir).expect("create providers dir");
+        fs::write(dir.join("provider-adapter-check.json"), report).expect("write adapter check");
+    }
+
+    fn provider_adapter_check_pass_fixture() -> String {
+        concat!(
+            "{\n",
+            "  \"schema\": \"opensks.provider-adapter-check.v1\",\n",
+            "  \"generated_at\": \"2099-01-01T00:00:00Z\",\n",
+            "  \"remote_probe_opt_in\": true,\n",
+            "  \"secret_value_exposed\": false,\n",
+            "  \"summary\": {\"total\":2,\"attempted\":2,\"reachable\":2},\n",
+            "  \"adapters\": [\n",
+            "    {\"name\":\"OpenRouter\",\"configured\":true,\"attempted\":true,\"status\":\"adapter_models_endpoint_reachable\",\"endpoint\":\"https://openrouter.ai/api/v1/models\",\"http_code\":\"200\",\"duration_ms\":12,\"secret_value_exposed\":false,\"stderr\":\"\"},\n",
+            "    {\"name\":\"OpenAI\",\"configured\":true,\"attempted\":true,\"status\":\"adapter_models_endpoint_reachable\",\"endpoint\":\"https://api.openai.com/v1/models\",\"http_code\":\"204\",\"duration_ms\":9,\"secret_value_exposed\":false,\"stderr\":\"\"}\n",
+            "  ]\n",
+            "}\n",
+        )
+        .to_string()
     }
 
     fn write_native_collaboration_fixture(root: &Path, mission_id: &str) {
@@ -16035,6 +16184,155 @@ mod tests {
     }
 
     #[test]
+    fn mvp004_passes_with_opt_in_reachable_openrouter_and_openai_adapter_fixture() {
+        let root = temp_workspace("mvp004-provider-adapter-pass");
+        write_provider_adapter_check_fixture(&root, &provider_adapter_check_pass_fixture());
+
+        run_cli(["acceptance", "audit"], &root).expect("acceptance audit");
+        assert_mvp004_status(&root, "passed");
+
+        let mvp = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("mvp-acceptance.json"),
+        )
+        .expect("mvp acceptance");
+        assert!(
+            mvp.contains("provider-adapter-check.json proves opt-in remote /models adapter checks")
+        );
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("acceptance findings");
+        assert!(!findings.contains("\"id\":\"mvp-004\""));
+    }
+
+    #[test]
+    fn mvp004_stays_partial_for_missing_or_tampered_provider_adapter_fixture() {
+        let root = temp_workspace("mvp004-provider-adapter-tamper");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance without fixture");
+        assert_mvp004_status(&root, "partial");
+
+        let good = provider_adapter_check_pass_fixture();
+        for (label, report) in [
+            (
+                "schema",
+                good.replace(
+                    "\"schema\": \"opensks.provider-adapter-check.v1\"",
+                    "\"schema\": \"opensks.provider-adapter-check.v0\"",
+                ),
+            ),
+            (
+                "opt-in",
+                good.replace("\"remote_probe_opt_in\": true", "\"remote_probe_opt_in\": false"),
+            ),
+            (
+                "root secret",
+                good.replace(
+                    "\"secret_value_exposed\": false",
+                    "\"secret_value_exposed\": true",
+                ),
+            ),
+            (
+                "root secret whitespace",
+                good.replace(
+                    "\"secret_value_exposed\": false",
+                    "\"secret_value_exposed\" : true",
+                ),
+            ),
+            (
+                "openrouter attempted",
+                good.replace(
+                    "\"name\":\"OpenRouter\",\"configured\":true,\"attempted\":true",
+                    "\"name\":\"OpenRouter\",\"configured\":true,\"attempted\":false",
+                ),
+            ),
+            (
+                "openai status",
+                good.replace(
+                    "\"name\":\"OpenAI\",\"configured\":true,\"attempted\":true,\"status\":\"adapter_models_endpoint_reachable\"",
+                    "\"name\":\"OpenAI\",\"configured\":true,\"attempted\":true,\"status\":\"adapter_auth_failed\"",
+                ),
+            ),
+            (
+                "http code",
+                good.replace("\"http_code\":\"204\"", "\"http_code\":\"401\""),
+            ),
+            (
+                "endpoint",
+                good.replace(
+                    "\"endpoint\":\"https://api.openai.com/v1/models\"",
+                    "\"endpoint\":\"https://example.invalid/v1/models\"",
+                ),
+            ),
+            (
+                "summary reachable",
+                good.replace(
+                    "\"summary\": {\"total\":2,\"attempted\":2,\"reachable\":2}",
+                    "\"summary\": {\"total\":2,\"attempted\":2,\"reachable\":0}",
+                ),
+            ),
+            (
+                "row secret",
+                good.replace(
+                    "\"duration_ms\":12,\"secret_value_exposed\":false",
+                    "\"duration_ms\":12,\"secret_value_exposed\":true",
+                ),
+            ),
+            (
+                "extra secret row",
+                good.replace(
+                    "  ]\n",
+                    "    ,{\"name\":\"Extra\",\"configured\":true,\"attempted\":true,\"status\":\"adapter_models_endpoint_reachable\",\"endpoint\":\"https://example.invalid/models\",\"http_code\":\"200\",\"duration_ms\":1,\"secret_value_exposed\":true,\"stderr\":\"\"}\n  ]\n",
+                ),
+            ),
+            (
+                "stderr bearer",
+                good.replace(
+                    "\"stderr\":\"\"}",
+                    "\"stderr\":\"Authorization: Bearer sk-test\"}",
+                ),
+            ),
+            (
+                "stderr escaped secret flag",
+                good.replace(
+                    "\"stderr\":\"\"}",
+                    "\"stderr\":\"{\\\"secret_value_exposed\\\" : true}\"}",
+                ),
+            ),
+            (
+                "stderr spaced authorization",
+                good.replace(
+                    "\"stderr\":\"\"}",
+                    "\"stderr\":\"Authorization : Bearer sk-test\"}",
+                ),
+            ),
+            (
+                "stderr bearer tab",
+                good.replace("\"stderr\":\"\"}", "\"stderr\":\"Bearer\\tsk-test\"}"),
+            ),
+            (
+                "stderr raw provider key",
+                good.replace("\"stderr\":\"\"}", "\"stderr\":\"sk-proj-test\"}"),
+            ),
+            (
+                "duplicate row",
+                good.replace(
+                    "    {\"name\":\"OpenAI\",\"configured\":true",
+                    "    {\"name\":\"OpenRouter\",\"configured\":true,\"attempted\":true,\"status\":\"adapter_models_endpoint_reachable\",\"endpoint\":\"https://openrouter.ai/api/v1/models\",\"http_code\":\"200\",\"duration_ms\":1,\"secret_value_exposed\":false,\"stderr\":\"\"},\n    {\"name\":\"OpenAI\",\"configured\":true",
+                ),
+            ),
+        ] {
+            write_provider_adapter_check_fixture(&root, &report);
+            run_cli(["acceptance", "audit"], &root)
+                .unwrap_or_else(|_| panic!("acceptance audit for {label}"));
+            assert_mvp004_status(&root, "partial");
+        }
+    }
+
+    #[test]
     fn provider_commands_write_zero_leak_registry_probe_and_usage() {
         let root = temp_workspace("provider");
         let list = run_cli(["provider", "list"], &root).expect("provider list");
@@ -16069,6 +16367,17 @@ mod tests {
         assert!(adapter_report.contains("OpenRouter"));
         assert!(adapter_report.contains("OpenAI"));
         assert!(adapter_report.contains("\"secret_value_exposed\":false"));
+        let leftover_secret_configs = fs::read_dir(&dir)
+            .expect("provider dir")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("adapter-curl-config")
+            })
+            .count();
+        assert_eq!(leftover_secret_configs, 0);
 
         let usage_ledger =
             fs::read_to_string(dir.join("usage-ledger.jsonl")).expect("usage ledger");
