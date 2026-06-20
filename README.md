@@ -94,6 +94,13 @@ local warm-prefix hit is at least 95%; provider/runtime cache-layout
 improvement and provider cached-token counters remain unverified. The
 cache-layout gate only passes for the Voxel TriWiki scope when
 `.opensks/triwiki/voxels.jsonl` is present in the stable prefix.
+The planned/implemented beta-005 "Token dashboard tracks provider cache hit"
+pass is also scoped to local artifact evidence only:
+`cache-hit-report.json`, `cache-dashboard.json`, and
+`providers/usage-dashboard.json` track provider cache-hit fields, source/status,
+and estimated cached tokens. Live provider cached-token metrics remain
+unavailable/not connected, so these dashboard fields must not be read as live
+provider telemetry.
 `bench` records timed local runtime checks plus explicit multi-LLM roster,
 role-assignment, disagreement, quorum, and collaboration preflight artifacts
 with hidden fallback disabled. `auth` discovers configured provider environment variables without

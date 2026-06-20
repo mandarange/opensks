@@ -5472,8 +5472,16 @@ fn render_cache_dashboard(
             "  \"generated_at\": {},\n",
             "  \"metrics\": {},\n",
             "  \"live_provider_metrics\": false,\n",
+            "  \"provider_metrics_available\": false,\n",
+            "  \"provider_metrics_status\": \"not_connected\",\n",
             "  \"provider_cache_hit_percent\": null,\n",
+            "  \"provider_cache_hit_status\": \"tracked_unavailable_provider_not_connected\",\n",
+            "  \"provider_cache_hit_source\": \"cache-hit-report.json\",\n",
+            "  \"provider_cached_tokens\": null,\n",
+            "  \"provider_cache_write_tokens\": null,\n",
             "  \"local_warm_prefix_hit_percent\": {:.2},\n",
+            "  \"local_estimated_cached_tokens\": {},\n",
+            "  \"local_estimated_cache_write_tokens\": {},\n",
             "  \"local_segment_metrics\": {{\"segments\":{},\"bytes\":{},\"stable_prefix_bytes\":{},\"matched_stable_prefix_bytes\":{},\"estimated_cached_tokens\":{},\"estimated_cache_write_tokens\":{}}}\n",
             "}}\n"
         ),
@@ -5488,6 +5496,8 @@ fn render_cache_dashboard(
             "ttft_correlation"
         ]),
         prefix_hit.local_hit_percent,
+        prefix_hit.estimated_cached_tokens,
+        prefix_hit.estimated_cache_write_tokens,
         segments.len(),
         total_bytes,
         prefix_hit.current_stable_bytes,
@@ -7227,6 +7237,18 @@ fn beta_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
             "beta-004 requires cache-layout-improvement.json with schema opensks.cache-layout-improvement.v1, scope voxel_triwiki_cache_layout, strategy stable_prefix_dynamic_suffix, layout_gate_passed=true, baseline_available=true, voxel_triwiki_segment_present=true, local_warm_prefix_hit_percent >= target_hit_percent, and provider/runtime metrics explicitly unavailable.",
         )
     };
+    let beta_005_passed = beta005_token_dashboard_provider_cache_gate_passed(cwd);
+    let (beta_005_status, beta_005_evidence) = if beta_005_passed {
+        (
+            "passed",
+            "cache-hit-report.json, cache-dashboard.json, providers/usage-dashboard.json, and provider-dashboard.json prove the token dashboard tracks provider cache-hit fields, local estimated cached tokens, source/status, and explicit provider_metrics_status=not_connected; live provider cached-token metrics remain unavailable.",
+        )
+    } else {
+        (
+            "partial",
+            "beta-005 requires cache warm to establish local cache-hit evidence plus provider/cache dashboards that explicitly track provider cache-hit fields, null live provider percentages/tokens, cache-hit source/status, and provider_metrics_status=not_connected.",
+        )
+    };
     vec![
         acceptance_item(
             "beta-001",
@@ -7255,8 +7277,8 @@ fn beta_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
         acceptance_item(
             "beta-005",
             "Token dashboard tracks provider cache hit.",
-            "partial",
-            "cache-hit-report.json and cache/provider dashboards expose local warm-prefix hit counters, but live provider cached-token metrics are not collected.",
+            beta_005_status,
+            beta_005_evidence,
         ),
         acceptance_item(
             "beta-006",
@@ -7337,6 +7359,143 @@ fn beta004_cache_layout_gate_passed(cwd: &Path) -> bool {
         && matched_stable_prefix_bytes == stable_prefix_bytes
         && target_hit_percent >= 95.0
         && local_hit_percent >= target_hit_percent
+}
+
+fn beta005_token_dashboard_provider_cache_gate_passed(cwd: &Path) -> bool {
+    let cache_dir = cwd.join(OPEN_SKSDIR).join("cache");
+    let provider_dir = cwd.join(OPEN_SKSDIR).join("providers");
+    let Ok(cache_hit) = fs::read_to_string(cache_dir.join("cache-hit-report.json")) else {
+        return false;
+    };
+    let Ok(cache_dashboard) = fs::read_to_string(cache_dir.join("cache-dashboard.json")) else {
+        return false;
+    };
+    let Ok(usage_dashboard) = fs::read_to_string(provider_dir.join("usage-dashboard.json")) else {
+        return false;
+    };
+    let Ok(provider_dashboard) = fs::read_to_string(provider_dir.join("provider-dashboard.json"))
+    else {
+        return false;
+    };
+
+    let Some(local_hit_percent) =
+        extract_json_top_level_float_field(&cache_hit, "local_hit_percent")
+    else {
+        return false;
+    };
+    let Some(target_hit_percent) =
+        extract_json_top_level_float_field(&cache_hit, "target_hit_percent")
+    else {
+        return false;
+    };
+    let Some(dashboard_local_hit_percent) =
+        extract_json_top_level_float_field(&cache_dashboard, "local_warm_prefix_hit_percent")
+    else {
+        return false;
+    };
+    let Some(local_estimated_cached_tokens) =
+        extract_json_top_level_number_field(&cache_dashboard, "local_estimated_cached_tokens")
+    else {
+        return false;
+    };
+    let Some(_local_estimated_cache_write_tokens) =
+        extract_json_top_level_number_field(&cache_dashboard, "local_estimated_cache_write_tokens")
+    else {
+        return false;
+    };
+    let Some(nested_usage_dashboard) =
+        extract_json_top_level_raw_field(&provider_dashboard, "usage_dashboard")
+    else {
+        return false;
+    };
+
+    cache_hit.contains("\"schema\": \"opensks.cache-hit-report.v1\"")
+        && json_top_level_string_field_equals(&cache_hit, "scope", "local_stable_prefix")
+        && json_top_level_bool_field_equals(&cache_hit, "baseline_available", true)
+        && json_top_level_bool_field_equals(&cache_hit, "local_target_met", true)
+        && json_top_level_bool_field_equals(&cache_hit, "provider_metrics_available", false)
+        && json_top_level_string_field_equals(
+            &cache_hit,
+            "provider_metrics_status",
+            "not_connected",
+        )
+        && json_top_level_string_field_equals(
+            &cache_hit,
+            "status",
+            "local_target_met_provider_unverified",
+        )
+        && local_hit_percent >= target_hit_percent
+        && json_top_level_string_field_equals(
+            &cache_dashboard,
+            "schema",
+            "opensks.cache-dashboard.v1",
+        )
+        && json_top_level_string_array_contains(
+            &cache_dashboard,
+            "metrics",
+            &[
+                "cache_hit_by_provider",
+                "cache_hit_by_model",
+                "cache_hit_by_worker_lane",
+                "cached_tokens",
+                "cache_write_tokens",
+            ],
+        )
+        && json_top_level_bool_field_equals(&cache_dashboard, "live_provider_metrics", false)
+        && json_top_level_bool_field_equals(&cache_dashboard, "provider_metrics_available", false)
+        && json_top_level_string_field_equals(
+            &cache_dashboard,
+            "provider_metrics_status",
+            "not_connected",
+        )
+        && json_top_level_null_field_equals(&cache_dashboard, "provider_cache_hit_percent")
+        && json_top_level_string_field_equals(
+            &cache_dashboard,
+            "provider_cache_hit_status",
+            "tracked_unavailable_provider_not_connected",
+        )
+        && json_top_level_string_field_equals(
+            &cache_dashboard,
+            "provider_cache_hit_source",
+            "cache-hit-report.json",
+        )
+        && json_top_level_null_field_equals(&cache_dashboard, "provider_cached_tokens")
+        && json_top_level_null_field_equals(&cache_dashboard, "provider_cache_write_tokens")
+        && dashboard_local_hit_percent >= target_hit_percent
+        && local_estimated_cached_tokens > 0
+        && token_provider_usage_dashboard_gate_passed(&usage_dashboard)
+        && json_top_level_string_field_equals(
+            &provider_dashboard,
+            "schema",
+            "opensks.provider-dashboard.v1",
+        )
+        && json_top_level_field_absent(&provider_dashboard, "provider_cache_hit_percent")
+        && json_top_level_field_absent(&provider_dashboard, "provider_cache_hit_status")
+        && json_top_level_field_absent(&provider_dashboard, "provider_cached_tokens")
+        && json_top_level_field_absent(&provider_dashboard, "provider_cache_write_tokens")
+        && json_top_level_field_absent(&provider_dashboard, "provider_metrics_available")
+        && json_top_level_field_absent(&provider_dashboard, "provider_metrics_status")
+        && token_provider_usage_dashboard_gate_passed(&nested_usage_dashboard)
+}
+
+fn token_provider_usage_dashboard_gate_passed(dashboard: &str) -> bool {
+    json_top_level_string_field_equals(dashboard, "schema", "opensks.provider-usage-dashboard.v1")
+        && json_top_level_bool_field_equals(dashboard, "cache_hit_tracking_enabled", true)
+        && json_top_level_string_field_equals(
+            dashboard,
+            "cache_hit_tracking_source",
+            "cache/cache-hit-report.json + providers/usage-dashboard.json",
+        )
+        && json_top_level_bool_field_equals(dashboard, "provider_metrics_available", false)
+        && json_top_level_string_field_equals(dashboard, "provider_metrics_status", "not_connected")
+        && json_top_level_null_field_equals(dashboard, "provider_cache_hit_percent")
+        && json_top_level_string_field_equals(
+            dashboard,
+            "provider_cache_hit_status",
+            "tracked_unavailable_provider_not_connected",
+        )
+        && json_top_level_null_field_equals(dashboard, "provider_cached_tokens")
+        && json_top_level_null_field_equals(dashboard, "provider_cache_write_tokens")
 }
 
 fn production_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
@@ -7719,6 +7878,14 @@ fn json_top_level_string_field_equals(input: &str, key: &str, expected: &str) ->
 fn json_top_level_bool_field_equals(input: &str, key: &str, expected: bool) -> bool {
     extract_json_top_level_raw_field(input, key).as_deref()
         == Some(if expected { "true" } else { "false" })
+}
+
+fn json_top_level_null_field_equals(input: &str, key: &str) -> bool {
+    extract_json_top_level_raw_field(input, key).as_deref() == Some("null")
+}
+
+fn json_top_level_field_absent(input: &str, key: &str) -> bool {
+    extract_json_top_level_raw_fields(input, key).is_empty()
 }
 
 fn json_top_level_string_array_contains(input: &str, key: &str, expected: &[&str]) -> bool {
@@ -8301,6 +8468,13 @@ fn render_usage_dashboard(
             "{{\"schema\":\"opensks.provider-usage-dashboard.v1\",",
             "\"generated_at\":{},\"configured_providers\":{},",
             "\"tokens\":0,\"cost_usd\":0.0,\"cached_tokens\":0,",
+            "\"cache_hit_tracking_enabled\":true,",
+            "\"cache_hit_tracking_source\":\"cache/cache-hit-report.json + providers/usage-dashboard.json\",",
+            "\"provider_metrics_available\":false,",
+            "\"provider_metrics_status\":\"not_connected\",",
+            "\"provider_cache_hit_percent\":null,",
+            "\"provider_cache_hit_status\":\"tracked_unavailable_provider_not_connected\",",
+            "\"provider_cached_tokens\":null,\"provider_cache_write_tokens\":null,",
             "\"reasoning_tokens\":0,\"tool_calls\":0,",
             "\"probe_summary\":{}}}"
         ),
@@ -11825,6 +11999,154 @@ mod tests {
     }
 
     #[test]
+    fn beta005_requires_artifact_bound_token_dashboard_cache_hit_tracking() {
+        let root = temp_workspace("beta005-token-dashboard");
+        fs::write(root.join("README.md"), "Stable token dashboard fixture.\n")
+            .expect("write readme");
+
+        run_cli(["provider", "usage"], &root).expect("provider usage without cache");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance without cache");
+        let beta = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta without cache");
+        assert!(beta.contains(
+            "\"id\":\"beta-005\",\"criterion\":\"Token dashboard tracks provider cache hit.\",\"status\":\"partial\""
+        ));
+
+        run_cli(["cache", "warm"], &root).expect("first cache warm");
+        run_cli(["cache", "warm"], &root).expect("second cache warm");
+        run_cli(["provider", "usage"], &root).expect("provider usage with cache");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance with cache dashboard");
+        let beta = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta with cache dashboard");
+        assert!(beta.contains(
+            "\"id\":\"beta-005\",\"criterion\":\"Token dashboard tracks provider cache hit.\",\"status\":\"passed\""
+        ));
+        assert!(beta.contains("provider cache-hit fields"));
+        assert!(beta.contains("local estimated cached tokens"));
+        assert!(beta.contains("provider_metrics_status=not_connected"));
+        assert!(beta.contains("live provider cached-token metrics remain unavailable"));
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings");
+        assert!(!findings.contains("\"id\":\"beta-005\""));
+    }
+
+    #[test]
+    fn beta005_stays_partial_for_malformed_token_dashboard_cache_artifacts() {
+        let root = temp_workspace("beta005-tamper");
+        fs::write(root.join("README.md"), "Stable token dashboard fixture.\n")
+            .expect("write readme");
+        run_cli(["cache", "warm"], &root).expect("first cache warm");
+        run_cli(["cache", "warm"], &root).expect("second cache warm");
+        run_cli(["provider", "usage"], &root).expect("provider usage");
+
+        let providers_dir = root.join(OPEN_SKSDIR).join("providers");
+        let usage_dashboard_path = providers_dir.join("usage-dashboard.json");
+        let usage_dashboard = fs::read_to_string(&usage_dashboard_path).expect("usage dashboard");
+        fs::write(
+            &usage_dashboard_path,
+            usage_dashboard.replace(
+                "\"provider_cache_hit_percent\":null",
+                "\"provider_cache_hit_percent\":100.0",
+            ),
+        )
+        .expect("corrupt live provider percent");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance live provider percent");
+        let beta = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta live provider percent");
+        assert!(beta.contains(
+            "\"id\":\"beta-005\",\"criterion\":\"Token dashboard tracks provider cache hit.\",\"status\":\"partial\""
+        ));
+
+        run_cli(["provider", "usage"], &root).expect("restore provider usage");
+        let cache_hit_path = root
+            .join(OPEN_SKSDIR)
+            .join("cache")
+            .join("cache-hit-report.json");
+        let cache_hit = fs::read_to_string(&cache_hit_path).expect("cache hit");
+        fs::write(
+            &cache_hit_path,
+            cache_hit.replace("\"local_target_met\": true", "\"local_target_met\": false"),
+        )
+        .expect("corrupt local target");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance low local target");
+        let beta = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta low local target");
+        assert!(beta.contains(
+            "\"id\":\"beta-005\",\"criterion\":\"Token dashboard tracks provider cache hit.\",\"status\":\"partial\""
+        ));
+
+        run_cli(["cache", "warm"], &root).expect("restore cache warm");
+        run_cli(["provider", "usage"], &root).expect("restore provider usage duplicate");
+        let cache_dashboard_path = root
+            .join(OPEN_SKSDIR)
+            .join("cache")
+            .join("cache-dashboard.json");
+        let cache_dashboard = fs::read_to_string(&cache_dashboard_path).expect("cache dashboard");
+        fs::write(
+            &cache_dashboard_path,
+            cache_dashboard.replace(
+                "\"provider_cache_hit_percent\": null,",
+                "\"provider_cache_hit_percent\": null,\n  \"provider_cache_hit_percent\": null,",
+            ),
+        )
+        .expect("duplicate provider cache hit percent");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance duplicate cache field");
+        let beta = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta duplicate cache field");
+        assert!(beta.contains(
+            "\"id\":\"beta-005\",\"criterion\":\"Token dashboard tracks provider cache hit.\",\"status\":\"partial\""
+        ));
+
+        run_cli(["cache", "warm"], &root).expect("restore cache warm after duplicate");
+        run_cli(["provider", "usage"], &root).expect("restore provider usage top-level spoof");
+        let provider_dashboard_path = providers_dir.join("provider-dashboard.json");
+        let provider_dashboard =
+            fs::read_to_string(&provider_dashboard_path).expect("provider dashboard");
+        fs::write(
+            &provider_dashboard_path,
+            provider_dashboard.replace(
+                "  \"usage_dashboard\":",
+                "  \"provider_cache_hit_percent\": 100.0,\n  \"provider_cached_tokens\": 999999,\n  \"usage_dashboard\":",
+            ),
+        )
+        .expect("spoof top-level provider cache metrics");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance top-level provider spoof");
+        let beta = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta top-level provider spoof");
+        assert!(beta.contains(
+            "\"id\":\"beta-005\",\"criterion\":\"Token dashboard tracks provider cache hit.\",\"status\":\"partial\""
+        ));
+    }
+
+    #[test]
     fn cli_v3_plane_commands_write_named_artifacts() {
         let root = temp_workspace("cli-v3");
         fs::write(
@@ -11979,6 +12301,14 @@ mod tests {
         assert!(provider_capabilities.contains("\"schema\": \"opensks.provider-capabilities.v1\""));
         assert!(provider_capabilities.contains("OpenRouter"));
         assert!(provider_capabilities.contains("\"core_required\":false"));
+        let provider_usage =
+            fs::read_to_string(open.join("providers/usage-dashboard.json")).expect("usage");
+        assert!(provider_usage.contains("\"schema\":\"opensks.provider-usage-dashboard.v1\""));
+        assert!(provider_usage.contains("\"cache_hit_tracking_enabled\":true"));
+        assert!(provider_usage.contains(
+            "\"provider_cache_hit_status\":\"tracked_unavailable_provider_not_connected\""
+        ));
+        assert!(provider_usage.contains("\"provider_cache_hit_percent\":null"));
         let updater_state =
             fs::read_to_string(open.join("updater/updater-final-state.json")).expect("updater");
         assert!(updater_state.contains("\"schema\": \"opensks.updater-final-state.v1\""));
@@ -11998,12 +12328,12 @@ mod tests {
         let acceptance = fs::read_to_string(open.join("acceptance/acceptance-summary.json"))
             .expect("acceptance");
         assert!(acceptance.contains("\"schema\": \"opensks.acceptance-summary.v1\""));
-        assert!(acceptance.contains("\"passed\":16"));
-        assert!(acceptance.contains("\"partial\":7"));
+        assert!(acceptance.contains("\"passed\":17"));
+        assert!(acceptance.contains("\"partial\":6"));
         assert!(acceptance.contains("\"goal_complete\": false"));
         let beta = fs::read_to_string(open.join("acceptance/beta-acceptance.json")).expect("beta");
-        assert!(beta.contains("\"passed\":2"));
-        assert!(beta.contains("\"partial\":4"));
+        assert!(beta.contains("\"passed\":3"));
+        assert!(beta.contains("\"partial\":3"));
         assert!(beta.contains(
             "\"id\":\"beta-004\",\"criterion\":\"Voxel TriWiki improves cache layout.\",\"status\":\"passed\""
         ));
@@ -12012,6 +12342,12 @@ mod tests {
         assert!(
             beta.contains("provider/runtime cache-layout telemetry remains explicitly unavailable")
         );
+        assert!(beta.contains(
+            "\"id\":\"beta-005\",\"criterion\":\"Token dashboard tracks provider cache hit.\",\"status\":\"passed\""
+        ));
+        assert!(beta.contains("provider cache-hit fields"));
+        assert!(beta.contains("provider_metrics_status=not_connected"));
+        assert!(beta.contains("live provider cached-token metrics remain unavailable"));
         let mvp = fs::read_to_string(open.join("acceptance/mvp-acceptance.json")).expect("mvp");
         assert!(mvp.contains("OpenRouter/OpenAI provider adapters work."));
         assert!(mvp.contains("GUI shows mission status and worker lanes."));
@@ -12062,6 +12398,7 @@ mod tests {
         let findings = fs::read_to_string(open.join("acceptance/acceptance-findings.jsonl"))
             .expect("findings");
         assert!(!findings.contains("\"id\":\"beta-004\""));
+        assert!(!findings.contains("\"id\":\"beta-005\""));
         assert!(!findings.contains("\"id\":\"prod-001\""));
         assert!(!findings.contains("\"id\":\"prod-002\""));
         assert!(!findings.contains("\"id\":\"prod-005\""));
