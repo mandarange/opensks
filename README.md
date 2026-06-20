@@ -140,8 +140,14 @@ and sensitive actions are blocked or marked approval-only and recorded in
 action-plan/policy-decision artifacts. It also writes an isolated
 browser/container observation-loop seed and ledger without launching live
 browser control. `app-use` runs the same kind of broker
-for native app intents: safe inspection captures frontmost and running-app
-state, while sensitive native actions are blocked or approval-only.
+for native app intents. The scoped `mvp-008` pass, "App use can inspect macOS
+accessibility tree", is local artifact evidence only: it writes
+`accessibility-tree.json`, `running-apps.json`, `app-final-state.json`, and
+policy/action-plan artifacts. Its acceptance gate requires a captured
+accessibility-tree node or frontmost app, a running-app inventory, an attempted
+inspection, a policy decision that allowed inspection, and
+`live_app_actions_executed=false`. It does not claim full native app action
+execution, arbitrary UI control, or live macOS app automation.
 `app` writes a static local mission-control dashboard under `.opensks/app`
 that summarizes PRD coverage, QA/security status, Voxel TriWiki counts,
 provider configuration, missions, mission status, worker lanes, and

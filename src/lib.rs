@@ -1319,7 +1319,7 @@ fn run_acceptance_command(args: &[String], cwd: &Path) -> Result<CliOutput, Open
     let dir = cwd.join(OPEN_SKSDIR).join("acceptance");
     fs::create_dir_all(&dir)?;
     let stamp = ClockStamp::now()?;
-    let mvp = mvp_acceptance_items();
+    let mvp = mvp_acceptance_items(cwd);
     let beta = beta_acceptance_items(cwd);
     let production = production_acceptance_items(cwd);
     write_text_atomic(
@@ -7153,7 +7153,19 @@ fn render_updater_final_state(stamp: &ClockStamp, manifest_hash: &str, signature
     )
 }
 
-fn mvp_acceptance_items() -> Vec<AcceptanceItem> {
+fn mvp_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
+    let mvp_008_passed = mvp008_app_use_accessibility_gate_passed(cwd);
+    let (mvp_008_status, mvp_008_evidence) = if mvp_008_passed {
+        (
+            "passed",
+            "latest app-use session proves local macOS accessibility inspection artifacts: accessibility-tree.json captured a frontmost application node, running-apps.json captured inventory, app-final-state.json reports inspection_attempted=true and live_app_actions_executed=false, and app-policy-decision.json allowed inspection only.",
+        )
+    } else {
+        (
+            "partial",
+            "mvp-008 requires a latest app-use session with accessibility-tree.json captured=true and at least one top-level application node, running-apps.json captured with inventory, app-final-state.json inspection_attempted=true/live_app_actions_executed=false, and app-policy-decision.json allowing inspection only.",
+        )
+    };
     vec![
         acceptance_item(
             "mvp-001",
@@ -7200,8 +7212,8 @@ fn mvp_acceptance_items() -> Vec<AcceptanceItem> {
         acceptance_item(
             "mvp-008",
             "App use can inspect macOS accessibility tree.",
-            "partial",
-            "app-use captures frontmost/running-app inspection on macOS when available, but full Accessibility API tree/action execution is not live.",
+            mvp_008_status,
+            mvp_008_evidence,
         ),
         acceptance_item(
             "mvp-009",
@@ -7222,6 +7234,132 @@ fn mvp_acceptance_items() -> Vec<AcceptanceItem> {
             "app writes dashboard.html and worker-lanes.json; the static dashboard renders mission status plus a worker-lane table from local mission/tool-plan artifacts without claiming live native GUI or live worker execution.",
         ),
     ]
+}
+
+fn mvp008_app_use_accessibility_gate_passed(cwd: &Path) -> bool {
+    let Some(session_dir) = latest_app_use_session_dir(cwd) else {
+        return false;
+    };
+    let Ok(accessibility) = fs::read_to_string(session_dir.join("accessibility-tree.json")) else {
+        return false;
+    };
+    let Ok(running_apps) = fs::read_to_string(session_dir.join("running-apps.json")) else {
+        return false;
+    };
+    let Ok(final_state) = fs::read_to_string(session_dir.join("app-final-state.json")) else {
+        return false;
+    };
+    let Ok(policy) = fs::read_to_string(session_dir.join("app-policy-decision.json")) else {
+        return false;
+    };
+
+    let Some(running_app_count) =
+        extract_json_top_level_number_field(&accessibility, "running_app_count")
+    else {
+        return false;
+    };
+    let Some(final_running_app_count) =
+        extract_json_top_level_number_field(&final_state, "running_app_count")
+    else {
+        return false;
+    };
+    let Some(accessibility_session_id) =
+        extract_json_top_level_string_field(&accessibility, "session_id")
+    else {
+        return false;
+    };
+    let Some(running_apps_session_id) =
+        extract_json_top_level_string_field(&running_apps, "session_id")
+    else {
+        return false;
+    };
+    let Some(final_state_session_id) =
+        extract_json_top_level_string_field(&final_state, "session_id")
+    else {
+        return false;
+    };
+    let Some(policy_session_id) = extract_json_top_level_string_field(&policy, "session_id") else {
+        return false;
+    };
+    let Some(accessibility_target) = extract_json_top_level_string_field(&accessibility, "target")
+    else {
+        return false;
+    };
+    let Some(final_state_target) = extract_json_top_level_string_field(&final_state, "target")
+    else {
+        return false;
+    };
+    let Some(policy_target) = extract_json_top_level_string_field(&policy, "target") else {
+        return false;
+    };
+    if extract_json_top_level_string_field(&accessibility, "stderr").is_none()
+        || extract_json_top_level_string_field(&running_apps, "stderr").is_none()
+    {
+        return false;
+    }
+    let running_app_inventory = extract_json_string_array_values(
+        &extract_json_top_level_raw_field(&running_apps, "apps").unwrap_or_default(),
+    );
+
+    json_top_level_string_field_equals(&accessibility, "schema", "opensks.accessibility-tree.v1")
+        && accessibility_session_id == running_apps_session_id
+        && accessibility_session_id == final_state_session_id
+        && accessibility_session_id == policy_session_id
+        && accessibility_target == final_state_target
+        && accessibility_target == policy_target
+        && json_top_level_bool_field_equals(&accessibility, "captured", true)
+        && extract_json_top_level_string_field(&accessibility, "frontmost_app").is_some()
+        && running_app_count > 0
+        && accessibility_top_level_application_node_present(&accessibility)
+        && json_top_level_string_field_equals(&accessibility, "status", "captured")
+        && json_top_level_string_field_equals(
+            &accessibility,
+            "policy_decision",
+            "allowed_inspection_only",
+        )
+        && json_top_level_string_field_equals(&running_apps, "schema", "opensks.running-apps.v1")
+        && json_top_level_bool_field_equals(&running_apps, "attempted", true)
+        && json_top_level_string_field_equals(&running_apps, "status", "captured")
+        && !running_app_inventory.is_empty()
+        && running_app_inventory.len() == running_app_count
+        && json_top_level_string_field_equals(&final_state, "schema", "opensks.app-final-state.v1")
+        && json_top_level_bool_field_equals(&final_state, "inspection_attempted", true)
+        && json_top_level_string_field_equals(&final_state, "status", "captured")
+        && final_running_app_count == running_app_count
+        && json_top_level_string_field_equals(
+            &final_state,
+            "policy_decision",
+            "allowed_inspection_only",
+        )
+        && json_top_level_bool_field_equals(&final_state, "sensitive_action_detected", false)
+        && json_top_level_bool_field_equals(&final_state, "live_app_actions_executed", false)
+        && json_top_level_string_field_equals(&policy, "schema", "opensks.app-policy-decision.v1")
+        && json_top_level_bool_field_equals(&policy, "inspection_allowed", true)
+        && json_top_level_bool_field_equals(&policy, "app_action_allowed", false)
+        && json_top_level_bool_field_equals(&policy, "sensitive", false)
+        && json_top_level_string_field_equals(&policy, "decision", "allowed_inspection_only")
+}
+
+fn latest_app_use_session_dir(cwd: &Path) -> Option<PathBuf> {
+    let app_use_dir = cwd.join(OPEN_SKSDIR).join("app-use");
+    let mut session_dirs = fs::read_dir(app_use_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    session_dirs.sort();
+    session_dirs.into_iter().next_back()
+}
+
+fn accessibility_top_level_application_node_present(accessibility: &str) -> bool {
+    extract_json_top_level_array_objects(accessibility, "nodes")
+        .iter()
+        .any(|node| {
+            json_top_level_string_field_equals(node, "role", "application")
+                && extract_json_top_level_string_field(node, "name").is_some()
+                && json_top_level_bool_field_equals(node, "frontmost", true)
+        })
 }
 
 fn beta_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
@@ -12327,9 +12465,18 @@ mod tests {
         assert!(coverage_gate.contains("\"live_acceptance_all_passed\": false"));
         let acceptance = fs::read_to_string(open.join("acceptance/acceptance-summary.json"))
             .expect("acceptance");
+        let mvp = fs::read_to_string(open.join("acceptance/mvp-acceptance.json")).expect("mvp");
+        let mvp_008_passed = mvp.contains(
+            "\"id\":\"mvp-008\",\"criterion\":\"App use can inspect macOS accessibility tree.\",\"status\":\"passed\"",
+        );
         assert!(acceptance.contains("\"schema\": \"opensks.acceptance-summary.v1\""));
-        assert!(acceptance.contains("\"passed\":17"));
-        assert!(acceptance.contains("\"partial\":6"));
+        if mvp_008_passed {
+            assert!(acceptance.contains("\"passed\":18"));
+            assert!(acceptance.contains("\"partial\":5"));
+        } else {
+            assert!(acceptance.contains("\"passed\":17"));
+            assert!(acceptance.contains("\"partial\":6"));
+        }
         assert!(acceptance.contains("\"goal_complete\": false"));
         let beta = fs::read_to_string(open.join("acceptance/beta-acceptance.json")).expect("beta");
         assert!(beta.contains("\"passed\":3"));
@@ -12348,10 +12495,13 @@ mod tests {
         assert!(beta.contains("provider cache-hit fields"));
         assert!(beta.contains("provider_metrics_status=not_connected"));
         assert!(beta.contains("live provider cached-token metrics remain unavailable"));
-        let mvp = fs::read_to_string(open.join("acceptance/mvp-acceptance.json")).expect("mvp");
         assert!(mvp.contains("OpenRouter/OpenAI provider adapters work."));
         assert!(mvp.contains("GUI shows mission status and worker lanes."));
         assert!(mvp.contains("worker-lanes.json"));
+        if mvp_008_passed {
+            assert!(mvp.contains("accessibility-tree.json captured a frontmost application node"));
+            assert!(mvp.contains("live_app_actions_executed=false"));
+        }
         assert!(mvp.contains("\"status\":\"partial\""));
         let production = fs::read_to_string(open.join("acceptance/production-acceptance.json"))
             .expect("production");
@@ -12397,6 +12547,9 @@ mod tests {
         assert!(production.contains("network/install/apply remain explicitly false"));
         let findings = fs::read_to_string(open.join("acceptance/acceptance-findings.jsonl"))
             .expect("findings");
+        if mvp_008_passed {
+            assert!(!findings.contains("\"id\":\"mvp-008\""));
+        }
         assert!(!findings.contains("\"id\":\"beta-004\""));
         assert!(!findings.contains("\"id\":\"beta-005\""));
         assert!(!findings.contains("\"id\":\"prod-001\""));
@@ -12536,6 +12689,11 @@ mod tests {
         assert!(
             first_child_dir(&open.join("app-use"))
                 .join("app-session.json")
+                .exists()
+        );
+        assert!(
+            first_child_dir(&open.join("app-use"))
+                .join("accessibility-tree.json")
                 .exists()
         );
         assert!(
@@ -13053,6 +13211,343 @@ mod tests {
 
         let actions = fs::read_to_string(session_dir.join("app-actions.jsonl")).expect("actions");
         assert!(actions.contains("denied_sensitive_app_action"));
+    }
+
+    #[test]
+    fn mvp008_requires_artifact_bound_app_use_accessibility_gate() {
+        let root = temp_workspace("mvp008-app-use");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance without app-use");
+        let mvp = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("mvp-acceptance.json"),
+        )
+        .expect("mvp without app-use");
+        assert!(mvp.contains(
+            "\"id\":\"mvp-008\",\"criterion\":\"App use can inspect macOS accessibility tree.\",\"status\":\"partial\""
+        ));
+
+        let session_dir = root
+            .join(OPEN_SKSDIR)
+            .join("app-use")
+            .join("1781945000000000000-42");
+        fs::create_dir_all(&session_dir).expect("create app-use session");
+        fs::write(
+            session_dir.join("accessibility-tree.json"),
+            concat!(
+                "{\"schema\":\"opensks.accessibility-tree.v1\",",
+                "\"session_id\":\"1781945000000000000-42\",",
+                "\"target\":\"inspect Finder accessibility tree\",",
+                "\"captured\":true,\"frontmost_app\":\"Finder\",",
+                "\"running_app_count\":2,",
+                "\"nodes\":[{\"role\":\"application\",\"name\":\"Finder\",\"frontmost\":true}],",
+                "\"status\":\"captured\",",
+                "\"policy_decision\":\"allowed_inspection_only\",",
+                "\"stderr\":\"\"}\n"
+            ),
+        )
+        .expect("write accessibility tree");
+        fs::write(
+            session_dir.join("running-apps.json"),
+            concat!(
+                "{\n",
+                "  \"schema\": \"opensks.running-apps.v1\",\n",
+                "  \"session_id\": \"1781945000000000000-42\",\n",
+                "  \"attempted\": true,\n",
+                "  \"status\": \"captured\",\n",
+                "  \"apps\": [\"Finder\",\"Terminal\"],\n",
+                "  \"stderr\": \"\"\n",
+                "}\n"
+            ),
+        )
+        .expect("write running apps");
+        fs::write(
+            session_dir.join("app-final-state.json"),
+            concat!(
+                "{\n",
+                "  \"schema\": \"opensks.app-final-state.v1\",\n",
+                "  \"session_id\": \"1781945000000000000-42\",\n",
+                "  \"target\": \"inspect Finder accessibility tree\",\n",
+                "  \"inspection_attempted\": true,\n",
+                "  \"status\": \"captured\",\n",
+                "  \"frontmost_app\": \"Finder\",\n",
+                "  \"running_app_count\": 2,\n",
+                "  \"policy_decision\": \"allowed_inspection_only\",\n",
+                "  \"sensitive_action_detected\": false,\n",
+                "  \"live_app_actions_executed\": false\n",
+                "}\n"
+            ),
+        )
+        .expect("write final state");
+        fs::write(
+            session_dir.join("app-policy-decision.json"),
+            concat!(
+                "{\n",
+                "  \"schema\": \"opensks.app-policy-decision.v1\",\n",
+                "  \"session_id\": \"1781945000000000000-42\",\n",
+                "  \"target\": \"inspect Finder accessibility tree\",\n",
+                "  \"requested_action\": \"inspect_app_state\",\n",
+                "  \"decision\": \"allowed_inspection_only\",\n",
+                "  \"reason\": \"Only non-destructive app inspection is allowed.\",\n",
+                "  \"inspection_allowed\": true,\n",
+                "  \"app_action_allowed\": false,\n",
+                "  \"sensitive\": false\n",
+                "}\n"
+            ),
+        )
+        .expect("write policy");
+
+        run_cli(["acceptance", "audit"], &root).expect("acceptance with app-use");
+        let mvp = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("mvp-acceptance.json"),
+        )
+        .expect("mvp with app-use");
+        assert!(mvp.contains(
+            "\"id\":\"mvp-008\",\"criterion\":\"App use can inspect macOS accessibility tree.\",\"status\":\"passed\""
+        ));
+        assert!(mvp.contains("accessibility-tree.json captured a frontmost application node"));
+        assert!(mvp.contains("live_app_actions_executed=false"));
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings");
+        assert!(!findings.contains("\"id\":\"mvp-008\""));
+    }
+
+    #[test]
+    fn mvp008_stays_partial_for_spoofed_or_sensitive_app_use_artifacts() {
+        let root = temp_workspace("mvp008-app-use-tamper");
+        let session_dir = root
+            .join(OPEN_SKSDIR)
+            .join("app-use")
+            .join("1781945000000000000-42");
+        fs::create_dir_all(&session_dir).expect("create app-use session");
+        fs::write(
+            session_dir.join("accessibility-tree.json"),
+            concat!(
+                "{\"schema\":\"opensks.accessibility-tree.v1\",",
+                "\"session_id\":\"1781945000000000000-42\",",
+                "\"target\":\"inspect Finder accessibility tree\",",
+                "\"captured\":true,\"captured\":true,",
+                "\"frontmost_app\":\"Finder\",\"running_app_count\":2,",
+                "\"nodes\":[{\"role\":\"application\",\"name\":\"Finder\",\"frontmost\":true}],",
+                "\"status\":\"captured\",",
+                "\"policy_decision\":\"allowed_inspection_only\",",
+                "\"stderr\":\"\"}\n"
+            ),
+        )
+        .expect("write duplicate accessibility tree");
+        fs::write(
+            session_dir.join("running-apps.json"),
+            concat!(
+                "{\"schema\":\"opensks.running-apps.v1\",\"session_id\":\"1781945000000000000-42\",",
+                "\"attempted\":true,\"status\":\"captured\",\"apps\":[\"Finder\"],\"stderr\":\"\"}\n"
+            ),
+        )
+        .expect("write running apps");
+        fs::write(
+            session_dir.join("app-final-state.json"),
+            concat!(
+                "{\"schema\":\"opensks.app-final-state.v1\",",
+                "\"session_id\":\"1781945000000000000-42\",",
+                "\"target\":\"inspect Finder accessibility tree\",",
+                "\"inspection_attempted\":true,\"status\":\"captured\",",
+                "\"frontmost_app\":\"Finder\",\"running_app_count\":2,",
+                "\"policy_decision\":\"allowed_inspection_only\",",
+                "\"sensitive_action_detected\":false,",
+                "\"live_app_actions_executed\":false}\n"
+            ),
+        )
+        .expect("write final state");
+        fs::write(
+            session_dir.join("app-policy-decision.json"),
+            concat!(
+                "{\"schema\":\"opensks.app-policy-decision.v1\",",
+                "\"session_id\":\"1781945000000000000-42\",",
+                "\"target\":\"inspect Finder accessibility tree\",",
+                "\"requested_action\":\"inspect_app_state\",",
+                "\"decision\":\"allowed_inspection_only\",",
+                "\"reason\":\"Only non-destructive app inspection is allowed.\",",
+                "\"inspection_allowed\":true,\"app_action_allowed\":false,",
+                "\"sensitive\":false}\n"
+            ),
+        )
+        .expect("write policy");
+
+        run_cli(["acceptance", "audit"], &root).expect("acceptance duplicate accessibility");
+        let mvp = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("mvp-acceptance.json"),
+        )
+        .expect("mvp duplicate accessibility");
+        assert!(mvp.contains(
+            "\"id\":\"mvp-008\",\"criterion\":\"App use can inspect macOS accessibility tree.\",\"status\":\"partial\""
+        ));
+
+        fs::write(
+            session_dir.join("accessibility-tree.json"),
+            concat!(
+                "{\"schema\":\"opensks.accessibility-tree.v1\",",
+                "\"session_id\":\"1781945000000000000-42\",",
+                "\"target\":\"inspect Finder accessibility tree\",",
+                "\"captured\":true,\"frontmost_app\":\"Finder\",",
+                "\"running_app_count\":1,",
+                "\"nodes\":[{\"role\":\"application\",\"name\":\"Finder\",\"frontmost\":true}],",
+                "\"status\":\"captured\",",
+                "\"policy_decision\":\"allowed_inspection_only\",",
+                "\"stderr\":\"\"}\n"
+            ),
+        )
+        .expect("restore accessibility tree");
+        fs::write(
+            session_dir.join("running-apps.json"),
+            concat!(
+                "{\"schema\":\"opensks.running-apps.v1\",",
+                "\"session_id\":\"1781945000000000000-42\",",
+                "\"attempted\":true,\"status\":\"captured\",",
+                "\"apps\":[\"Finder\"],\"stderr\":\"\"}\n"
+            ),
+        )
+        .expect("write count-mismatch running apps");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance count mismatch");
+        let mvp = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("mvp-acceptance.json"),
+        )
+        .expect("mvp count mismatch");
+        assert!(mvp.contains(
+            "\"id\":\"mvp-008\",\"criterion\":\"App use can inspect macOS accessibility tree.\",\"status\":\"partial\""
+        ));
+
+        fs::write(
+            session_dir.join("accessibility-tree.json"),
+            concat!(
+                "{\"schema\":\"opensks.accessibility-tree.v1\",",
+                "\"session_id\":\"1781945000000000000-42\",",
+                "\"session_id\":\"1781945000000000000-42\",",
+                "\"target\":\"inspect Finder accessibility tree\",",
+                "\"captured\":true,\"frontmost_app\":\"Finder\",",
+                "\"running_app_count\":1,",
+                "\"nodes\":[{\"role\":\"application\",\"name\":\"Finder\",\"frontmost\":true}],",
+                "\"status\":\"captured\",",
+                "\"policy_decision\":\"allowed_inspection_only\",",
+                "\"stderr\":\"\"}\n"
+            ),
+        )
+        .expect("write duplicate session accessibility tree");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance duplicate session");
+        let mvp = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("mvp-acceptance.json"),
+        )
+        .expect("mvp duplicate session");
+        assert!(mvp.contains(
+            "\"id\":\"mvp-008\",\"criterion\":\"App use can inspect macOS accessibility tree.\",\"status\":\"partial\""
+        ));
+
+        fs::write(
+            session_dir.join("accessibility-tree.json"),
+            concat!(
+                "{\"schema\":\"opensks.accessibility-tree.v1\",",
+                "\"session_id\":\"1781945000000000000-42\",",
+                "\"target\":\"inspect Finder accessibility tree\",",
+                "\"captured\":true,\"frontmost_app\":\"Finder\",",
+                "\"running_app_count\":1,",
+                "\"nodes\":[{\"role\":\"application\",\"name\":\"Finder\",\"frontmost\":true}],",
+                "\"status\":\"captured\",",
+                "\"policy_decision\":\"allowed_inspection_only\",",
+                "\"stderr\":\"\",\"stderr\":\"\"}\n"
+            ),
+        )
+        .expect("write duplicate stderr accessibility tree");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance duplicate stderr");
+        let mvp = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("mvp-acceptance.json"),
+        )
+        .expect("mvp duplicate stderr");
+        assert!(mvp.contains(
+            "\"id\":\"mvp-008\",\"criterion\":\"App use can inspect macOS accessibility tree.\",\"status\":\"partial\""
+        ));
+
+        fs::write(
+            session_dir.join("accessibility-tree.json"),
+            concat!(
+                "{\"schema\":\"opensks.accessibility-tree.v1\",",
+                "\"session_id\":\"1781945000000000000-42\",",
+                "\"target\":\"inspect Finder accessibility tree\",",
+                "\"captured\":true,\"frontmost_app\":\"Finder\",",
+                "\"running_app_count\":1,",
+                "\"nodes\":[{\"role\":\"application\",\"name\":\"Finder\",\"frontmost\":true}],",
+                "\"status\":\"captured\",",
+                "\"policy_decision\":\"allowed_inspection_only\",",
+                "\"stderr\":\"\"}\n"
+            ),
+        )
+        .expect("restore accessibility tree for sensitive state");
+        fs::write(
+            session_dir.join("running-apps.json"),
+            concat!(
+                "{\"schema\":\"opensks.running-apps.v1\",",
+                "\"session_id\":\"1781945000000000000-43\",",
+                "\"attempted\":true,\"status\":\"captured\",",
+                "\"apps\":[\"Finder\"],\"stderr\":\"\"}\n"
+            ),
+        )
+        .expect("write session mismatch running apps");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance session mismatch");
+        let mvp = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("mvp-acceptance.json"),
+        )
+        .expect("mvp session mismatch");
+        assert!(mvp.contains(
+            "\"id\":\"mvp-008\",\"criterion\":\"App use can inspect macOS accessibility tree.\",\"status\":\"partial\""
+        ));
+
+        fs::write(
+            session_dir.join("running-apps.json"),
+            concat!(
+                "{\"schema\":\"opensks.running-apps.v1\",",
+                "\"session_id\":\"1781945000000000000-42\",",
+                "\"attempted\":true,\"status\":\"captured\",",
+                "\"apps\":[\"Finder\"],\"stderr\":\"\"}\n"
+            ),
+        )
+        .expect("restore running apps for sensitive state");
+        fs::write(
+            session_dir.join("app-final-state.json"),
+            concat!(
+                "{\"schema\":\"opensks.app-final-state.v1\",",
+                "\"session_id\":\"1781945000000000000-42\",",
+                "\"target\":\"send email from Mail\",",
+                "\"inspection_attempted\":true,\"status\":\"blocked_by_policy\",",
+                "\"frontmost_app\":\"Mail\",\"running_app_count\":1,",
+                "\"policy_decision\":\"denied_sensitive_app_action\",",
+                "\"sensitive_action_detected\":true,",
+                "\"live_app_actions_executed\":false}\n"
+            ),
+        )
+        .expect("write sensitive final state");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance sensitive app-use");
+        let mvp = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("mvp-acceptance.json"),
+        )
+        .expect("mvp sensitive app-use");
+        assert!(mvp.contains(
+            "\"id\":\"mvp-008\",\"criterion\":\"App use can inspect macOS accessibility tree.\",\"status\":\"partial\""
+        ));
     }
 
     #[test]
