@@ -32,12 +32,18 @@ Current live local slices:
 
 - `qa run` executes `cargo fmt --check`, `cargo test --no-run`, and `cargo clippy --all-targets --all-features -- -D warnings` when `Cargo.toml` exists.
 - `qa run` also performs a built-in workspace secret scan.
+- `security audit` writes a threat model plus static security findings for prompt injection, MCP allowlist bypass phrasing, supply-chain shell pipes, unsafe actions, and secrets.
 - `cache warm` hashes local text-like cache segments and classifies stable versus dynamic context.
 - `bench` records timed local runtime checks.
 - `auth` discovers provider environment-variable configuration without exposing secret values.
-- `browser` performs curl-based network and page probes for HTTP(S) targets, extracts title/hash/bytes, and writes HAR-like/final-state artifacts.
-- `computer-use` attempts macOS screenshot capture and writes screenshot/final-state/action artifacts.
-- `app-use` attempts macOS frontmost-app inspection and records the result.
+- `provider list`, `provider probe`, and `provider usage` write provider profiles, local endpoint reachability probes, and zero-leak usage counters.
+- `voxel index` scans workspace text into code, symbol, design, security, provider, package, and context voxels with stable/dynamic cache classification.
+- Goal missions write `goal-kind-registry.json` with every PRD section 2.3 goal kind and the selected kind for the run.
+- `browser` brokers safe network observation, extracts title/hash/link/form/meta evidence for HTTP(S) targets, and writes HAR-like/final-state/action-plan/policy-decision artifacts.
+- `computer-use` brokers safe observation, blocks or marks mouse/keyboard and sensitive actions for approval, and writes screenshot/final-state/action-plan/policy-decision artifacts.
+- `app-use` brokers native app intents, captures frontmost/running-app inspection state, and blocks or marks sensitive native actions for approval.
+- `app` writes a static `.opensks/app/dashboard.html` plus `gui-data.json` from local PRD, QA/security, Voxel TriWiki, provider, mission, and use-plane artifacts.
+- `design qa` scans local design surfaces and records static accessibility, responsive, and color-token findings.
 - `mcp audit` writes a broker policy that denies raw model tool calls by default.
 - `mcp describe`, `mcp invoke`, and `mcp serve --once` provide a local MCP-style JSON-RPC surface for allowlisted OpenSKS tools.
 - `scheduler run` writes a bounded local scheduler plan, event stream, and final state.
