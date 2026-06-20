@@ -35,12 +35,17 @@ production criterion `requirement coverage >= 95%`. Its numerator is
 coverage is above threshold, not that the product or all live production
 acceptance criteria are complete.
 
+`prod-005: passed` has the same scoped meaning: `final-seal.json` includes an
+`artifact_mvp_final_seal_integrity` trust contract for the local artifact
+envelope while `live_route_completion`, live H-proof, provider-backed workers,
+repair waves, and final apply remain explicitly false.
+
 Current live local slices:
 
 - `qa run` executes `cargo fmt --check`, `cargo test --no-run`, and `cargo clippy --all-targets --all-features -- -D warnings` when `Cargo.toml` exists.
 - `qa run` also performs a built-in workspace secret scan and writes `secret-leak-rate.json` plus `secret-leak-gate.json` as the current workspace release zero-leak gate.
 - `security audit` writes a threat model plus static security findings for prompt injection, MCP allowlist bypass phrasing, supply-chain shell pipes, unsafe actions, and secrets, along with the same `secret-leak-rate.json` and `secret-leak-gate.json` artifacts under `.opensks/security`.
-- `cache warm` hashes local text-like cache segments, classifies stable versus dynamic context, and writes `cache-hit-report.json` by comparing the current stable prefix with the previous warm snapshot.
+- `cache warm` hashes local text-like cache segments, classifies stable versus dynamic context, includes deterministic Voxel TriWiki context in the stable prefix when `voxel index` has written `.opensks/triwiki/voxels.jsonl`, and writes `cache-hit-report.json` plus `cache-layout-improvement.json` by comparing the current stable prefix with the previous warm snapshot.
 - `bench` records timed local runtime checks plus explicit multi-LLM roster, role-assignment, disagreement, quorum, and collaboration preflight artifacts with hidden fallback disabled.
 - `auth` discovers provider environment-variable configuration without exposing secret values and writes auth policy plus audit artifacts for Keychain-first storage posture, OAuth candidates, API keys, and local endpoints.
 - `provider list`, `provider probe`, `provider usage`, and `provider adapter-check` write provider profiles, first-class/optional adapter capabilities, local endpoint reachability probes, OpenRouter/OpenAI adapter smoke evidence, and zero-leak usage counters.

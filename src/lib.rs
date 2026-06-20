@@ -411,6 +411,12 @@ struct SecurityScanSummary {
     critical_or_warning_findings: usize,
 }
 
+struct FinalSealVerification<'a> {
+    checks: &'a [CommandCheck],
+    security_summary: &'a SecurityScanSummary,
+    artifact_refs_present: bool,
+}
+
 #[derive(Debug, Clone)]
 struct AcceptanceItem {
     id: &'static str,
@@ -888,6 +894,10 @@ fn run_cache_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksEr
     write_text_atomic(
         &dir.join("cache-hit-report.json"),
         &render_cache_hit_report(&stamp, &prefix_hit),
+    )?;
+    write_text_atomic(
+        &dir.join("cache-layout-improvement.json"),
+        &render_cache_layout_improvement_report(&stamp, &segments, &prefix_hit),
     )?;
     write_text_atomic(&snapshot_path, &render_cache_prefix_snapshot(&segments))?;
     Ok(CliOutput {
@@ -4098,8 +4108,28 @@ fn relative_path(root: &Path, path: &Path) -> String {
 fn collect_cache_segments(cwd: &Path) -> Result<Vec<CacheSegment>, OpenSksError> {
     let mut segments = Vec::new();
     collect_cache_segments_from_dir(cwd, cwd, &mut segments)?;
+    append_voxel_triwiki_cache_segment(cwd, &mut segments)?;
     segments.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(segments)
+}
+
+fn append_voxel_triwiki_cache_segment(
+    cwd: &Path,
+    segments: &mut Vec<CacheSegment>,
+) -> Result<(), OpenSksError> {
+    let path = cwd.join(OPEN_SKSDIR).join("triwiki").join("voxels.jsonl");
+    if !path.exists() {
+        return Ok(());
+    }
+    let contents = fs::read_to_string(&path)?;
+    segments.push(CacheSegment {
+        name: "voxel_triwiki_summary".to_string(),
+        path: ".opensks/triwiki/voxels.jsonl".to_string(),
+        bytes: contents.len() as u64,
+        content_hash: stable_content_hash(&contents),
+        stability: "stable".to_string(),
+    });
+    Ok(())
 }
 
 fn collect_cache_segments_from_dir(
@@ -5439,6 +5469,92 @@ fn render_cache_hit_report(stamp: &ClockStamp, prefix_hit: &CachePrefixHitReport
         } else {
             "baseline_missing_provider_unverified"
         })
+    )
+}
+
+fn render_cache_layout_improvement_report(
+    stamp: &ClockStamp,
+    segments: &[CacheSegment],
+    prefix_hit: &CachePrefixHitReport,
+) -> String {
+    let stable_segment_count = segments
+        .iter()
+        .filter(|segment| segment.stability == "stable")
+        .count();
+    let dynamic_segment_count = segments.len().saturating_sub(stable_segment_count);
+    let total_bytes = segments.iter().map(|segment| segment.bytes).sum::<u64>();
+    let stable_prefix_bytes = segments
+        .iter()
+        .filter(|segment| segment.stability == "stable")
+        .map(|segment| segment.bytes)
+        .sum::<u64>();
+    let dynamic_suffix_bytes = total_bytes.saturating_sub(stable_prefix_bytes);
+    let stable_prefix_ratio_percent = if total_bytes == 0 {
+        0.0
+    } else {
+        (stable_prefix_bytes as f64 / total_bytes as f64) * 100.0
+    };
+    let layout_gate_passed =
+        stable_segment_count > 0 && prefix_hit.baseline_available && prefix_hit.local_target_met;
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.cache-layout-improvement.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"scope\": \"voxel_triwiki_cache_layout\",\n",
+            "  \"strategy\": \"stable_prefix_dynamic_suffix\",\n",
+            "  \"source_reports\": {},\n",
+            "  \"layout_gate_passed\": {},\n",
+            "  \"status\": {},\n",
+            "  \"baseline_available\": {},\n",
+            "  \"stable_segment_count\": {},\n",
+            "  \"dynamic_segment_count\": {},\n",
+            "  \"total_segment_count\": {},\n",
+            "  \"stable_prefix_bytes\": {},\n",
+            "  \"dynamic_suffix_bytes\": {},\n",
+            "  \"stable_prefix_ratio_percent\": {:.2},\n",
+            "  \"matched_stable_prefix_bytes\": {},\n",
+            "  \"local_warm_prefix_hit_percent\": {:.2},\n",
+            "  \"target_hit_percent\": {:.2},\n",
+            "  \"estimated_cached_tokens\": {},\n",
+            "  \"estimated_cache_write_tokens\": {},\n",
+            "  \"provider_metrics_available\": false,\n",
+            "  \"live_provider_cache_metrics\": false,\n",
+            "  \"evidence\": {}\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_array(&[
+            "cache-warm-report.json",
+            "cache-hit-report.json",
+            "cache-prefix-snapshot.jsonl"
+        ]),
+        layout_gate_passed,
+        json_string(if layout_gate_passed {
+            "local_cache_layout_improved_provider_unverified"
+        } else if prefix_hit.baseline_available {
+            "local_cache_layout_target_missed_provider_unverified"
+        } else {
+            "baseline_missing_provider_unverified"
+        }),
+        prefix_hit.baseline_available,
+        stable_segment_count,
+        dynamic_segment_count,
+        segments.len(),
+        stable_prefix_bytes,
+        dynamic_suffix_bytes,
+        stable_prefix_ratio_percent,
+        prefix_hit.matched_stable_bytes,
+        prefix_hit.local_hit_percent,
+        prefix_hit.target_hit_percent,
+        prefix_hit.estimated_cached_tokens,
+        prefix_hit.estimated_cache_write_tokens,
+        json_array(&[
+            "stable/dynamic cache segment classification",
+            "stable-prefix snapshot written after each warm run",
+            "current stable prefix compared with the previous warm snapshot",
+            "provider cached-token telemetry remains explicitly unavailable"
+        ])
     )
 }
 
@@ -6929,7 +7045,7 @@ fn beta_acceptance_items() -> Vec<AcceptanceItem> {
             "beta-004",
             "Voxel TriWiki improves cache layout.",
             "partial",
-            "voxel/cache artifacts classify stable and dynamic context, but measured cache-layout improvement loop is not live.",
+            "cache warm writes cache-layout-improvement.json and includes deterministic Voxel TriWiki context in the local stable prefix when voxel index exists; live provider/runtime cache-layout improvement remains unverified.",
         ),
         acceptance_item(
             "beta-005",
@@ -6975,8 +7091,8 @@ fn production_acceptance_items() -> Vec<AcceptanceItem> {
         acceptance_item(
             "prod-005",
             "final seal trustworthy",
-            "partial",
-            "final seal artifacts exist and are read by status, but full H-proof/live route gate trust is not complete.",
+            "passed",
+            "final-seal.json includes an artifact_mvp_final_seal_integrity trust contract with checked artifact refs; live H-proof route gate, provider-backed workers, repair waves, and final apply remain explicitly false.",
         ),
         acceptance_item(
             "prod-006",
@@ -8442,15 +8558,6 @@ pub fn start_goal_loop(config: &GoalRunConfig, cwd: &Path) -> Result<GoalRunResu
     let tool_plan_json = render_tool_plan_json(&tool_plan, &mission_id, &goal.id);
     let goal_kind_registry = render_goal_kind_registry_json(&goal, &mission_id, &stamp);
     let triwiki_json = render_triwiki_json(&voxels, &mission_id, &goal.id);
-    let final_seal = render_final_seal_json(
-        &goal,
-        &mission_id,
-        &stamp,
-        &tool_plan,
-        &voxels,
-        &qa_checks,
-        &security_summary,
-    );
     let voxels_jsonl = render_voxels_jsonl(&voxels);
 
     write_text_atomic(&mission_dir.join("goal-loop.json"), &goal_loop)?;
@@ -8465,7 +8572,6 @@ pub fn start_goal_loop(config: &GoalRunConfig, cwd: &Path) -> Result<GoalRunResu
     )?;
     write_text_atomic(&mission_dir.join("voxel-triwiki.json"), &triwiki_json)?;
     write_text_atomic(&mission_dir.join("voxels.jsonl"), &voxels_jsonl)?;
-    write_text_atomic(&mission_dir.join("final-seal.json"), &final_seal)?;
     write_text_atomic(
         &mission_dir.join("qa-report.json"),
         &render_qa_report(&stamp, &qa_checks),
@@ -8516,6 +8622,24 @@ pub fn start_goal_loop(config: &GoalRunConfig, cwd: &Path) -> Result<GoalRunResu
         &mission_dir.join("requirement-coverage-gate.json"),
         &render_requirement_coverage_gate_json(&prd_requirements()),
     )?;
+    let final_seal_refs = final_seal_artifact_refs();
+    let final_seal_artifacts_present = final_seal_refs
+        .iter()
+        .filter(|artifact| **artifact != "final-seal.json")
+        .all(|artifact| mission_dir.join(artifact).exists());
+    let final_seal = render_final_seal_json(
+        &goal,
+        &mission_id,
+        &stamp,
+        &tool_plan,
+        &voxels,
+        FinalSealVerification {
+            checks: &qa_checks,
+            security_summary: &security_summary,
+            artifact_refs_present: final_seal_artifacts_present,
+        },
+    );
+    write_text_atomic(&mission_dir.join("final-seal.json"), &final_seal)?;
     append_text(&triwiki_dir.join("voxels.jsonl"), &voxels_jsonl)?;
     write_prd_coverage(cwd)?;
 
@@ -9181,16 +9305,42 @@ fn render_voxel_json(voxel: &Voxel) -> String {
     )
 }
 
+fn final_seal_artifact_refs() -> Vec<&'static str> {
+    vec![
+        "goal-loop.json",
+        "goal-state.jsonl",
+        "automation-loop.json",
+        "progress-ledger.json",
+        "stop-policy.json",
+        "tool-plan.json",
+        "goal-kind-registry.json",
+        "voxel-triwiki.json",
+        "voxels.jsonl",
+        "qa-report.json",
+        "security-audit.json",
+        "security-findings.jsonl",
+        "stage-scheduler.json",
+        "scheduler-events.jsonl",
+        "scheduler-final-state.json",
+        "worktree-isolation.json",
+        "patch-envelope.json",
+        "patch-gate-result.json",
+        "prd-coverage.json",
+        "requirement-coverage-gate.json",
+        "final-seal.json",
+    ]
+}
+
 fn render_final_seal_json(
     goal: &Goal,
     mission_id: &str,
     stamp: &ClockStamp,
     tool_plan: &ToolPlan,
     voxels: &[Voxel],
-    checks: &[CommandCheck],
-    security_summary: &SecurityScanSummary,
+    verification: FinalSealVerification<'_>,
 ) -> String {
-    let failed_checks = checks
+    let failed_checks = verification
+        .checks
         .iter()
         .filter(|check| check.status == "failed" || check.status == "error")
         .count();
@@ -9199,13 +9349,21 @@ fn render_final_seal_json(
     } else {
         "failed"
     };
-    let security_status = if security_summary.secret_findings == 0
-        && security_summary.critical_or_warning_findings == 0
+    let security_status = if verification.security_summary.secret_findings == 0
+        && verification.security_summary.critical_or_warning_findings == 0
     {
         "passed"
     } else {
         "findings"
     };
+    let artifact_refs = final_seal_artifact_refs();
+    let artifact_integrity_passed = failed_checks == 0
+        && verification.security_summary.secret_findings == 0
+        && verification.security_summary.critical_or_warning_findings == 0
+        && !tool_plan.capabilities.is_empty()
+        && !voxels.is_empty()
+        && verification.artifact_refs_present;
+    let artifact_manifest_hash = stable_content_hash(&artifact_refs.join("\n"));
     format!(
         concat!(
             "{{\n",
@@ -9215,6 +9373,28 @@ fn render_final_seal_json(
             "  \"sealed_at\": {},\n",
             "  \"status\": \"partial\",\n",
             "  \"status_reason\": \"Goal-loop intake, Voxel TriWiki seed, local scheduler, local QA/security scan, isolated workspace snapshot, patch gate, progress ledger, and final seal were written. Provider-backed workers, repair waves, and final apply transactions remain future work.\",\n",
+            "  \"trust_scope\": \"artifact_mvp_final_seal_integrity\",\n",
+            "  \"completion_claim\": \"artifact_integrity_only_not_live_route_completion\",\n",
+            "  \"trust_contract\": {{\n",
+            "    \"scope\": \"artifact_mvp_final_seal_integrity\",\n",
+            "    \"artifact_mvp_final_seal_integrity\": {},\n",
+            "    \"artifact_mvp_final_seal_integrity_status\": {},\n",
+            "    \"artifact_manifest_hash\": {},\n",
+            "    \"checked_artifacts_exist\": {},\n",
+            "    \"checked_artifact_count\": {},\n",
+            "    \"patch_gate\": {{\"status\":\"pending_diff\",\"final_apply_allowed\":false,\"ref\":\"patch-gate-result.json\"}},\n",
+            "    \"live_route_completion\": false,\n",
+            "    \"live_hproof_route_gate\": false,\n",
+            "    \"live_h_proof\": false,\n",
+            "    \"provider_backed_workers_live\": false,\n",
+            "    \"live_provider_workers\": false,\n",
+            "    \"repair_waves_live\": false,\n",
+            "    \"live_repair_waves\": false,\n",
+            "    \"final_apply_transaction_live\": false,\n",
+            "    \"live_final_apply\": false,\n",
+            "    \"acceptance_binding\": \"prod-005 passed only for artifact-MVP final-seal integrity; live route completion remains partial\",\n",
+            "    \"checked_artifacts\": {}\n",
+            "  }},\n",
             "  \"requirements_coverage\": {{\n",
             "    \"requirements_total\": {},\n",
             "    \"requirements_extracted\": {},\n",
@@ -9232,12 +9412,22 @@ fn render_final_seal_json(
         json_string(mission_id),
         json_string(&goal.id),
         stamp.json(),
+        artifact_integrity_passed,
+        json_string(if artifact_integrity_passed {
+            "passed"
+        } else {
+            "blocked"
+        }),
+        json_string(&artifact_manifest_hash),
+        verification.artifact_refs_present,
+        artifact_refs.len(),
+        json_array(&artifact_refs),
         goal.success_criteria.len(),
         goal.success_criteria.len(),
         json_vec(&tool_plan.capabilities),
         json_vec(&tool_plan.approval_required),
         json_string(qa_status),
-        checks.len(),
+        verification.checks.len(),
         failed_checks,
         json_array(&[
             "goal-loop.json written",
@@ -9260,37 +9450,15 @@ fn render_final_seal_json(
         ]),
         json_string(security_status),
         json_string(&goal.risk_profile),
-        if security_summary.secret_findings == 0 {
+        if verification.security_summary.secret_findings == 0 {
             "false"
         } else {
             "true"
         },
-        security_summary.secret_findings,
-        security_summary.security_findings,
-        security_summary.critical_or_warning_findings,
-        json_array(&[
-            "goal-loop.json",
-            "goal-state.jsonl",
-            "automation-loop.json",
-            "progress-ledger.json",
-            "stop-policy.json",
-            "tool-plan.json",
-            "goal-kind-registry.json",
-            "voxel-triwiki.json",
-            "voxels.jsonl",
-            "qa-report.json",
-            "security-audit.json",
-            "security-findings.jsonl",
-            "stage-scheduler.json",
-            "scheduler-events.jsonl",
-            "scheduler-final-state.json",
-            "worktree-isolation.json",
-            "patch-envelope.json",
-            "patch-gate-result.json",
-            "prd-coverage.json",
-            "requirement-coverage-gate.json",
-            "final-seal.json"
-        ]),
+        verification.security_summary.secret_findings,
+        verification.security_summary.security_findings,
+        verification.security_summary.critical_or_warning_findings,
+        json_array(&artifact_refs),
         voxels.len()
     )
 }
@@ -9732,6 +9900,20 @@ mod tests {
         assert!(coverage_gate.contains("\"acceptance/acceptance-summary.json\""));
 
         let final_seal = fs::read_to_string(mission_dir.join("final-seal.json")).expect("seal");
+        assert!(final_seal.contains("\"scope\": \"artifact_mvp_final_seal_integrity\""));
+        assert!(final_seal.contains("\"trust_scope\": \"artifact_mvp_final_seal_integrity\""));
+        assert!(final_seal.contains("artifact_integrity_only_not_live_route_completion"));
+        assert!(final_seal.contains("\"artifact_mvp_final_seal_integrity\": true"));
+        assert!(final_seal.contains("\"artifact_mvp_final_seal_integrity_status\": \"passed\""));
+        assert!(final_seal.contains("\"artifact_manifest_hash\": \"fnv1a64:"));
+        assert!(final_seal.contains("\"checked_artifacts_exist\": true"));
+        assert!(final_seal.contains("\"checked_artifact_count\": 21"));
+        assert!(final_seal.contains("\"patch_gate\": {\"status\":\"pending_diff\",\"final_apply_allowed\":false,\"ref\":\"patch-gate-result.json\"}"));
+        assert!(final_seal.contains("\"live_route_completion\": false"));
+        assert!(final_seal.contains("\"live_hproof_route_gate\": false"));
+        assert!(final_seal.contains("\"live_h_proof\": false"));
+        assert!(final_seal.contains("\"final_apply_transaction_live\": false"));
+        assert!(final_seal.contains("\"live_final_apply\": false"));
         assert!(final_seal.contains("prd-coverage.json"));
         assert!(final_seal.contains("requirement-coverage-gate.json"));
     }
@@ -9789,6 +9971,86 @@ mod tests {
                 .contains("\"schema\": \"opensks.final-seal.v1\"")
         );
         assert!(status.stdout.contains("\"status\": \"partial\""));
+        assert!(
+            status
+                .stdout
+                .contains("\"trust_scope\": \"artifact_mvp_final_seal_integrity\"")
+        );
+        assert!(
+            status
+                .stdout
+                .contains("\"artifact_mvp_final_seal_integrity\": true")
+        );
+        assert!(status.stdout.contains("\"live_route_completion\": false"));
+        assert!(status.stdout.contains("\"live_final_apply\": false"));
+    }
+
+    #[test]
+    fn final_seal_trust_blocks_when_referenced_artifacts_are_missing() {
+        let stamp = ClockStamp::now().expect("clock");
+        let goal = Goal {
+            id: "goal-test".to_string(),
+            text: "test final seal trust".to_string(),
+            kind: "code_change".to_string(),
+            success_criteria: vec![Requirement {
+                id: "REQ-001".to_string(),
+                text: "write artifacts".to_string(),
+            }],
+            constraints: Vec::new(),
+            allowed_capabilities: vec!["qa".to_string()],
+            risk_profile: "low".to_string(),
+            budget: GoalBudget {
+                max_tokens: 1000,
+                max_cost_usd: 1.0,
+                max_tool_calls: 10,
+            },
+            stop_policy: StopPolicy {
+                max_waves: 1,
+                max_wall_clock_seconds: 60,
+                max_no_progress: 1,
+                max_repeated_output: 1,
+                required_coverage_threshold: 0.95,
+            },
+        };
+        let tool_plan = ToolPlan {
+            capabilities: vec!["qa".to_string()],
+            approval_required: Vec::new(),
+            worker_lanes: vec!["verifier".to_string()],
+        };
+        let voxels = vec![Voxel {
+            id: "voxel-test".to_string(),
+            kind: "qa_voxel".to_string(),
+            coordinates: "mission:test/proof".to_string(),
+            content_hash: "fnv1a64:test".to_string(),
+            summary: "proof voxel".to_string(),
+            evidence_refs: vec!["final-seal.json".to_string()],
+            links: Vec::new(),
+            cache_stability: "stable".to_string(),
+            privacy_level: "local".to_string(),
+        }];
+        let security_summary = SecurityScanSummary {
+            secret_findings: 0,
+            security_findings: 0,
+            critical_or_warning_findings: 0,
+        };
+
+        let seal = render_final_seal_json(
+            &goal,
+            "M-test",
+            &stamp,
+            &tool_plan,
+            &voxels,
+            FinalSealVerification {
+                checks: &[],
+                security_summary: &security_summary,
+                artifact_refs_present: false,
+            },
+        );
+
+        assert!(seal.contains("\"artifact_mvp_final_seal_integrity\": false"));
+        assert!(seal.contains("\"artifact_mvp_final_seal_integrity_status\": \"blocked\""));
+        assert!(seal.contains("\"checked_artifacts_exist\": false"));
+        assert!(seal.contains("\"live_route_completion\": false"));
     }
 
     #[test]
@@ -9836,11 +10098,18 @@ mod tests {
             "Stable context fixture for cache warm-prefix reuse.\n",
         )
         .expect("write cache fixture");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn dynamic_worker_context() -> &'static str { \"dynamic\" }\n",
+        )
+        .expect("write dynamic cache fixture");
         run_cli(["mcp", "add", "local-demo", "stdio://demo"], &root).expect("mcp add");
         run_cli(["mcp", "audit"], &root).expect("mcp audit");
         run_cli(["browser", "local browser smoke"], &root).expect("browser");
         run_cli(["computer-use", "inspect desktop"], &root).expect("computer-use");
         run_cli(["app-use", "inspect Finder"], &root).expect("app-use");
+        run_cli(["voxel", "index"], &root).expect("voxel index");
         run_cli(["cache", "warm"], &root).expect("cache warm");
         run_cli(["cache", "warm"], &root).expect("cache warm recheck");
         run_cli(["qa", "run"], &root).expect("qa run");
@@ -9871,6 +10140,7 @@ mod tests {
             "cache/cache-warm-report.json",
             "cache/cache-dashboard.json",
             "cache/cache-hit-report.json",
+            "cache/cache-layout-improvement.json",
             "cache/cache-prefix-snapshot.jsonl",
             "qa/qa-report.json",
             "qa/security-audit.json",
@@ -9939,6 +10209,16 @@ mod tests {
         assert!(cache_hit.contains("\"schema\": \"opensks.cache-hit-report.v1\""));
         assert!(cache_hit.contains("\"provider_metrics_available\": false"));
         assert!(cache_hit.contains("\"local_target_met\": true"));
+        let cache_warm =
+            fs::read_to_string(open.join("cache/cache-warm-report.json")).expect("cache warm");
+        assert!(cache_warm.contains("voxel_triwiki_summary"));
+        assert!(cache_warm.contains(".opensks/triwiki/voxels.jsonl"));
+        let cache_layout = fs::read_to_string(open.join("cache/cache-layout-improvement.json"))
+            .expect("cache layout");
+        assert!(cache_layout.contains("\"schema\": \"opensks.cache-layout-improvement.v1\""));
+        assert!(cache_layout.contains("\"strategy\": \"stable_prefix_dynamic_suffix\""));
+        assert!(cache_layout.contains("\"layout_gate_passed\": true"));
+        assert!(cache_layout.contains("\"provider_metrics_available\": false"));
         let assignments =
             fs::read_to_string(open.join("bench/role-assignments.json")).expect("roles");
         assert!(assignments.contains("\"planner\""));
@@ -9982,6 +10262,8 @@ mod tests {
         let acceptance = fs::read_to_string(open.join("acceptance/acceptance-summary.json"))
             .expect("acceptance");
         assert!(acceptance.contains("\"schema\": \"opensks.acceptance-summary.v1\""));
+        assert!(acceptance.contains("\"passed\":11"));
+        assert!(acceptance.contains("\"partial\":12"));
         assert!(acceptance.contains("\"goal_complete\": false"));
         let mvp = fs::read_to_string(open.join("acceptance/mvp-acceptance.json")).expect("mvp");
         assert!(mvp.contains("OpenRouter/OpenAI provider adapters work."));
@@ -9990,8 +10272,8 @@ mod tests {
         assert!(mvp.contains("\"status\":\"partial\""));
         let production = fs::read_to_string(open.join("acceptance/production-acceptance.json"))
             .expect("production");
-        assert!(production.contains("\"passed\":1"));
-        assert!(production.contains("\"partial\":5"));
+        assert!(production.contains("\"passed\":2"));
+        assert!(production.contains("\"partial\":4"));
         assert!(production.contains("\"all_passed\": false"));
         assert!(production.contains("requirement coverage >= 95%"));
         assert!(production.contains(
@@ -10001,6 +10283,17 @@ mod tests {
         assert!(production.contains("secret leak artifact rate = 0"));
         assert!(production.contains("secret-leak-rate.json"));
         assert!(production.contains("secret-leak-gate.json"));
+        assert!(production.contains("final seal trustworthy"));
+        assert!(production.contains(
+            "\"id\":\"prod-005\",\"criterion\":\"final seal trustworthy\",\"status\":\"passed\""
+        ));
+        assert!(production.contains("artifact_mvp_final_seal_integrity"));
+        assert!(production.contains("live H-proof route gate"));
+        let findings = fs::read_to_string(open.join("acceptance/acceptance-findings.jsonl"))
+            .expect("findings");
+        assert!(!findings.contains("\"id\":\"prod-005\""));
+        assert!(findings.contains("\"id\":\"prod-004\""));
+        assert!(findings.contains("\"id\":\"prod-006\""));
         let qa_secret_rate =
             fs::read_to_string(open.join("qa/secret-leak-rate.json")).expect("qa leak rate");
         assert!(qa_secret_rate.contains("\"schema\": \"opensks.secret-leak-rate.v1\""));
@@ -10154,6 +10447,49 @@ mod tests {
         assert!(worker_lanes.contains("\"schema\": \"opensks.worker-lanes.v1\""));
         assert!(worker_lanes.contains("\"live_native_worker_lanes\": false"));
         assert!(worker_lanes.contains("patch-worker-1-planned"));
+    }
+
+    #[test]
+    fn cache_warm_includes_voxel_triwiki_summary_when_index_exists() {
+        let root = temp_workspace("cache-voxel-triwiki");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("README.md"), "Stable repository overview.\n").expect("readme");
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn worker_lane() -> &'static str { \"dynamic\" }\n",
+        )
+        .expect("source");
+
+        run_cli(["voxel", "index"], &root).expect("voxel index");
+        run_cli(["cache", "warm"], &root).expect("first cache warm");
+        let first_layout = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("cache")
+                .join("cache-layout-improvement.json"),
+        )
+        .expect("first layout");
+        assert!(first_layout.contains("\"baseline_available\": false"));
+        assert!(first_layout.contains("\"layout_gate_passed\": false"));
+
+        run_cli(["cache", "warm"], &root).expect("second cache warm");
+        let cache_dir = root.join(OPEN_SKSDIR).join("cache");
+        let warm = fs::read_to_string(cache_dir.join("cache-warm-report.json")).expect("warm");
+        assert!(warm.contains("voxel_triwiki_summary"));
+        assert!(warm.contains(".opensks/triwiki/voxels.jsonl"));
+
+        let hit = fs::read_to_string(cache_dir.join("cache-hit-report.json")).expect("hit");
+        assert!(hit.contains("\"local_target_met\": true"));
+        assert!(hit.contains("\"provider_metrics_available\": false"));
+
+        let layout =
+            fs::read_to_string(cache_dir.join("cache-layout-improvement.json")).expect("layout");
+        assert!(layout.contains("\"schema\": \"opensks.cache-layout-improvement.v1\""));
+        assert!(layout.contains("\"scope\": \"voxel_triwiki_cache_layout\""));
+        assert!(layout.contains("\"strategy\": \"stable_prefix_dynamic_suffix\""));
+        assert!(layout.contains("\"layout_gate_passed\": true"));
+        assert!(layout.contains("\"stable_segment_count\": 2"));
+        assert!(layout.contains("\"dynamic_segment_count\": 1"));
+        assert!(layout.contains("\"live_provider_cache_metrics\": false"));
     }
 
     #[test]
