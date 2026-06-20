@@ -138,8 +138,15 @@ or approval-gating sensitive browser actions. `computer-use` runs a local policy
 broker: safe observation can attempt screenshot capture, while mouse/keyboard
 and sensitive actions are blocked or marked approval-only and recorded in
 action-plan/policy-decision artifacts. It also writes an isolated
-browser/container observation-loop seed and ledger without launching live
-browser control. `app-use` runs the same kind of broker
+browser/container observation-loop artifact set without launching live browser
+control. The scoped `beta-002` pass is local isolated computer/browser
+observation-loop evidence only: it requires `isolated-browser-container.json`,
+`computer-browser-loop.json`, `computer-browser-loop-events.jsonl`,
+`isolated-browser-runtime/index.html`, policy evidence, and final-state
+evidence. Deterministic synthetic local HTML open/click/type event artifacts
+are recorded with policy approval boundaries. This does not claim live browser
+container control, live mouse/keyboard execution, external web control, or
+arbitrary browser automation. `app-use` runs the same kind of broker
 for native app intents. The scoped `mvp-008` pass, "App use can inspect macOS
 accessibility tree", is local artifact evidence only: it writes
 `accessibility-tree.json`, `running-apps.json`, `app-final-state.json`, and

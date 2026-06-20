@@ -16,6 +16,10 @@ const DEFAULT_MAX_TOOL_CALLS: u32 = 100;
 const DEFAULT_MAX_NO_PROGRESS: u32 = 2;
 const DEFAULT_MAX_REPEATED_OUTPUT: u32 = 2;
 const DEFAULT_REQUIRED_COVERAGE_THRESHOLD: f64 = 1.0;
+const COMPUTER_ISOLATED_LOOP_FINAL_TEXT: &str = "opensks-isolated-loop-ok";
+const COMPUTER_ISOLATED_LOOP_BUTTON_ID: &str = "opensks-loop-button";
+const COMPUTER_ISOLATED_LOOP_INPUT_ID: &str = "opensks-loop-input";
+const COMPUTER_ISOLATED_LOOP_STATUS_ID: &str = "opensks-loop-status";
 const PRD_SOURCE_PATH: &str =
     "/Users/weklem/Desktop/opensks_prd_v3_goal_loop_mcp_computer_use_voxel_triwiki.md";
 
@@ -3479,6 +3483,12 @@ fn write_isolated_browser_runtime(
         .join(&session.id)
         .join("isolated-browser-runtime");
     fs::create_dir_all(&runtime_dir)?;
+    let page = render_isolated_browser_runtime_page(target);
+    write_text_atomic(&runtime_dir.join("index.html"), &page)?;
+    Ok(runtime_dir)
+}
+
+fn render_isolated_browser_runtime_page(target: &str) -> String {
     let page = format!(
         concat!(
             "<!doctype html>\n",
@@ -3486,12 +3496,31 @@ fn write_isolated_browser_runtime(
             "<title>OpenSKS isolated observation loop</title></head>\n",
             "<body><main><h1>OpenSKS isolated observation loop</h1>\n",
             "<p data-target=\"{}\">Observation-only browser/container seed.</p>\n",
+            "<button id=\"{}\" type=\"button\" data-click-result=\"{}\">Record loop click</button>\n",
+            "<label for=\"{}\">Loop input</label>\n",
+            "<input id=\"{}\" name=\"loop-input\" data-type-result=\"{}\" autocomplete=\"off\">\n",
+            "<output id=\"{}\">opensks-isolated-loop-ready</output>\n",
+            "<script>\n",
+            "const button = document.getElementById('{}');\n",
+            "const input = document.getElementById('{}');\n",
+            "const status = document.getElementById('{}');\n",
+            "button.addEventListener('click', () => {{ status.value = button.dataset.clickResult; status.textContent = button.dataset.clickResult; }});\n",
+            "input.addEventListener('input', () => {{ status.value = input.value || input.dataset.typeResult; status.textContent = input.value || input.dataset.typeResult; }});\n",
+            "</script>\n",
             "</main></body></html>\n"
         ),
-        html_escape_attr(target)
+        html_escape_attr(target),
+        COMPUTER_ISOLATED_LOOP_BUTTON_ID,
+        COMPUTER_ISOLATED_LOOP_FINAL_TEXT,
+        COMPUTER_ISOLATED_LOOP_INPUT_ID,
+        COMPUTER_ISOLATED_LOOP_INPUT_ID,
+        COMPUTER_ISOLATED_LOOP_FINAL_TEXT,
+        COMPUTER_ISOLATED_LOOP_STATUS_ID,
+        COMPUTER_ISOLATED_LOOP_BUTTON_ID,
+        COMPUTER_ISOLATED_LOOP_INPUT_ID,
+        COMPUTER_ISOLATED_LOOP_STATUS_ID
     );
-    write_text_atomic(&runtime_dir.join("index.html"), &page)?;
-    Ok(runtime_dir)
+    page
 }
 
 fn render_computer_final_state(
@@ -3514,6 +3543,11 @@ fn render_computer_final_state(
             "  \"policy_decision\": {},\n",
             "  \"sensitive_action_detected\": {},\n",
             "  \"mouse_keyboard_actions_executed\": false,\n",
+            "  \"live_browser_container_control\": false,\n",
+            "  \"external_web_control\": false,\n",
+            "  \"isolated_browser_loop_ref\": \"computer-browser-loop.json\",\n",
+            "  \"isolated_browser_runtime_ref\": \"isolated-browser-runtime/index.html\",\n",
+            "  \"isolated_browser_final_text\": {},\n",
             "  \"wait_executed\": {}\n",
             "}}\n"
         ),
@@ -3530,6 +3564,7 @@ fn render_computer_final_state(
         json_string(&screenshot.stderr),
         json_string(&decision.decision),
         decision.sensitive,
+        json_string(COMPUTER_ISOLATED_LOOP_FINAL_TEXT),
         decision.wait_allowed
     )
 }
@@ -3555,6 +3590,7 @@ fn render_isolated_browser_container(
             "  \"network_access_enabled\": false,\n",
             "  \"browser_process_launched\": false,\n",
             "  \"live_browser_control\": false,\n",
+            "  \"external_web_control\": false,\n",
             "  \"container_status\": \"local_artifact_seeded\"\n",
             "}}\n"
         ),
@@ -3573,33 +3609,58 @@ fn render_computer_browser_loop(
     decision: &ComputerActionDecision,
     runtime_dir: &Path,
 ) -> String {
+    let loop_steps = json_array(&[
+        "create_isolated_runtime",
+        "observe_screenshot_status",
+        "open_local_runtime_state",
+        "click_local_runtime_button",
+        "type_local_runtime_input",
+        "record_final_state",
+    ]);
     format!(
         concat!(
             "{{\n",
             "  \"schema\": \"opensks.computer-browser-loop.v1\",\n",
             "  \"session_id\": {},\n",
             "  \"target\": {},\n",
-            "  \"status\": \"observation_loop_artifact_recorded\",\n",
+            "  \"status\": \"local_isolated_observation_loop_recorded\",\n",
             "  \"isolation_root\": {},\n",
-            "  \"loop_iterations\": 3,\n",
+            "  \"loop_iterations\": 6,\n",
+            "  \"loop_steps\": {},\n",
+            "  \"isolated_runtime_created\": true,\n",
+            "  \"isolated_runtime_ref\": \"isolated-browser-runtime/index.html\",\n",
+            "  \"observation_loop_executed\": true,\n",
             "  \"computer_session_ref\": \"computer-session.json\",\n",
             "  \"computer_final_state_ref\": \"computer-final-state.json\",\n",
             "  \"browser_container_ref\": \"isolated-browser-container.json\",\n",
             "  \"browser_seed_ref\": \"isolated-browser-runtime/index.html\",\n",
             "  \"screenshot_status\": {},\n",
             "  \"policy_decision\": {},\n",
+            "  \"isolated_browser_open_recorded\": true,\n",
+            "  \"isolated_browser_click_recorded\": true,\n",
+            "  \"isolated_browser_type_recorded\": true,\n",
+            "  \"isolated_browser_final_text\": {},\n",
+            "  \"button_element_id\": {},\n",
+            "  \"input_element_id\": {},\n",
+            "  \"status_element_id\": {},\n",
             "  \"live_browser_container_control\": false,\n",
             "  \"browser_click_type_executed\": false,\n",
             "  \"mouse_keyboard_actions_executed\": false,\n",
+            "  \"external_web_control\": false,\n",
             "  \"requires_approval_before_interaction\": true,\n",
-            "  \"evidence_note\": \"isolated observation-loop artifacts link computer-use policy, screenshot attempt, and local browser/container seed; live browser actions and mouse/keyboard execution remain unverified\"\n",
+            "  \"evidence_note\": \"local isolated HTML open/click/type loop events are recorded as artifacts; live browser container control, live browser actions, external web control, and mouse/keyboard execution remain false/unverified\"\n",
             "}}\n"
         ),
         json_string(&session.id),
         json_string(target),
         json_string(&runtime_dir.display().to_string()),
+        loop_steps,
         json_string(&screenshot.status),
-        json_string(&decision.decision)
+        json_string(&decision.decision),
+        json_string(COMPUTER_ISOLATED_LOOP_FINAL_TEXT),
+        json_string(COMPUTER_ISOLATED_LOOP_BUTTON_ID),
+        json_string(COMPUTER_ISOLATED_LOOP_INPUT_ID),
+        json_string(COMPUTER_ISOLATED_LOOP_STATUS_ID)
     )
 }
 
@@ -3616,13 +3677,35 @@ fn render_computer_browser_loop_events(
             json_string(&runtime_dir.display().to_string())
         ),
         format!(
+            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"isolated_browser_open_recorded\",\"runtime_ref\":\"isolated-browser-runtime/index.html\",\"executed\":true}}",
+            json_string(&session.id)
+        ),
+        format!(
+            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"isolated_browser_click_recorded\",\"element_id\":{},\"final_text\":{},\"executed\":true}}",
+            json_string(&session.id),
+            json_string(COMPUTER_ISOLATED_LOOP_BUTTON_ID),
+            json_string(COMPUTER_ISOLATED_LOOP_FINAL_TEXT)
+        ),
+        format!(
+            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"isolated_browser_type_recorded\",\"element_id\":{},\"typed_text\":{},\"executed\":true}}",
+            json_string(&session.id),
+            json_string(COMPUTER_ISOLATED_LOOP_INPUT_ID),
+            json_string(COMPUTER_ISOLATED_LOOP_FINAL_TEXT)
+        ),
+        format!(
+            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"isolated_browser_final_state_recorded\",\"status_element_id\":{},\"final_text\":{},\"executed\":true}}",
+            json_string(&session.id),
+            json_string(COMPUTER_ISOLATED_LOOP_STATUS_ID),
+            json_string(COMPUTER_ISOLATED_LOOP_FINAL_TEXT)
+        ),
+        format!(
             "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"computer_observation\",\"screenshot_status\":{},\"executed\":{}}}",
             json_string(&session.id),
             json_string(&screenshot.status),
             screenshot.attempted
         ),
         format!(
-            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"interactive_browser_or_mouse_keyboard_action\",\"executed\":false,\"policy_decision\":{},\"approval_required\":true}}",
+            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"interactive_browser_or_mouse_keyboard_action\",\"executed\":false,\"policy_decision\":{},\"approval_required\":true,\"live_browser_container_control\":false,\"external_web_control\":false}}",
             json_string(&session.id),
             json_string(&decision.decision)
         ),
@@ -7352,6 +7435,379 @@ fn latest_app_use_session_dir(cwd: &Path) -> Option<PathBuf> {
     session_dirs.into_iter().next_back()
 }
 
+fn beta002_computer_use_isolated_loop_gate_passed(cwd: &Path) -> bool {
+    let Some(session_dir) = latest_computer_use_session_dir(cwd) else {
+        return false;
+    };
+    let Ok(loop_report) = fs::read_to_string(session_dir.join("computer-browser-loop.json")) else {
+        return false;
+    };
+    let Ok(loop_events) =
+        fs::read_to_string(session_dir.join("computer-browser-loop-events.jsonl"))
+    else {
+        return false;
+    };
+    let Ok(container) = fs::read_to_string(session_dir.join("isolated-browser-container.json"))
+    else {
+        return false;
+    };
+    let Ok(final_state) = fs::read_to_string(session_dir.join("computer-final-state.json")) else {
+        return false;
+    };
+    let Ok(policy) = fs::read_to_string(session_dir.join("computer-policy-decision.json")) else {
+        return false;
+    };
+    let Ok(runtime_html) = fs::read_to_string(
+        session_dir
+            .join("isolated-browser-runtime")
+            .join("index.html"),
+    ) else {
+        return false;
+    };
+
+    let Some(loop_session_id) = extract_json_top_level_string_field(&loop_report, "session_id")
+    else {
+        return false;
+    };
+    let Some(container_session_id) = extract_json_top_level_string_field(&container, "session_id")
+    else {
+        return false;
+    };
+    let Some(final_state_session_id) =
+        extract_json_top_level_string_field(&final_state, "session_id")
+    else {
+        return false;
+    };
+    let Some(policy_session_id) = extract_json_top_level_string_field(&policy, "session_id") else {
+        return false;
+    };
+    let Some(loop_target) = extract_json_top_level_string_field(&loop_report, "target") else {
+        return false;
+    };
+    let Some(container_target) = extract_json_top_level_string_field(&container, "target") else {
+        return false;
+    };
+    let Some(final_state_target) = extract_json_top_level_string_field(&final_state, "target")
+    else {
+        return false;
+    };
+    let Some(policy_target) = extract_json_top_level_string_field(&policy, "target") else {
+        return false;
+    };
+    let Some(loop_iterations) =
+        extract_json_top_level_number_field(&loop_report, "loop_iterations")
+    else {
+        return false;
+    };
+    let Some(isolation_root) = extract_json_top_level_string_field(&container, "isolation_root")
+    else {
+        return false;
+    };
+    let Some(seed_page_hash) = extract_json_top_level_string_field(&container, "seed_page_hash")
+    else {
+        return false;
+    };
+    let Some(screenshot_status) =
+        extract_json_top_level_string_field(&loop_report, "screenshot_status")
+    else {
+        return false;
+    };
+    let Some(policy_decision) =
+        extract_json_top_level_string_field(&loop_report, "policy_decision")
+    else {
+        return false;
+    };
+    if extract_json_top_level_string_field(&final_state, "status").is_none() {
+        return false;
+    }
+    let expected_runtime_html = render_isolated_browser_runtime_page(&loop_target);
+
+    loop_session_id == container_session_id
+        && loop_session_id == final_state_session_id
+        && loop_session_id == policy_session_id
+        && loop_target == container_target
+        && loop_target == final_state_target
+        && loop_target == policy_target
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "schema",
+            "opensks.computer-browser-loop.v1",
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "status",
+            "local_isolated_observation_loop_recorded",
+        )
+        && loop_iterations >= 6
+        && json_top_level_string_array_contains(
+            &loop_report,
+            "loop_steps",
+            &[
+                "create_isolated_runtime",
+                "observe_screenshot_status",
+                "open_local_runtime_state",
+                "click_local_runtime_button",
+                "type_local_runtime_input",
+                "record_final_state",
+            ],
+        )
+        && json_top_level_bool_field_equals(&loop_report, "isolated_runtime_created", true)
+        && json_top_level_bool_field_equals(&loop_report, "observation_loop_executed", true)
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "isolated_runtime_ref",
+            "isolated-browser-runtime/index.html",
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "computer_session_ref",
+            "computer-session.json",
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "computer_final_state_ref",
+            "computer-final-state.json",
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "browser_container_ref",
+            "isolated-browser-container.json",
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "browser_seed_ref",
+            "isolated-browser-runtime/index.html",
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "policy_decision",
+            "allowed_observation_only",
+        )
+        && policy_decision == "allowed_observation_only"
+        && json_top_level_bool_field_equals(&loop_report, "isolated_browser_open_recorded", true)
+        && json_top_level_bool_field_equals(&loop_report, "isolated_browser_click_recorded", true)
+        && json_top_level_bool_field_equals(&loop_report, "isolated_browser_type_recorded", true)
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "isolated_browser_final_text",
+            COMPUTER_ISOLATED_LOOP_FINAL_TEXT,
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "button_element_id",
+            COMPUTER_ISOLATED_LOOP_BUTTON_ID,
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "input_element_id",
+            COMPUTER_ISOLATED_LOOP_INPUT_ID,
+        )
+        && json_top_level_string_field_equals(
+            &loop_report,
+            "status_element_id",
+            COMPUTER_ISOLATED_LOOP_STATUS_ID,
+        )
+        && json_top_level_bool_field_equals(&loop_report, "live_browser_container_control", false)
+        && json_top_level_bool_field_equals(&loop_report, "browser_click_type_executed", false)
+        && json_top_level_bool_field_equals(&loop_report, "mouse_keyboard_actions_executed", false)
+        && json_top_level_bool_field_equals(&loop_report, "external_web_control", false)
+        && json_top_level_bool_field_equals(
+            &loop_report,
+            "requires_approval_before_interaction",
+            true,
+        )
+        && json_top_level_string_field_equals(
+            &container,
+            "schema",
+            "opensks.isolated-browser-container.v1",
+        )
+        && json_top_level_bool_field_equals(&container, "network_access_enabled", false)
+        && json_top_level_bool_field_equals(&container, "browser_process_launched", false)
+        && json_top_level_bool_field_equals(&container, "live_browser_control", false)
+        && json_top_level_bool_field_equals(&container, "external_web_control", false)
+        && json_top_level_string_field_equals(
+            &container,
+            "container_status",
+            "local_artifact_seeded",
+        )
+        && seed_page_hash != "unavailable"
+        && stable_content_hash(&runtime_html) == seed_page_hash
+        && runtime_html == expected_runtime_html
+        && json_top_level_string_field_equals(
+            &final_state,
+            "schema",
+            "opensks.computer-final-state.v1",
+        )
+        && json_top_level_string_field_equals(
+            &final_state,
+            "policy_decision",
+            "allowed_observation_only",
+        )
+        && json_top_level_bool_field_equals(&final_state, "sensitive_action_detected", false)
+        && json_top_level_bool_field_equals(&final_state, "mouse_keyboard_actions_executed", false)
+        && json_top_level_bool_field_equals(&final_state, "live_browser_container_control", false)
+        && json_top_level_bool_field_equals(&final_state, "external_web_control", false)
+        && json_top_level_string_field_equals(
+            &final_state,
+            "isolated_browser_loop_ref",
+            "computer-browser-loop.json",
+        )
+        && json_top_level_string_field_equals(
+            &final_state,
+            "isolated_browser_runtime_ref",
+            "isolated-browser-runtime/index.html",
+        )
+        && json_top_level_string_field_equals(
+            &final_state,
+            "isolated_browser_final_text",
+            COMPUTER_ISOLATED_LOOP_FINAL_TEXT,
+        )
+        && json_top_level_string_field_equals(
+            &policy,
+            "schema",
+            "opensks.computer-policy-decision.v1",
+        )
+        && json_top_level_string_field_equals(&policy, "decision", "allowed_observation_only")
+        && json_top_level_bool_field_equals(&policy, "screenshot_allowed", true)
+        && json_top_level_bool_field_equals(&policy, "mouse_keyboard_allowed", false)
+        && json_top_level_bool_field_equals(&policy, "sensitive", false)
+        && computer_loop_events_prove_isolated_open_click_type(
+            &loop_events,
+            &loop_session_id,
+            &isolation_root,
+            &screenshot_status,
+            &policy_decision,
+        )
+        && runtime_html.contains(COMPUTER_ISOLATED_LOOP_BUTTON_ID)
+        && runtime_html.contains(COMPUTER_ISOLATED_LOOP_INPUT_ID)
+        && runtime_html.contains(COMPUTER_ISOLATED_LOOP_STATUS_ID)
+        && runtime_html.contains(COMPUTER_ISOLATED_LOOP_FINAL_TEXT)
+}
+
+fn latest_computer_use_session_dir(cwd: &Path) -> Option<PathBuf> {
+    let computer_use_dir = cwd.join(OPEN_SKSDIR).join("computer-use");
+    let mut session_dirs = fs::read_dir(computer_use_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    session_dirs.sort();
+    session_dirs.into_iter().next_back()
+}
+
+fn computer_loop_events_prove_isolated_open_click_type(
+    events: &str,
+    session_id: &str,
+    isolation_root: &str,
+    screenshot_status: &str,
+    policy_decision: &str,
+) -> bool {
+    let expected_events = [
+        "isolated_runtime_created",
+        "isolated_browser_open_recorded",
+        "isolated_browser_click_recorded",
+        "isolated_browser_type_recorded",
+        "isolated_browser_final_state_recorded",
+        "computer_observation",
+        "interactive_browser_or_mouse_keyboard_action",
+    ];
+    let mut seen = HashMap::new();
+    for line in events.lines().filter(|line| !line.trim().is_empty()) {
+        let line = line.trim();
+        if !json_top_level_string_field_equals(
+            line,
+            "schema",
+            "opensks.computer-browser-loop-event.v1",
+        ) || !json_top_level_string_field_equals(line, "session_id", session_id)
+        {
+            return false;
+        }
+        let Some(event) = extract_json_top_level_string_field(line, "event") else {
+            return false;
+        };
+        if !expected_events.contains(&event.as_str())
+            || seen.insert(event, line.to_string()).is_some()
+        {
+            return false;
+        }
+    }
+    if expected_events
+        .iter()
+        .any(|event| !seen.contains_key(*event))
+    {
+        return false;
+    }
+
+    let runtime_created = seen.get("isolated_runtime_created").expect("event exists");
+    let open_recorded = seen
+        .get("isolated_browser_open_recorded")
+        .expect("event exists");
+    let click_recorded = seen
+        .get("isolated_browser_click_recorded")
+        .expect("event exists");
+    let type_recorded = seen
+        .get("isolated_browser_type_recorded")
+        .expect("event exists");
+    let final_recorded = seen
+        .get("isolated_browser_final_state_recorded")
+        .expect("event exists");
+    let observation = seen.get("computer_observation").expect("event exists");
+    let interactive = seen
+        .get("interactive_browser_or_mouse_keyboard_action")
+        .expect("event exists");
+
+    json_top_level_string_field_equals(runtime_created, "path", isolation_root)
+        && json_top_level_bool_field_equals(runtime_created, "executed", true)
+        && json_top_level_string_field_equals(
+            open_recorded,
+            "runtime_ref",
+            "isolated-browser-runtime/index.html",
+        )
+        && json_top_level_bool_field_equals(open_recorded, "executed", true)
+        && json_top_level_string_field_equals(
+            click_recorded,
+            "element_id",
+            COMPUTER_ISOLATED_LOOP_BUTTON_ID,
+        )
+        && json_top_level_string_field_equals(
+            click_recorded,
+            "final_text",
+            COMPUTER_ISOLATED_LOOP_FINAL_TEXT,
+        )
+        && json_top_level_bool_field_equals(click_recorded, "executed", true)
+        && json_top_level_string_field_equals(
+            type_recorded,
+            "element_id",
+            COMPUTER_ISOLATED_LOOP_INPUT_ID,
+        )
+        && json_top_level_string_field_equals(
+            type_recorded,
+            "typed_text",
+            COMPUTER_ISOLATED_LOOP_FINAL_TEXT,
+        )
+        && json_top_level_bool_field_equals(type_recorded, "executed", true)
+        && json_top_level_string_field_equals(
+            final_recorded,
+            "status_element_id",
+            COMPUTER_ISOLATED_LOOP_STATUS_ID,
+        )
+        && json_top_level_string_field_equals(
+            final_recorded,
+            "final_text",
+            COMPUTER_ISOLATED_LOOP_FINAL_TEXT,
+        )
+        && json_top_level_bool_field_equals(final_recorded, "executed", true)
+        && json_top_level_string_field_equals(observation, "screenshot_status", screenshot_status)
+        && extract_json_top_level_raw_field(observation, "executed")
+            .is_some_and(|value| value == "true" || value == "false")
+        && json_top_level_bool_field_equals(interactive, "executed", false)
+        && json_top_level_string_field_equals(interactive, "policy_decision", policy_decision)
+        && json_top_level_bool_field_equals(interactive, "approval_required", true)
+        && json_top_level_bool_field_equals(interactive, "live_browser_container_control", false)
+        && json_top_level_bool_field_equals(interactive, "external_web_control", false)
+}
+
 fn accessibility_top_level_application_node_present(accessibility: &str) -> bool {
     extract_json_top_level_array_objects(accessibility, "nodes")
         .iter()
@@ -7363,6 +7819,18 @@ fn accessibility_top_level_application_node_present(accessibility: &str) -> bool
 }
 
 fn beta_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
+    let beta_002_passed = beta002_computer_use_isolated_loop_gate_passed(cwd);
+    let (beta_002_status, beta_002_evidence) = if beta_002_passed {
+        (
+            "passed",
+            "computer-use isolated browser/container artifacts prove a deterministic synthetic local HTML open/click/type event ledger, with policy/final-state evidence and live browser control, external web control, and mouse/keyboard execution all false.",
+        )
+    } else {
+        (
+            "partial",
+            "beta-002 requires computer-use artifacts isolated-browser-container.json, computer-browser-loop.json, computer-browser-loop-events.jsonl, isolated-browser-runtime/index.html, computer-policy-decision.json, and computer-final-state.json proving deterministic synthetic local HTML open/click/type event records while live browser control, external web control, and mouse/keyboard execution remain false.",
+        )
+    };
     let beta_004_passed = beta004_cache_layout_gate_passed(cwd);
     let (beta_004_status, beta_004_evidence) = if beta_004_passed {
         (
@@ -7397,8 +7865,8 @@ fn beta_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
         acceptance_item(
             "beta-002",
             "Computer-use loop works in isolated browser/container.",
-            "partial",
-            "computer-use writes isolated browser/container seed artifacts and an observation-loop ledger; live browser control and mouse/keyboard execution remain unverified.",
+            beta_002_status,
+            beta_002_evidence,
         ),
         acceptance_item(
             "beta-003",
@@ -11046,6 +11514,21 @@ mod tests {
         fs::write(root.join("src/lib.rs"), source).expect("write cargo source");
     }
 
+    fn assert_beta002_status(root: &Path, expected_status: &str) {
+        let beta = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta acceptance");
+        assert!(
+            beta.contains(&format!(
+                "\"id\":\"beta-002\",\"criterion\":\"Computer-use loop works in isolated browser/container.\",\"status\":\"{expected_status}\""
+            )),
+            "expected beta-002 status {expected_status}, got {beta}"
+        );
+    }
+
     fn first_mission_dir(root: &Path) -> PathBuf {
         let missions_dir = root.join(OPEN_SKSDIR).join("missions");
         fs::read_dir(&missions_dir)
@@ -12471,16 +12954,23 @@ mod tests {
         );
         assert!(acceptance.contains("\"schema\": \"opensks.acceptance-summary.v1\""));
         if mvp_008_passed {
+            assert!(acceptance.contains("\"passed\":19"));
+            assert!(acceptance.contains("\"partial\":4"));
+        } else {
             assert!(acceptance.contains("\"passed\":18"));
             assert!(acceptance.contains("\"partial\":5"));
-        } else {
-            assert!(acceptance.contains("\"passed\":17"));
-            assert!(acceptance.contains("\"partial\":6"));
         }
         assert!(acceptance.contains("\"goal_complete\": false"));
         let beta = fs::read_to_string(open.join("acceptance/beta-acceptance.json")).expect("beta");
-        assert!(beta.contains("\"passed\":3"));
-        assert!(beta.contains("\"partial\":3"));
+        assert!(beta.contains("\"passed\":4"));
+        assert!(beta.contains("\"partial\":2"));
+        assert!(beta.contains(
+            "\"id\":\"beta-002\",\"criterion\":\"Computer-use loop works in isolated browser/container.\",\"status\":\"passed\""
+        ));
+        assert!(beta.contains("deterministic synthetic local HTML open/click/type event ledger"));
+        assert!(beta.contains(
+            "live browser control, external web control, and mouse/keyboard execution all false"
+        ));
         assert!(beta.contains(
             "\"id\":\"beta-004\",\"criterion\":\"Voxel TriWiki improves cache layout.\",\"status\":\"passed\""
         ));
@@ -12550,6 +13040,7 @@ mod tests {
         if mvp_008_passed {
             assert!(!findings.contains("\"id\":\"mvp-008\""));
         }
+        assert!(!findings.contains("\"id\":\"beta-002\""));
         assert!(!findings.contains("\"id\":\"beta-004\""));
         assert!(!findings.contains("\"id\":\"beta-005\""));
         assert!(!findings.contains("\"id\":\"prod-001\""));
@@ -13173,6 +13664,201 @@ mod tests {
             .expect("container");
         assert!(container.contains("\"schema\": \"opensks.isolated-browser-container.v1\""));
         assert!(container.contains("\"browser_process_launched\": false"));
+    }
+
+    #[test]
+    fn beta002_requires_artifact_bound_computer_use_isolated_loop_gate() {
+        let root = temp_workspace("beta002-computer-use-loop");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance without computer-use");
+        assert_beta002_status(&root, "partial");
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings without computer-use");
+        assert!(findings.contains("\"id\":\"beta-002\""));
+
+        run_cli(
+            ["computer-use", "inspect isolated browser container"],
+            &root,
+        )
+        .expect("computer-use");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance with computer-use");
+        assert_beta002_status(&root, "passed");
+        let beta = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta with computer-use");
+        assert!(beta.contains("deterministic synthetic local HTML open/click/type event ledger"));
+        assert!(beta.contains(
+            "live browser control, external web control, and mouse/keyboard execution all false"
+        ));
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings with computer-use");
+        assert!(!findings.contains("\"id\":\"beta-002\""));
+    }
+
+    #[test]
+    fn beta002_stays_partial_for_malformed_or_spoofed_computer_loop_artifacts() {
+        let root = temp_workspace("beta002-computer-use-tamper");
+        run_cli(
+            ["computer-use", "inspect isolated browser container"],
+            &root,
+        )
+        .expect("computer-use");
+        let session_dir = first_child_dir(&root.join(OPEN_SKSDIR).join("computer-use"));
+        let loop_path = session_dir.join("computer-browser-loop.json");
+        let events_path = session_dir.join("computer-browser-loop-events.jsonl");
+        let policy_path = session_dir.join("computer-policy-decision.json");
+        let runtime_path = session_dir
+            .join("isolated-browser-runtime")
+            .join("index.html");
+        let original_loop = fs::read_to_string(&loop_path).expect("loop report");
+        let original_events = fs::read_to_string(&events_path).expect("loop events");
+        let original_policy = fs::read_to_string(&policy_path).expect("policy");
+        let original_runtime = fs::read_to_string(&runtime_path).expect("runtime");
+        let session_id =
+            extract_json_top_level_string_field(&original_loop, "session_id").expect("session id");
+
+        fs::write(
+            &loop_path,
+            original_loop.replace(
+                "\"isolated_browser_click_recorded\": true",
+                "\"isolated_browser_click_recorded\": false",
+            ),
+        )
+        .expect("tamper loop report");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance tampered loop");
+        assert_beta002_status(&root, "partial");
+
+        fs::write(&loop_path, &original_loop).expect("restore loop report");
+        let events_without_type = original_events
+            .lines()
+            .filter(|line| !line.contains("isolated_browser_type_recorded"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        fs::write(&events_path, events_without_type).expect("tamper events");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance tampered events");
+        assert_beta002_status(&root, "partial");
+
+        fs::write(&events_path, &original_events).expect("restore events");
+        let malformed_events = [
+            "isolated_runtime_created",
+            "isolated_browser_open_recorded",
+            "isolated_browser_click_recorded",
+            "isolated_browser_type_recorded",
+            "isolated_browser_final_state_recorded",
+            "computer_observation",
+            "interactive_browser_or_mouse_keyboard_action",
+        ]
+        .iter()
+        .map(|event| {
+            format!(
+                "not-json \"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"{event}\",\"executed\":true",
+                json_string(&session_id)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n";
+        fs::write(&events_path, malformed_events).expect("tamper malformed events");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance malformed events");
+        assert_beta002_status(&root, "partial");
+
+        fs::write(&events_path, &original_events).expect("restore events after malformed");
+        fs::write(
+            &events_path,
+            original_events.replace(
+                &format!("\"session_id\":{}", json_string(&session_id)),
+                "\"session_id\":\"other-session\"",
+            ),
+        )
+        .expect("tamper event session");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance event session mismatch");
+        assert_beta002_status(&root, "partial");
+
+        fs::write(&events_path, &original_events).expect("restore events after session mismatch");
+        fs::write(
+            &events_path,
+            original_events.replace(
+                &format!(
+                    "\"final_text\":{},\"executed\":true",
+                    json_string(COMPUTER_ISOLATED_LOOP_FINAL_TEXT)
+                ),
+                &format!(
+                    "\"final_text\":{},\"executed\":false,\"executed\":true",
+                    json_string(COMPUTER_ISOLATED_LOOP_FINAL_TEXT)
+                ),
+            ),
+        )
+        .expect("tamper duplicate event field");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance duplicate event field");
+        assert_beta002_status(&root, "partial");
+
+        fs::write(&events_path, &original_events).expect("restore events after duplicate field");
+        fs::write(
+            &policy_path,
+            original_policy.replace(
+                "\"mouse_keyboard_allowed\": false",
+                "\"mouse_keyboard_allowed\": true",
+            ),
+        )
+        .expect("tamper policy");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance tampered policy");
+        assert_beta002_status(&root, "partial");
+
+        fs::write(&policy_path, &original_policy).expect("restore policy");
+        fs::write(
+            &runtime_path,
+            original_runtime.replace(COMPUTER_ISOLATED_LOOP_INPUT_ID, "missing-loop-input"),
+        )
+        .expect("tamper runtime");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance tampered runtime");
+        assert_beta002_status(&root, "partial");
+
+        fs::write(&runtime_path, &original_runtime).expect("restore runtime");
+        fs::write(
+            &runtime_path,
+            format!(
+                "<!-- {} {} {} {} -->\n",
+                COMPUTER_ISOLATED_LOOP_BUTTON_ID,
+                COMPUTER_ISOLATED_LOOP_INPUT_ID,
+                COMPUTER_ISOLATED_LOOP_STATUS_ID,
+                COMPUTER_ISOLATED_LOOP_FINAL_TEXT
+            ),
+        )
+        .expect("tamper comment-only runtime");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance comment-only runtime");
+        assert_beta002_status(&root, "partial");
+
+        fs::write(&runtime_path, &original_runtime).expect("restore runtime after comment-only");
+        fs::write(
+            &runtime_path,
+            original_runtime.replace("Record loop click", "Tampered loop click"),
+        )
+        .expect("tamper runtime hash mismatch");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance runtime hash mismatch");
+        assert_beta002_status(&root, "partial");
+
+        fs::write(&runtime_path, &original_runtime).expect("restore runtime after hash mismatch");
+        fs::write(
+            &loop_path,
+            original_loop.replace(
+                "\"isolated_browser_open_recorded\": true",
+                "\"isolated_browser_open_recorded\": true,\n  \"isolated_browser_open_recorded\": true",
+            ),
+        )
+        .expect("tamper duplicate loop field");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance duplicate loop field");
+        assert_beta002_status(&root, "partial");
     }
 
     #[test]
