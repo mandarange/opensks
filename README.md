@@ -68,7 +68,8 @@ proves intake, artifact writing, automation-loop planning, capability planning,
 Voxel TriWiki seeding, and PRD coverage accounting. Goal runs also write local scheduler, QA/security,
 worktree-isolation, and patch-gate artifacts. `qa run` executes local Rust
 checks when a Cargo workspace is present and always runs the built-in secret
-scan. `cache warm` hashes local cache segments and writes a
+scan; it also writes `secret-leak-rate.json` and `secret-leak-gate.json` so the
+current workspace release scan has an explicit zero-leak gate. `cache warm` hashes local cache segments and writes a
 `cache-hit-report.json` comparing the current stable prefix with the previous
 warm snapshot; provider cached-token counters are still marked not connected.
 `bench` records timed local runtime checks plus explicit multi-LLM roster,
@@ -86,6 +87,10 @@ preflight should include adapter-check presence evidence.
 `updater plan` writes stable/latest channel, local signature proof, update
 boundary, rollback, and final-state artifacts without performing a network
 install.
+`prd coverage` writes the PRD coverage ledger plus
+`requirement-coverage-gate.json`, which checks implemented plus artifact-MVP
+requirement coverage against the 95% production threshold without claiming all
+live acceptance criteria passed.
 `acceptance audit` writes MVP/Beta/Production acceptance ledgers and findings so
 remaining live gaps are explicit rather than inferred from green tests.
 `voxel index` scans workspace text into code, symbol, design, security,
@@ -102,10 +107,11 @@ for native app intents: safe inspection captures frontmost and running-app
 state, while sensitive native actions are blocked or approval-only.
 `app` writes a static local mission-control dashboard under `.opensks/app`
 that summarizes PRD coverage, QA/security status, Voxel TriWiki counts,
-provider configuration, missions, and browser/computer/app-use sessions. It
-also writes platform, module, macOS integration, source-note, and product
-statement manifests that preserve PRD product posture without claiming live
-native GUI or updater completion.
+provider configuration, missions, mission status, worker lanes, and
+browser/computer/app-use sessions. It also writes `worker-lanes.json` plus
+platform, module, macOS integration, source-note, and product statement
+manifests that preserve PRD product posture without claiming live native GUI or
+updater completion.
 `scheduler run` writes the bounded stage plan, event stream, final state, and a
 live `stage-overlap-report.json` from concurrent local runtime metadata checks;
 production provider/worker overlap tuning is still reported as partial.
@@ -118,17 +124,19 @@ between runs. Rendered screenshot pixel diff and gpt-image-2 review remain
 non-live.
 `security audit` scans workspace text for secrets,
 prompt-injection-like phrases, MCP allowlist bypass phrasing, unsafe shell
-actions, and supply-chain shell pipes. `mcp describe`, `mcp invoke`, and
+actions, and supply-chain shell pipes, then writes the same
+`secret-leak-rate.json` and `secret-leak-gate.json` gate artifacts under `.opensks/security`. `mcp describe`, `mcp invoke`, and
 `mcp serve --once` expose a local brokered MCP-style JSON-RPC surface for
 allowlisted OpenSKS tools such as workspace search, Voxel query, final-seal
 reads, and local QA.
 
 ## PRD Coverage State
 
-`cargo run -- prd coverage` writes `.opensks/prd-coverage.json`. The ledger is
-not a completion claim; it is the current source of truth for what is already
-implemented, what has an artifact-backed scaffold, and what still needs live
-runtime work.
+`cargo run -- prd coverage` writes `.opensks/prd-coverage.json` and
+`.opensks/requirement-coverage-gate.json`. The gate measures artifact-backed
+PRD requirement coverage (`implemented + artifact_mvp`) against the 95%
+threshold; it is not a completion claim and does not mean live acceptance has
+all passed.
 
 Still not live:
 

@@ -291,6 +291,18 @@ struct GuiSnapshot {
     browser_sessions: usize,
     computer_sessions: usize,
     app_sessions: usize,
+    worker_lane_missions: usize,
+    worker_lane_count: usize,
+    worker_lanes: Vec<WorkerLaneSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkerLaneSnapshot {
+    mission_id: String,
+    status: String,
+    execution_mode: String,
+    lanes: Vec<String>,
+    source: String,
 }
 
 #[derive(Debug, Clone)]
@@ -894,6 +906,7 @@ fn run_qa_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError
     let stamp = ClockStamp::now()?;
     let checks = run_local_qa_checks(cwd);
     let secret_findings = scan_workspace_for_secrets(cwd)?;
+    let secret_scan_targets = count_secret_scan_targets(cwd)?;
     let security_findings = scan_workspace_for_security_findings(cwd)?;
     write_text_atomic(
         &dir.join("qa-report.json"),
@@ -906,6 +919,29 @@ fn run_qa_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError
     write_text_atomic(
         &dir.join("security-findings.jsonl"),
         &render_security_findings_jsonl(&stamp, &security_findings),
+    )?;
+    write_text_atomic(
+        &dir.join("secret-leak-rate.json"),
+        &render_secret_leak_rate_report(
+            &stamp,
+            "qa",
+            secret_scan_targets,
+            &secret_findings,
+            &["security-audit.json", "security-findings.jsonl"],
+        ),
+    )?;
+    write_text_atomic(
+        &dir.join("secret-leak-gate.json"),
+        &render_secret_leak_gate_report(
+            &stamp,
+            "qa",
+            &secret_findings,
+            &[
+                "secret-leak-rate.json",
+                "security-audit.json",
+                "security-findings.jsonl",
+            ],
+        ),
     )?;
     Ok(CliOutput {
         stdout: format!(
@@ -924,6 +960,7 @@ fn run_security_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSk
     fs::create_dir_all(&dir)?;
     let stamp = ClockStamp::now()?;
     let secret_findings = scan_workspace_for_secrets(cwd)?;
+    let secret_scan_targets = count_secret_scan_targets(cwd)?;
     let security_findings = scan_workspace_for_security_findings(cwd)?;
     write_text_atomic(
         &dir.join("security-audit.json"),
@@ -932,6 +969,29 @@ fn run_security_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSk
     write_text_atomic(
         &dir.join("security-findings.jsonl"),
         &render_security_findings_jsonl(&stamp, &security_findings),
+    )?;
+    write_text_atomic(
+        &dir.join("secret-leak-rate.json"),
+        &render_secret_leak_rate_report(
+            &stamp,
+            "security",
+            secret_scan_targets,
+            &secret_findings,
+            &["security-audit.json", "security-findings.jsonl"],
+        ),
+    )?;
+    write_text_atomic(
+        &dir.join("secret-leak-gate.json"),
+        &render_secret_leak_gate_report(
+            &stamp,
+            "security",
+            &secret_findings,
+            &[
+                "secret-leak-rate.json",
+                "security-audit.json",
+                "security-findings.jsonl",
+            ],
+        ),
     )?;
     write_text_atomic(&dir.join("threat-model.json"), &render_threat_model(&stamp))?;
     Ok(CliOutput {
@@ -1243,6 +1303,11 @@ fn run_app_command(_args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksErr
     write_text_atomic(
         &dir.join("product-statement.json"),
         &render_product_statement(&stamp),
+    )?;
+    let worker_lanes = collect_worker_lane_snapshots(cwd);
+    write_text_atomic(
+        &dir.join("worker-lanes.json"),
+        &render_worker_lanes_report(&stamp, &worker_lanes),
     )?;
     write_text_atomic(&dir.join("gui-data.json"), &render_gui_data(&stamp, cwd)?)?;
     write_text_atomic(
@@ -3736,6 +3801,36 @@ fn scan_workspace_for_secrets(cwd: &Path) -> Result<Vec<SecretFinding>, OpenSksE
     Ok(findings)
 }
 
+fn count_secret_scan_targets(cwd: &Path) -> Result<usize, OpenSksError> {
+    let mut count = 0;
+    count_secret_scan_targets_in_dir(cwd, &mut count)?;
+    Ok(count)
+}
+
+fn count_secret_scan_targets_in_dir(current: &Path, count: &mut usize) -> Result<(), OpenSksError> {
+    let entries = match fs::read_dir(current) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(OpenSksError::Io(error)),
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if should_skip_runtime_path(&name) {
+            continue;
+        }
+        if path.is_dir() {
+            count_secret_scan_targets_in_dir(&path, count)?;
+        } else if is_text_like_file(&path) {
+            *count += 1;
+        }
+    }
+    Ok(())
+}
+
 fn scan_dir_for_secrets(
     root: &Path,
     current: &Path,
@@ -5509,6 +5604,94 @@ fn render_security_audit(
     )
 }
 
+fn render_secret_leak_rate_report(
+    stamp: &ClockStamp,
+    source_command: &str,
+    scanned_artifact_count: usize,
+    secret_findings: &[SecretFinding],
+    evidence_refs: &[&str],
+) -> String {
+    let secret_finding_count = secret_findings.len();
+    let rate = secret_leak_artifact_rate(scanned_artifact_count, secret_findings);
+    let gate_passed = secret_leak_gate_passed(secret_findings);
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.secret-leak-rate.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"source_command\": {},\n",
+            "  \"scope\": \"current_workspace_release_scan\",\n",
+            "  \"scanned_text_artifact_count\": {},\n",
+            "  \"scanned_artifact_count\": {},\n",
+            "  \"secret_finding_count\": {},\n",
+            "  \"secret_leak_artifact_rate\": {:.6},\n",
+            "  \"target_rate\": 0.0,\n",
+            "  \"gate_passed\": {},\n",
+            "  \"live_external_production_telemetry\": false,\n",
+            "  \"evidence_refs\": {},\n",
+            "  \"secret_findings\": {}\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_string(source_command),
+        scanned_artifact_count,
+        scanned_artifact_count,
+        secret_finding_count,
+        rate,
+        gate_passed,
+        json_array(evidence_refs),
+        render_secret_findings_json(secret_findings)
+    )
+}
+
+fn render_secret_leak_gate_report(
+    stamp: &ClockStamp,
+    source_command: &str,
+    secret_findings: &[SecretFinding],
+    evidence_refs: &[&str],
+) -> String {
+    let gate_passed = secret_leak_gate_passed(secret_findings);
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.secret-leak-gate.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"source_command\": {},\n",
+            "  \"scope\": \"current_workspace_release_scan\",\n",
+            "  \"status\": {},\n",
+            "  \"gate_passed\": {},\n",
+            "  \"target_rate\": 0.0,\n",
+            "  \"secret_finding_count\": {},\n",
+            "  \"live_external_production_telemetry\": false,\n",
+            "  \"evidence_refs\": {},\n",
+            "  \"secret_findings\": {}\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        json_string(source_command),
+        json_string(if gate_passed { "passed" } else { "blocked" }),
+        gate_passed,
+        secret_findings.len(),
+        json_array(evidence_refs),
+        render_secret_findings_json(secret_findings)
+    )
+}
+
+fn secret_leak_artifact_rate(
+    scanned_artifact_count: usize,
+    secret_findings: &[SecretFinding],
+) -> f64 {
+    if scanned_artifact_count == 0 {
+        0.0
+    } else {
+        secret_findings.len() as f64 / scanned_artifact_count as f64
+    }
+}
+
+fn secret_leak_gate_passed(secret_findings: &[SecretFinding]) -> bool {
+    secret_findings.is_empty()
+}
+
 fn render_security_category_summary_json(findings: &[SecurityFinding]) -> String {
     let categories = [
         "prompt_injection",
@@ -6716,8 +6899,8 @@ fn mvp_acceptance_items() -> Vec<AcceptanceItem> {
         acceptance_item(
             "mvp-011",
             "GUI shows mission status and worker lanes.",
-            "partial",
-            "static dashboard shows mission/session status and use-plane counts; native live worker waterfall/lanes are not live.",
+            "passed",
+            "app writes dashboard.html and worker-lanes.json; the static dashboard renders mission status plus a worker-lane table from local mission/tool-plan artifacts without claiming live native GUI or live worker execution.",
         ),
     ]
 }
@@ -6780,14 +6963,14 @@ fn production_acceptance_items() -> Vec<AcceptanceItem> {
         acceptance_item(
             "prod-003",
             "requirement coverage >= 95%",
-            "partial",
-            "PRD coverage ledger tracks artifact coverage, but live acceptance coverage remains below production criteria.",
+            "passed",
+            "requirement-coverage-gate.json reports implemented plus artifact-MVP PRD coverage above 95%; live acceptance completion remains tracked separately and is not all passed.",
         ),
         acceptance_item(
             "prod-004",
             "secret leak artifact rate = 0",
             "partial",
-            "local QA/security scans currently report zero findings, but production-rate evidence across releases is not available.",
+            "qa run and security audit write secret-leak-rate.json and secret-leak-gate.json for the current workspace release scan; cross-release production telemetry and a release-history denominator are not implemented.",
         ),
         acceptance_item(
             "prod-005",
@@ -7169,17 +7352,21 @@ fn render_gui_manifest(stamp: &ClockStamp) -> String {
 
 fn render_gui_data(stamp: &ClockStamp, cwd: &Path) -> Result<String, OpenSksError> {
     let snapshot = collect_gui_snapshot(cwd);
+    let worker_lane_items = render_worker_lane_items_json(&snapshot.worker_lanes);
     Ok(format!(
         concat!(
             "{{\n",
             "  \"schema\": \"opensks.gui-data.v1\",\n",
             "  \"generated_at\": {},\n",
+            "  \"live_native_gui\": false,\n",
             "  \"coverage\": {{\"total\":{},\"implemented\":{},\"artifact_mvp\":{},\"planned_artifact\":{},\"missing_live_implementation\":{}}},\n",
             "  \"qa\": {{\"status\":{}}},\n",
             "  \"security\": {{\"status\":{}}},\n",
             "  \"providers\": {{\"configured_count\":{}}},\n",
             "  \"triwiki\": {{\"voxel_count\":{}}},\n",
             "  \"sessions\": {{\"missions\":{},\"browser\":{},\"computer_use\":{},\"app_use\":{}}},\n",
+            "  \"mission_status\": {{\"mission_count\":{},\"items\":{}}},\n",
+            "  \"worker_lanes\": {{\"mission_count\":{},\"lane_count\":{},\"items\":{},\"artifact\":\"worker-lanes.json\",\"dashboard_panel\":\"dashboard.html#worker-lanes\",\"live_native_worker_lanes\":false,\"live_worker_waterfall\":false}},\n",
             "  \"panels\": {}\n",
             "}}\n"
         ),
@@ -7197,8 +7384,15 @@ fn render_gui_data(stamp: &ClockStamp, cwd: &Path) -> Result<String, OpenSksErro
         snapshot.browser_sessions,
         snapshot.computer_sessions,
         snapshot.app_sessions,
+        snapshot.worker_lane_missions,
+        worker_lane_items,
+        snapshot.worker_lane_missions,
+        snapshot.worker_lane_count,
+        worker_lane_items,
         json_array(&[
             "mission_control",
+            "mission_status",
+            "worker_lanes",
             "prd_coverage",
             "voxel_triwiki",
             "mcp_tools",
@@ -7214,6 +7408,9 @@ fn render_dashboard_html(stamp: &ClockStamp, cwd: &Path) -> Result<String, OpenS
     let generated = html_escape(&stamp.json());
     let qa_status = html_escape(&snapshot.qa_status);
     let security_status = html_escape(&snapshot.security_status);
+    let worker_lane_rows = render_worker_lane_rows_html(&snapshot.worker_lanes);
+    let worker_lane_missions = snapshot.worker_lane_missions;
+    let worker_lane_count = snapshot.worker_lane_count;
     Ok(format!(
         concat!(
             "<!doctype html>\n",
@@ -7236,6 +7433,9 @@ fn render_dashboard_html(stamp: &ClockStamp, cwd: &Path) -> Result<String, OpenS
             ".ok {{ color: var(--accent); }} .warn {{ color: var(--warn); }}\n",
             "dl {{ display: grid; grid-template-columns: 1fr auto; gap: 8px; margin: 0; }}\n",
             "dt {{ color: var(--muted); }} dd {{ margin: 0; font-weight: 650; }}\n",
+            "table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}\n",
+            "th, td {{ text-align: left; border-top: 1px solid var(--line); padding: 8px 6px; vertical-align: top; }}\n",
+            "th {{ color: var(--muted); font-weight: 650; }}\n",
             "code {{ font-size: 12px; }}\n",
             "@media (prefers-color-scheme: dark) {{ :root {{ --bg: #101418; --fg: #f3f4f6; --muted: #a1a1aa; --line: #374151; --panel: #161b22; --accent: #2dd4bf; --warn: #fbbf24; }} }}\n",
             "</style>\n",
@@ -7249,6 +7449,8 @@ fn render_dashboard_html(stamp: &ClockStamp, cwd: &Path) -> Result<String, OpenS
             "<section><h2>Providers</h2><p>Configured env providers</p><div class=\"metric\">{}</div><p>Secret values are not rendered.</p></section>\n",
             "<section><h2>Missions</h2><p>Mission artifacts</p><div class=\"metric\">{}</div><p>Final seals stay partial until live PRD criteria pass.</p></section>\n",
             "<section><h2>Use Planes</h2><dl><dt>Browser</dt><dd>{}</dd><dt>Computer</dt><dd>{}</dd><dt>App</dt><dd>{}</dd></dl></section>\n",
+            "<section id=\"mission-status\"><h2>Mission Status</h2><dl><dt>Missions with lanes</dt><dd>{}</dd><dt>Worker lanes</dt><dd>{}</dd></dl><p>Static artifact view; native live GUI is not claimed.</p></section>\n",
+            "<section id=\"worker-lanes\" style=\"grid-column: 1 / -1;\"><h2>Worker Lanes</h2><p>Mission status and planned worker lanes from goal-loop/tool-plan artifacts.</p><table><thead><tr><th>Mission</th><th>Status</th><th>Mode</th><th>Lanes</th></tr></thead><tbody>{}</tbody></table></section>\n",
             "</div>\n",
             "</main></body></html>\n"
         ),
@@ -7265,7 +7467,10 @@ fn render_dashboard_html(stamp: &ClockStamp, cwd: &Path) -> Result<String, OpenS
         snapshot.mission_count,
         snapshot.browser_sessions,
         snapshot.computer_sessions,
-        snapshot.app_sessions
+        snapshot.app_sessions,
+        worker_lane_missions,
+        worker_lane_count,
+        worker_lane_rows
     ))
 }
 
@@ -7275,6 +7480,9 @@ fn collect_gui_snapshot(cwd: &Path) -> GuiSnapshot {
     let security = read_runtime_artifact(cwd, "qa/security-audit.json");
     let providers = read_runtime_artifact(cwd, "providers/provider-dashboard.json");
     let voxels = read_runtime_artifact(cwd, "triwiki/voxel-index-report.json");
+    let worker_lanes = collect_worker_lane_snapshots(cwd);
+    let worker_lane_count = worker_lanes.iter().map(|mission| mission.lanes.len()).sum();
+    let worker_lane_missions = worker_lanes.len();
 
     GuiSnapshot {
         prd_total: extract_json_number_field(&coverage, "total").unwrap_or(0),
@@ -7294,7 +7502,124 @@ fn collect_gui_snapshot(cwd: &Path) -> GuiSnapshot {
         browser_sessions: count_runtime_child_dirs(cwd, "browser"),
         computer_sessions: count_runtime_child_dirs(cwd, "computer-use"),
         app_sessions: count_runtime_child_dirs(cwd, "app-use"),
+        worker_lane_missions,
+        worker_lane_count,
+        worker_lanes,
     }
+}
+
+fn collect_worker_lane_snapshots(cwd: &Path) -> Vec<WorkerLaneSnapshot> {
+    let missions_dir = cwd.join(OPEN_SKSDIR).join("missions");
+    let mut dirs = Vec::new();
+    if let Ok(entries) = fs::read_dir(&missions_dir) {
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            }
+        }
+    }
+    dirs.sort();
+
+    let mut snapshots = Vec::new();
+    for dir in dirs {
+        let goal_loop = dir.join("goal-loop.json");
+        let tool_plan = dir.join("tool-plan.json");
+        let (source_path, source_contents) = if goal_loop.exists() {
+            let contents = fs::read_to_string(&goal_loop).unwrap_or_default();
+            (goal_loop, contents)
+        } else if tool_plan.exists() {
+            let contents = fs::read_to_string(&tool_plan).unwrap_or_default();
+            (tool_plan, contents)
+        } else {
+            continue;
+        };
+        let lanes = extract_json_string_array_field(&source_contents, "worker_lanes");
+        if lanes.is_empty() {
+            continue;
+        }
+        let fallback_id = dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown-mission")
+            .to_string();
+        snapshots.push(WorkerLaneSnapshot {
+            mission_id: extract_json_string_field(&source_contents, "mission_id")
+                .unwrap_or(fallback_id),
+            status: extract_json_string_field(&source_contents, "status")
+                .unwrap_or_else(|| "unknown".to_string()),
+            execution_mode: extract_json_string_field(&source_contents, "execution_mode")
+                .unwrap_or_else(|| "unknown".to_string()),
+            lanes,
+            source: source_path.display().to_string(),
+        });
+    }
+    snapshots
+}
+
+fn render_worker_lanes_report(stamp: &ClockStamp, snapshots: &[WorkerLaneSnapshot]) -> String {
+    let lane_count: usize = snapshots.iter().map(|snapshot| snapshot.lanes.len()).sum();
+    let rows = render_worker_lane_items_json(snapshots);
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.worker-lanes.v1\",\n",
+            "  \"generated_at\": {},\n",
+            "  \"mission_count\": {},\n",
+            "  \"lane_count\": {},\n",
+            "  \"dashboard_panel\": \"dashboard.html#worker-lanes\",\n",
+            "  \"source_authority\": \".opensks/missions/*/goal-loop.json and tool-plan.json\",\n",
+            "  \"live_native_worker_lanes\": false,\n",
+            "  \"missions\": {}\n",
+            "}}\n"
+        ),
+        stamp.json(),
+        snapshots.len(),
+        lane_count,
+        rows
+    )
+}
+
+fn render_worker_lane_items_json(snapshots: &[WorkerLaneSnapshot]) -> String {
+    let rows = snapshots
+        .iter()
+        .map(|snapshot| {
+            format!(
+                concat!(
+                    "{{\"mission_id\":{},\"status\":{},\"execution_mode\":{},",
+                    "\"lane_count\":{},\"worker_lanes\":{},\"source\":{}}}"
+                ),
+                json_string(&snapshot.mission_id),
+                json_string(&snapshot.status),
+                json_string(&snapshot.execution_mode),
+                snapshot.lanes.len(),
+                json_vec(&snapshot.lanes),
+                json_string(&snapshot.source)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{rows}]")
+}
+
+fn render_worker_lane_rows_html(snapshots: &[WorkerLaneSnapshot]) -> String {
+    if snapshots.is_empty() {
+        return "<tr><td colspan=\"4\">No mission worker lanes found in local artifacts.</td></tr>"
+            .to_string();
+    }
+    snapshots
+        .iter()
+        .map(|snapshot| {
+            format!(
+                "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                html_escape(&snapshot.mission_id),
+                html_escape(&snapshot.status),
+                html_escape(&snapshot.execution_mode),
+                html_escape(&snapshot.lanes.join(", "))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn render_workspace_manifest(stamp: &ClockStamp) -> String {
@@ -7467,13 +7792,22 @@ fn render_product_statement(stamp: &ClockStamp) -> String {
 fn write_prd_coverage(cwd: &Path) -> Result<PathBuf, OpenSksError> {
     let dir = cwd.join(OPEN_SKSDIR);
     fs::create_dir_all(&dir)?;
+    let requirements = prd_requirements();
     let path = dir.join("prd-coverage.json");
-    write_text_atomic(&path, &render_prd_coverage_json())?;
+    write_text_atomic(&path, &render_prd_coverage_json_for(&requirements))?;
+    write_text_atomic(
+        &dir.join("requirement-coverage-gate.json"),
+        &render_requirement_coverage_gate_json(&requirements),
+    )?;
     Ok(path)
 }
 
 fn render_prd_coverage_json() -> String {
     let requirements = prd_requirements();
+    render_prd_coverage_json_for(&requirements)
+}
+
+fn render_prd_coverage_json_for(requirements: &[PrdRequirement]) -> String {
     let implemented = requirements
         .iter()
         .filter(|item| item.status == "implemented")
@@ -7511,6 +7845,55 @@ fn render_prd_coverage_json() -> String {
         planned,
         missing_live,
         rows
+    )
+}
+
+fn render_requirement_coverage_gate_json(requirements: &[PrdRequirement]) -> String {
+    let implemented = requirements
+        .iter()
+        .filter(|item| item.status == "implemented")
+        .count();
+    let artifact_mvp = requirements
+        .iter()
+        .filter(|item| item.status == "artifact_mvp")
+        .count();
+    let covered = implemented + artifact_mvp;
+    let total = requirements.len();
+    let target_percent = 95.0;
+    let coverage_percent = if total == 0 {
+        0.0
+    } else {
+        covered as f64 * 100.0 / total as f64
+    };
+    let gate_passed = coverage_percent >= target_percent;
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.requirement-coverage-gate.v1\",\n",
+            "  \"source\": {},\n",
+            "  \"scope\": \"prd_requirement_artifact_coverage\",\n",
+            "  \"covered_statuses\": {},\n",
+            "  \"total_requirements\": {},\n",
+            "  \"implemented_count\": {},\n",
+            "  \"artifact_mvp_count\": {},\n",
+            "  \"covered_requirement_count\": {},\n",
+            "  \"coverage_percent\": {:.2},\n",
+            "  \"target_percent\": {:.2},\n",
+            "  \"gate_passed\": {},\n",
+            "  \"live_acceptance_all_passed\": false,\n",
+            "  \"evidence_refs\": {}\n",
+            "}}\n"
+        ),
+        json_string(PRD_SOURCE_PATH),
+        json_array(&["implemented", "artifact_mvp"]),
+        total,
+        implemented,
+        artifact_mvp,
+        covered,
+        coverage_percent,
+        target_percent,
+        gate_passed,
+        json_array(&["prd-coverage.json", "acceptance/acceptance-summary.json"])
     )
 }
 
@@ -7917,14 +8300,14 @@ fn prd_requirements() -> Vec<PrdRequirement> {
             "13",
             "Security boundaries, policy engine, dangerous-action approval.",
             "artifact_mvp",
-            "security-audit.json, security-findings.jsonl, threat-model.json, live local secret scan, and approval policy",
+            "security-audit.json, security-findings.jsonl, secret-leak-rate.json, secret-leak-gate.json, threat-model.json, live local secret scan, and approval policy",
         ),
         req(
             "P14-001",
             "14",
             "GUI mission, voxel, MCP, app, QA, token panels.",
             "artifact_mvp",
-            "static dashboard.html, gui-data.json, gui-manifest.json, and workspace-manifest.json",
+            "static dashboard.html, gui-data.json, worker-lanes.json, gui-manifest.json, and workspace-manifest.json",
         ),
         req(
             "P15-001",
@@ -7959,14 +8342,14 @@ fn prd_requirements() -> Vec<PrdRequirement> {
             "18",
             "Beta acceptance criteria.",
             "missing_live_implementation",
-            "acceptance-summary.json and beta-acceptance.json report remaining failed beta criteria",
+            "acceptance-summary.json and beta-acceptance.json report remaining partial/failed beta criteria",
         ),
         req(
             "P18-003",
             "18",
             "Production acceptance criteria.",
             "missing_live_implementation",
-            "acceptance-summary.json and production-acceptance.json report remaining failed production criteria",
+            "acceptance-summary.json and production-acceptance.json report remaining partial/failed production criteria",
         ),
         req(
             "P19-001",
@@ -8128,6 +8511,10 @@ pub fn start_goal_loop(config: &GoalRunConfig, cwd: &Path) -> Result<GoalRunResu
     write_text_atomic(
         &mission_dir.join("prd-coverage.json"),
         &render_prd_coverage_json(),
+    )?;
+    write_text_atomic(
+        &mission_dir.join("requirement-coverage-gate.json"),
+        &render_requirement_coverage_gate_json(&prd_requirements()),
     )?;
     append_text(&triwiki_dir.join("voxels.jsonl"), &voxels_jsonl)?;
     write_prd_coverage(cwd)?;
@@ -8867,6 +9254,8 @@ fn render_final_seal_json(
             "stage-scheduler.json written",
             "worktree-isolation.json written",
             "patch-envelope.json written",
+            "prd-coverage.json written",
+            "requirement-coverage-gate.json written",
             "final-seal.json written"
         ]),
         json_string(security_status),
@@ -8898,6 +9287,8 @@ fn render_final_seal_json(
             "worktree-isolation.json",
             "patch-envelope.json",
             "patch-gate-result.json",
+            "prd-coverage.json",
+            "requirement-coverage-gate.json",
             "final-seal.json"
         ]),
         voxels.len()
@@ -9034,6 +9425,83 @@ fn extract_json_string_field(input: &str, key: &str) -> Option<String> {
         return None;
     }
     Some(unescape_simple_json_string(&raw[1..raw.len() - 1]))
+}
+
+fn extract_json_string_array_field(input: &str, key: &str) -> Vec<String> {
+    let raw = match extract_json_array_field(input, key) {
+        Some(raw) => raw,
+        None => return Vec::new(),
+    };
+    let mut values = Vec::new();
+    let mut chars = raw[1..raw.len().saturating_sub(1)]
+        .char_indices()
+        .peekable();
+    while let Some((start, ch)) = chars.next() {
+        if ch != '"' {
+            continue;
+        }
+        let mut escaped = false;
+        for (offset, inner) in raw[start + 2..raw.len().saturating_sub(1)].char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if inner == '\\' {
+                escaped = true;
+                continue;
+            }
+            if inner == '"' {
+                let value_start = start + 2;
+                let value_end = value_start + offset;
+                values.push(unescape_simple_json_string(&raw[value_start..value_end]));
+                while let Some((next, _)) = chars.peek() {
+                    if *next <= value_end {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+    }
+    values
+}
+
+fn extract_json_array_field(input: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let start = input.find(&needle)? + needle.len();
+    let after_key = &input[start..];
+    let colon = after_key.find(':')?;
+    let array_offset = after_key[colon + 1..].find('[')?;
+    let value_start = start + colon + 1 + array_offset;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, ch) in input[value_start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '[' => depth += 1,
+            ']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(input[value_start..value_start + offset + 1].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn extract_json_raw_field(input: &str, key: &str) -> Option<String> {
@@ -9230,6 +9698,7 @@ mod tests {
             "patch-gate-result.json",
             "final-seal.json",
             "prd-coverage.json",
+            "requirement-coverage-gate.json",
         ] {
             assert!(
                 mission_dir.join(artifact).exists(),
@@ -9253,6 +9722,18 @@ mod tests {
         assert!(automation.contains("\"schema\": \"opensks.automation-loop.v1\""));
         assert!(automation.contains("self_improve"));
         assert!(automation.contains("\"live_self_improve_engine\": false"));
+
+        let coverage_gate = fs::read_to_string(mission_dir.join("requirement-coverage-gate.json"))
+            .expect("coverage gate");
+        assert!(coverage_gate.contains("\"schema\": \"opensks.requirement-coverage-gate.v1\""));
+        assert!(coverage_gate.contains("\"scope\": \"prd_requirement_artifact_coverage\""));
+        assert!(coverage_gate.contains("\"gate_passed\": true"));
+        assert!(coverage_gate.contains("\"prd-coverage.json\""));
+        assert!(coverage_gate.contains("\"acceptance/acceptance-summary.json\""));
+
+        let final_seal = fs::read_to_string(mission_dir.join("final-seal.json")).expect("seal");
+        assert!(final_seal.contains("prd-coverage.json"));
+        assert!(final_seal.contains("requirement-coverage-gate.json"));
     }
 
     #[test]
@@ -9329,6 +9810,22 @@ mod tests {
         assert!(coverage.contains("\"id\":\"P18-001\""));
         assert!(coverage.contains("\"missing_live_implementation\""));
         assert!(coverage.contains(PRD_SOURCE_PATH));
+
+        let gate = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("requirement-coverage-gate.json"),
+        )
+        .expect("coverage gate");
+        assert!(gate.contains("\"schema\": \"opensks.requirement-coverage-gate.v1\""));
+        assert!(gate.contains("\"scope\": \"prd_requirement_artifact_coverage\""));
+        assert!(gate.contains("\"total_requirements\": 65"));
+        assert!(gate.contains("\"implemented_count\": 2"));
+        assert!(gate.contains("\"artifact_mvp_count\": 60"));
+        assert!(gate.contains("\"covered_requirement_count\": 62"));
+        assert!(gate.contains("\"coverage_percent\": 95.38"));
+        assert!(gate.contains("\"target_percent\": 95.00"));
+        assert!(gate.contains("\"gate_passed\": true"));
+        assert!(gate.contains("\"live_acceptance_all_passed\": false"));
     }
 
     #[test]
@@ -9356,7 +9853,9 @@ mod tests {
         run_cli(["provider", "usage"], &root).expect("provider usage");
         run_cli(["provider", "adapter-check"], &root).expect("provider adapter-check");
         run_cli(["updater", "plan"], &root).expect("updater plan");
+        run_cli(["prd", "coverage"], &root).expect("prd coverage");
         run_cli(["acceptance", "audit"], &root).expect("acceptance audit");
+        run_cli(["naruto", "dashboard worker lane fixture"], &root).expect("naruto lane fixture");
         run_cli(["app"], &root).expect("app");
         run_cli(["scheduler", "run", "local QA"], &root).expect("scheduler run");
         run_cli(["worktree", "create", "worker one"], &root).expect("worktree create");
@@ -9376,8 +9875,12 @@ mod tests {
             "qa/qa-report.json",
             "qa/security-audit.json",
             "qa/security-findings.jsonl",
+            "qa/secret-leak-rate.json",
+            "qa/secret-leak-gate.json",
             "security/security-audit.json",
             "security/security-findings.jsonl",
+            "security/secret-leak-rate.json",
+            "security/secret-leak-gate.json",
             "security/threat-model.json",
             "design/design-qa-report.json",
             "design/design-surface-inventory.json",
@@ -9407,6 +9910,8 @@ mod tests {
             "updater/rollback-plan.json",
             "updater/update-boundary.json",
             "updater/updater-final-state.json",
+            "prd-coverage.json",
+            "requirement-coverage-gate.json",
             "acceptance/mvp-acceptance.json",
             "acceptance/beta-acceptance.json",
             "acceptance/production-acceptance.json",
@@ -9419,6 +9924,7 @@ mod tests {
             "app/macos-integration-manifest.json",
             "app/source-notes-ledger.json",
             "app/product-statement.json",
+            "app/worker-lanes.json",
             "app/gui-data.json",
             "app/dashboard.html",
         ] {
@@ -9465,13 +9971,54 @@ mod tests {
             fs::read_to_string(open.join("updater/rollback-plan.json")).expect("rollback");
         assert!(rollback.contains("\"schema\": \"opensks.rollback-plan.v1\""));
         assert!(rollback.contains("previous-stable"));
+        let coverage_gate =
+            fs::read_to_string(open.join("requirement-coverage-gate.json")).expect("coverage gate");
+        assert!(coverage_gate.contains("\"schema\": \"opensks.requirement-coverage-gate.v1\""));
+        assert!(coverage_gate.contains("\"covered_requirement_count\": 62"));
+        assert!(coverage_gate.contains("\"total_requirements\": 65"));
+        assert!(coverage_gate.contains("\"coverage_percent\": 95.38"));
+        assert!(coverage_gate.contains("\"gate_passed\": true"));
+        assert!(coverage_gate.contains("\"live_acceptance_all_passed\": false"));
         let acceptance = fs::read_to_string(open.join("acceptance/acceptance-summary.json"))
             .expect("acceptance");
         assert!(acceptance.contains("\"schema\": \"opensks.acceptance-summary.v1\""));
         assert!(acceptance.contains("\"goal_complete\": false"));
         let mvp = fs::read_to_string(open.join("acceptance/mvp-acceptance.json")).expect("mvp");
         assert!(mvp.contains("OpenRouter/OpenAI provider adapters work."));
+        assert!(mvp.contains("GUI shows mission status and worker lanes."));
+        assert!(mvp.contains("worker-lanes.json"));
         assert!(mvp.contains("\"status\":\"partial\""));
+        let production = fs::read_to_string(open.join("acceptance/production-acceptance.json"))
+            .expect("production");
+        assert!(production.contains("\"passed\":1"));
+        assert!(production.contains("\"partial\":5"));
+        assert!(production.contains("\"all_passed\": false"));
+        assert!(production.contains("requirement coverage >= 95%"));
+        assert!(production.contains(
+            "\"id\":\"prod-003\",\"criterion\":\"requirement coverage >= 95%\",\"status\":\"passed\""
+        ));
+        assert!(production.contains("requirement-coverage-gate.json"));
+        assert!(production.contains("secret leak artifact rate = 0"));
+        assert!(production.contains("secret-leak-rate.json"));
+        assert!(production.contains("secret-leak-gate.json"));
+        let qa_secret_rate =
+            fs::read_to_string(open.join("qa/secret-leak-rate.json")).expect("qa leak rate");
+        assert!(qa_secret_rate.contains("\"schema\": \"opensks.secret-leak-rate.v1\""));
+        assert!(qa_secret_rate.contains("\"scope\": \"current_workspace_release_scan\""));
+        assert!(qa_secret_rate.contains("\"gate_passed\": true"));
+        assert!(qa_secret_rate.contains("\"secret_leak_artifact_rate\": 0.000000"));
+        let qa_secret_gate =
+            fs::read_to_string(open.join("qa/secret-leak-gate.json")).expect("qa leak gate");
+        assert!(qa_secret_gate.contains("\"schema\": \"opensks.secret-leak-gate.v1\""));
+        assert!(qa_secret_gate.contains("\"status\": \"passed\""));
+        let security_secret_rate = fs::read_to_string(open.join("security/secret-leak-rate.json"))
+            .expect("security leak rate");
+        assert!(security_secret_rate.contains("\"schema\": \"opensks.secret-leak-rate.v1\""));
+        assert!(security_secret_rate.contains("\"gate_passed\": true"));
+        let security_secret_gate = fs::read_to_string(open.join("security/secret-leak-gate.json"))
+            .expect("security leak gate");
+        assert!(security_secret_gate.contains("\"schema\": \"opensks.secret-leak-gate.v1\""));
+        assert!(security_secret_gate.contains("\"status\": \"passed\""));
         let platform =
             fs::read_to_string(open.join("app/platform-manifest.json")).expect("platform");
         assert!(platform.contains("\"primary_platform\": \"macOS\""));
@@ -9590,10 +10137,58 @@ mod tests {
         assert!(dashboard.contains("OpenSKS Mission Control"));
         assert!(dashboard.contains("PRD Coverage"));
         assert!(dashboard.contains("Use Planes"));
+        assert!(dashboard.contains("Mission Status"));
+        assert!(dashboard.contains("Worker Lanes"));
+        assert!(dashboard.contains("patch-worker-1-planned"));
 
         let gui_data = fs::read_to_string(open.join("app/gui-data.json")).expect("gui data");
         assert!(gui_data.contains("\"schema\": \"opensks.gui-data.v1\""));
         assert!(gui_data.contains("\"sessions\""));
+        assert!(gui_data.contains("\"mission_status\""));
+        assert!(gui_data.contains("\"worker_lanes\""));
+        assert!(gui_data.contains("\"live_native_gui\": false"));
+        assert!(gui_data.contains("patch-worker-1-planned"));
+
+        let worker_lanes =
+            fs::read_to_string(open.join("app/worker-lanes.json")).expect("worker lanes");
+        assert!(worker_lanes.contains("\"schema\": \"opensks.worker-lanes.v1\""));
+        assert!(worker_lanes.contains("\"live_native_worker_lanes\": false"));
+        assert!(worker_lanes.contains("patch-worker-1-planned"));
+    }
+
+    #[test]
+    fn app_dashboard_renders_worker_lanes_from_goal_artifacts() {
+        let root = temp_workspace("app-worker-lanes");
+        let output =
+            run_cli(["naruto", "render dashboard worker lanes"], &root).expect("naruto mission");
+        let mission_line = output
+            .stdout
+            .lines()
+            .find(|line| line.starts_with("mission: "))
+            .expect("mission line");
+        let mission_id = mission_line.trim_start_matches("mission: ");
+
+        run_cli(["app"], &root).expect("app dashboard");
+        let open = root.join(OPEN_SKSDIR);
+        let worker_lanes =
+            fs::read_to_string(open.join("app/worker-lanes.json")).expect("worker lanes");
+        assert!(worker_lanes.contains("\"schema\": \"opensks.worker-lanes.v1\""));
+        assert!(worker_lanes.contains(mission_id));
+        assert!(worker_lanes.contains("patch-worker-1-planned"));
+        assert!(worker_lanes.contains("\"live_native_worker_lanes\": false"));
+
+        let gui_data = fs::read_to_string(open.join("app/gui-data.json")).expect("gui data");
+        assert!(gui_data.contains("\"mission_status\""));
+        assert!(gui_data.contains("\"worker_lanes\""));
+        assert!(gui_data.contains("\"live_worker_waterfall\":false"));
+        assert!(gui_data.contains(mission_id));
+        assert!(gui_data.contains("finalizer-planned"));
+
+        let dashboard = fs::read_to_string(open.join("app/dashboard.html")).expect("dashboard");
+        assert!(dashboard.contains("Mission Status"));
+        assert!(dashboard.contains("Worker Lanes"));
+        assert!(dashboard.contains(mission_id));
+        assert!(dashboard.contains("patch-worker-2-planned"));
     }
 
     #[test]
@@ -9753,6 +10348,37 @@ mod tests {
         let threat_model = fs::read_to_string(dir.join("threat-model.json")).expect("threat");
         assert!(threat_model.contains("mcp_tool_poisoning"));
         assert!(threat_model.contains("secret_values_never_written"));
+    }
+
+    #[test]
+    fn secret_leak_rate_gate_blocks_secret_patterns() {
+        let root = temp_workspace("secret-leak-rate");
+        let secret_assignment = ["OPENAI", "_API_KEY=fake-test-value"].concat();
+        fs::write(root.join("leaky.txt"), format!("{secret_assignment}\n"))
+            .expect("write leaky fixture");
+
+        run_cli(["security", "audit"], &root).expect("security audit");
+        let leak_rate = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("security")
+                .join("secret-leak-rate.json"),
+        )
+        .expect("secret leak rate");
+        assert!(leak_rate.contains("\"schema\": \"opensks.secret-leak-rate.v1\""));
+        assert!(leak_rate.contains("\"secret_finding_count\": 1"));
+        assert!(leak_rate.contains("\"gate_passed\": false"));
+        assert!(leak_rate.contains("leaky.txt"));
+
+        let leak_gate = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("security")
+                .join("secret-leak-gate.json"),
+        )
+        .expect("secret leak gate");
+        assert!(leak_gate.contains("\"schema\": \"opensks.secret-leak-gate.v1\""));
+        assert!(leak_gate.contains("\"status\": \"blocked\""));
+        assert!(leak_gate.contains("\"gate_passed\": false"));
+        assert!(leak_gate.contains("secret-leak-rate.json"));
     }
 
     #[test]
