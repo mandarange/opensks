@@ -1320,7 +1320,7 @@ fn run_acceptance_command(args: &[String], cwd: &Path) -> Result<CliOutput, Open
     fs::create_dir_all(&dir)?;
     let stamp = ClockStamp::now()?;
     let mvp = mvp_acceptance_items();
-    let beta = beta_acceptance_items();
+    let beta = beta_acceptance_items(cwd);
     let production = production_acceptance_items(cwd);
     write_text_atomic(
         &dir.join("mvp-acceptance.json"),
@@ -7214,7 +7214,19 @@ fn mvp_acceptance_items() -> Vec<AcceptanceItem> {
     ]
 }
 
-fn beta_acceptance_items() -> Vec<AcceptanceItem> {
+fn beta_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
+    let beta_004_passed = beta004_cache_layout_gate_passed(cwd);
+    let (beta_004_status, beta_004_evidence) = if beta_004_passed {
+        (
+            "passed",
+            "cache-layout-improvement.json proves local Voxel TriWiki cache-layout improvement with layout_gate_passed=true, voxel_triwiki_segment_present=true, baseline_available=true, and local_warm_prefix_hit_percent >= target_hit_percent; provider/runtime cache-layout telemetry remains explicitly unavailable.",
+        )
+    } else {
+        (
+            "partial",
+            "beta-004 requires cache-layout-improvement.json with schema opensks.cache-layout-improvement.v1, scope voxel_triwiki_cache_layout, strategy stable_prefix_dynamic_suffix, layout_gate_passed=true, baseline_available=true, voxel_triwiki_segment_present=true, local_warm_prefix_hit_percent >= target_hit_percent, and provider/runtime metrics explicitly unavailable.",
+        )
+    };
     vec![
         acceptance_item(
             "beta-001",
@@ -7237,8 +7249,8 @@ fn beta_acceptance_items() -> Vec<AcceptanceItem> {
         acceptance_item(
             "beta-004",
             "Voxel TriWiki improves cache layout.",
-            "partial",
-            "cache warm writes cache-layout-improvement.json and includes deterministic Voxel TriWiki context in the local stable prefix when voxel index exists; live provider/runtime cache-layout improvement remains unverified.",
+            beta_004_status,
+            beta_004_evidence,
         ),
         acceptance_item(
             "beta-005",
@@ -7253,6 +7265,78 @@ fn beta_acceptance_items() -> Vec<AcceptanceItem> {
             "collaboration-preflight.json joins roster, role, provider, auth, adapter, disagreement, and quorum readiness; live multi-provider worker collaboration is not executed.",
         ),
     ]
+}
+
+fn beta004_cache_layout_gate_passed(cwd: &Path) -> bool {
+    let Ok(layout) = fs::read_to_string(
+        cwd.join(OPEN_SKSDIR)
+            .join("cache")
+            .join("cache-layout-improvement.json"),
+    ) else {
+        return false;
+    };
+    let Some(local_hit_percent) =
+        extract_json_top_level_float_field(&layout, "local_warm_prefix_hit_percent")
+    else {
+        return false;
+    };
+    let Some(target_hit_percent) =
+        extract_json_top_level_float_field(&layout, "target_hit_percent")
+    else {
+        return false;
+    };
+    let Some(stable_segment_count) =
+        extract_json_top_level_number_field(&layout, "stable_segment_count")
+    else {
+        return false;
+    };
+    let Some(dynamic_segment_count) =
+        extract_json_top_level_number_field(&layout, "dynamic_segment_count")
+    else {
+        return false;
+    };
+    let Some(total_segment_count) =
+        extract_json_top_level_number_field(&layout, "total_segment_count")
+    else {
+        return false;
+    };
+    let Some(stable_prefix_bytes) =
+        extract_json_top_level_number_field(&layout, "stable_prefix_bytes")
+    else {
+        return false;
+    };
+    let Some(dynamic_suffix_bytes) =
+        extract_json_top_level_number_field(&layout, "dynamic_suffix_bytes")
+    else {
+        return false;
+    };
+    let Some(matched_stable_prefix_bytes) =
+        extract_json_top_level_number_field(&layout, "matched_stable_prefix_bytes")
+    else {
+        return false;
+    };
+
+    json_top_level_string_field_equals(&layout, "schema", "opensks.cache-layout-improvement.v1")
+        && json_top_level_string_field_equals(&layout, "scope", "voxel_triwiki_cache_layout")
+        && json_top_level_string_field_equals(&layout, "strategy", "stable_prefix_dynamic_suffix")
+        && json_top_level_string_field_equals(
+            &layout,
+            "status",
+            "local_cache_layout_improved_provider_unverified",
+        )
+        && json_top_level_bool_field_equals(&layout, "layout_gate_passed", true)
+        && json_top_level_bool_field_equals(&layout, "baseline_available", true)
+        && json_top_level_bool_field_equals(&layout, "voxel_triwiki_segment_present", true)
+        && json_top_level_bool_field_equals(&layout, "provider_metrics_available", false)
+        && json_top_level_bool_field_equals(&layout, "live_provider_cache_metrics", false)
+        && stable_segment_count > 0
+        && dynamic_segment_count > 0
+        && total_segment_count == stable_segment_count + dynamic_segment_count
+        && stable_prefix_bytes > 0
+        && dynamic_suffix_bytes > 0
+        && matched_stable_prefix_bytes == stable_prefix_bytes
+        && target_hit_percent >= 95.0
+        && local_hit_percent >= target_hit_percent
 }
 
 fn production_acceptance_items(cwd: &Path) -> Vec<AcceptanceItem> {
@@ -7484,6 +7568,165 @@ fn secret_leak_surface_gate_passed(cwd: &Path, surface: &str) -> bool {
         && json_bool_field_equals(&gate, "live_external_production_telemetry", false)
         && json_bool_field_equals(&history, "live_external_production_telemetry", false)
         && json_string_field_equals(&gate, "status", "passed")
+}
+
+fn json_top_level_string_field_equals(input: &str, key: &str, expected: &str) -> bool {
+    extract_json_top_level_string_field(input, key).as_deref() == Some(expected)
+}
+
+fn json_top_level_bool_field_equals(input: &str, key: &str, expected: bool) -> bool {
+    extract_json_top_level_raw_field(input, key).as_deref()
+        == Some(if expected { "true" } else { "false" })
+}
+
+fn extract_json_top_level_number_field(input: &str, key: &str) -> Option<usize> {
+    extract_json_top_level_raw_field(input, key)?.parse().ok()
+}
+
+fn extract_json_top_level_float_field(input: &str, key: &str) -> Option<f64> {
+    extract_json_top_level_raw_field(input, key)?.parse().ok()
+}
+
+fn extract_json_top_level_string_field(input: &str, key: &str) -> Option<String> {
+    let raw = extract_json_top_level_raw_field(input, key)?;
+    if raw.len() < 2 || !raw.starts_with('"') || !raw.ends_with('"') {
+        return None;
+    }
+    Some(unescape_simple_json_string(&raw[1..raw.len() - 1]))
+}
+
+fn extract_json_top_level_raw_field(input: &str, key: &str) -> Option<String> {
+    let values = extract_json_top_level_raw_fields(input, key);
+    if values.len() == 1 {
+        values.into_iter().next()
+    } else {
+        None
+    }
+}
+
+fn extract_json_top_level_raw_fields(input: &str, key: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let trimmed_start = input
+        .char_indices()
+        .find(|(_, ch)| !ch.is_whitespace())
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    if !input[trimmed_start..].starts_with('{') {
+        return values;
+    }
+
+    let mut depth = 0usize;
+    let mut index = trimmed_start;
+    while index < input.len() {
+        let Some((_, ch)) = input[index..].char_indices().next() else {
+            break;
+        };
+        match ch {
+            '"' => {
+                let Some(string_end) = json_string_token_end(input, index) else {
+                    return Vec::new();
+                };
+                if depth == 1 {
+                    let token = unescape_simple_json_string(&input[index + 1..string_end - 1]);
+                    let after_key = skip_json_whitespace(input, string_end);
+                    if token == key && input[after_key..].starts_with(':') {
+                        let value_start = skip_json_whitespace(input, after_key + 1);
+                        if let Some(value_end) = json_value_end(input, value_start) {
+                            values.push(input[value_start..value_end].trim().to_string());
+                            index = value_end;
+                            continue;
+                        }
+                        return Vec::new();
+                    }
+                }
+                index = string_end;
+                continue;
+            }
+            '{' | '[' => depth += 1,
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        index += ch.len_utf8();
+    }
+    values
+}
+
+fn json_string_token_end(input: &str, start: usize) -> Option<usize> {
+    let mut escaped = false;
+    for (offset, ch) in input[start + 1..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            return Some(start + 1 + offset + 1);
+        }
+    }
+    None
+}
+
+fn json_value_end(input: &str, start: usize) -> Option<usize> {
+    let (_, first) = input[start..].char_indices().next()?;
+    if first == '"' {
+        return json_string_token_end(input, start);
+    }
+    if first == '{' || first == '[' {
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (offset, ch) in input[start..].char_indices() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match ch {
+                '"' => in_string = true,
+                '{' | '[' => depth += 1,
+                '}' | ']' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(start + offset + ch.len_utf8());
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
+    for (offset, ch) in input[start..].char_indices() {
+        if ch == ',' || ch == '}' || ch == ']' || ch.is_whitespace() {
+            return Some(start + offset);
+        }
+    }
+    Some(input.len())
+}
+
+fn skip_json_whitespace(input: &str, mut index: usize) -> usize {
+    while index < input.len() {
+        let Some((_, ch)) = input[index..].char_indices().next() else {
+            break;
+        };
+        if !ch.is_whitespace() {
+            break;
+        }
+        index += ch.len_utf8();
+    }
+    index
 }
 
 fn json_string_field_equals(input: &str, key: &str, expected: &str) -> bool {
@@ -10949,6 +11192,281 @@ mod tests {
     }
 
     #[test]
+    fn beta004_requires_artifact_bound_cache_layout_gate() {
+        let root = temp_workspace("beta004-cache-layout");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("README.md"),
+            "Stable Voxel TriWiki cache fixture.\n",
+        )
+        .expect("readme");
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn dynamic_context() -> &'static str { \"dynamic\" }\n",
+        )
+        .expect("source");
+
+        run_cli(["acceptance", "audit"], &root).expect("acceptance without cache");
+        let beta_without_cache = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta without cache");
+        assert!(beta_without_cache.contains(
+            "\"id\":\"beta-004\",\"criterion\":\"Voxel TriWiki improves cache layout.\",\"status\":\"partial\""
+        ));
+
+        run_cli(["voxel", "index"], &root).expect("voxel index");
+        run_cli(["cache", "warm"], &root).expect("first cache warm");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance first warm");
+        let beta_without_baseline = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta without baseline");
+        assert!(beta_without_baseline.contains(
+            "\"id\":\"beta-004\",\"criterion\":\"Voxel TriWiki improves cache layout.\",\"status\":\"partial\""
+        ));
+
+        run_cli(["cache", "warm"], &root).expect("second cache warm");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance with layout");
+        let beta_with_layout = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta with layout");
+        assert!(beta_with_layout.contains(
+            "\"id\":\"beta-004\",\"criterion\":\"Voxel TriWiki improves cache layout.\",\"status\":\"passed\""
+        ));
+        assert!(beta_with_layout.contains("layout_gate_passed=true"));
+        assert!(beta_with_layout.contains("local_warm_prefix_hit_percent >= target_hit_percent"));
+        assert!(
+            beta_with_layout
+                .contains("provider/runtime cache-layout telemetry remains explicitly unavailable")
+        );
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings");
+        assert!(!findings.contains("\"id\":\"beta-004\""));
+    }
+
+    #[test]
+    fn beta004_stays_partial_for_malformed_or_incomplete_cache_layout_artifacts() {
+        let root = temp_workspace("beta004-malformed-layout");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("README.md"), "Stable cache fixture.\n").expect("readme");
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn dynamic_context() -> &'static str { \"dynamic\" }\n",
+        )
+        .expect("source");
+
+        run_cli(["cache", "warm"], &root).expect("first cache warm without voxel");
+        run_cli(["cache", "warm"], &root).expect("second cache warm without voxel");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance no voxel");
+        let beta_no_voxel = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta no voxel");
+        assert!(beta_no_voxel.contains(
+            "\"id\":\"beta-004\",\"criterion\":\"Voxel TriWiki improves cache layout.\",\"status\":\"partial\""
+        ));
+
+        let cache_dir = root.join(OPEN_SKSDIR).join("cache");
+        fs::write(cache_dir.join("cache-layout-improvement.json"), "{}\n")
+            .expect("malformed layout");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance malformed layout");
+        let beta_malformed = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta malformed");
+        assert!(beta_malformed.contains(
+            "\"id\":\"beta-004\",\"criterion\":\"Voxel TriWiki improves cache layout.\",\"status\":\"partial\""
+        ));
+
+        fs::write(
+            cache_dir.join("cache-layout-improvement.json"),
+            concat!(
+                "{\n",
+                "  \"schema\": \"opensks.cache-layout-improvement.v1\",\n",
+                "  \"scope\": \"voxel_triwiki_cache_layout\",\n",
+                "  \"strategy\": \"stable_prefix_dynamic_suffix\",\n",
+                "  \"layout_gate_passed\": false,\n",
+                "  \"status\": \"local_cache_layout_target_missed_provider_unverified\",\n",
+                "  \"baseline_available\": true,\n",
+                "  \"voxel_triwiki_segment_present\": true,\n",
+                "  \"stable_segment_count\": 2,\n",
+                "  \"dynamic_segment_count\": 1,\n",
+                "  \"total_segment_count\": 3,\n",
+                "  \"stable_prefix_bytes\": 100,\n",
+                "  \"dynamic_suffix_bytes\": 25,\n",
+                "  \"matched_stable_prefix_bytes\": 99,\n",
+                "  \"local_warm_prefix_hit_percent\": 94.99,\n",
+                "  \"target_hit_percent\": 95.00,\n",
+                "  \"provider_metrics_available\": false,\n",
+                "  \"live_provider_cache_metrics\": false\n",
+                "}\n"
+            ),
+        )
+        .expect("low hit layout");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance low hit layout");
+        let beta_low_hit = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta low hit");
+        assert!(beta_low_hit.contains(
+            "\"id\":\"beta-004\",\"criterion\":\"Voxel TriWiki improves cache layout.\",\"status\":\"partial\""
+        ));
+
+        fs::write(
+            cache_dir.join("cache-layout-improvement.json"),
+            concat!(
+                "{\n",
+                "  \"observed\": {\n",
+                "    \"schema\": \"opensks.cache-layout-improvement.v1\",\n",
+                "    \"scope\": \"voxel_triwiki_cache_layout\",\n",
+                "    \"strategy\": \"stable_prefix_dynamic_suffix\",\n",
+                "    \"layout_gate_passed\": true,\n",
+                "    \"status\": \"local_cache_layout_improved_provider_unverified\",\n",
+                "    \"baseline_available\": true,\n",
+                "    \"voxel_triwiki_segment_present\": true,\n",
+                "    \"stable_segment_count\": 2,\n",
+                "    \"dynamic_segment_count\": 1,\n",
+                "    \"total_segment_count\": 3,\n",
+                "    \"stable_prefix_bytes\": 100,\n",
+                "    \"dynamic_suffix_bytes\": 25,\n",
+                "    \"matched_stable_prefix_bytes\": 100,\n",
+                "    \"local_warm_prefix_hit_percent\": 100.00,\n",
+                "    \"target_hit_percent\": 95.00,\n",
+                "    \"provider_metrics_available\": false,\n",
+                "    \"live_provider_cache_metrics\": false\n",
+                "  },\n",
+                "  \"schema\": \"opensks.cache-layout-improvement.v1\",\n",
+                "  \"scope\": \"voxel_triwiki_cache_layout\",\n",
+                "  \"strategy\": \"stable_prefix_dynamic_suffix\",\n",
+                "  \"layout_gate_passed\": false,\n",
+                "  \"status\": \"local_cache_layout_target_missed_provider_unverified\",\n",
+                "  \"baseline_available\": false,\n",
+                "  \"voxel_triwiki_segment_present\": false,\n",
+                "  \"stable_segment_count\": 0,\n",
+                "  \"dynamic_segment_count\": 1,\n",
+                "  \"total_segment_count\": 1,\n",
+                "  \"stable_prefix_bytes\": 0,\n",
+                "  \"dynamic_suffix_bytes\": 25,\n",
+                "  \"matched_stable_prefix_bytes\": 0,\n",
+                "  \"local_warm_prefix_hit_percent\": 0.00,\n",
+                "  \"target_hit_percent\": 95.00,\n",
+                "  \"provider_metrics_available\": false,\n",
+                "  \"live_provider_cache_metrics\": false\n",
+                "}\n"
+            ),
+        )
+        .expect("nested spoof layout");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance nested spoof layout");
+        let beta_nested_spoof = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta nested spoof");
+        assert!(beta_nested_spoof.contains(
+            "\"id\":\"beta-004\",\"criterion\":\"Voxel TriWiki improves cache layout.\",\"status\":\"partial\""
+        ));
+
+        fs::write(
+            cache_dir.join("cache-layout-improvement.json"),
+            concat!(
+                "{\n",
+                "  \"schema\": \"opensks.cache-layout-improvement.v1\",\n",
+                "  \"scope\": \"voxel_triwiki_cache_layout\",\n",
+                "  \"strategy\": \"stable_prefix_dynamic_suffix\",\n",
+                "  \"layout_gate_passed\": true,\n",
+                "  \"layout_gate_passed\": false,\n",
+                "  \"status\": \"local_cache_layout_improved_provider_unverified\",\n",
+                "  \"baseline_available\": true,\n",
+                "  \"voxel_triwiki_segment_present\": true,\n",
+                "  \"stable_segment_count\": 2,\n",
+                "  \"dynamic_segment_count\": 1,\n",
+                "  \"total_segment_count\": 3,\n",
+                "  \"stable_prefix_bytes\": 100,\n",
+                "  \"dynamic_suffix_bytes\": 25,\n",
+                "  \"matched_stable_prefix_bytes\": 100,\n",
+                "  \"local_warm_prefix_hit_percent\": 100.00,\n",
+                "  \"target_hit_percent\": 95.00,\n",
+                "  \"provider_metrics_available\": false,\n",
+                "  \"live_provider_cache_metrics\": false\n",
+                "}\n"
+            ),
+        )
+        .expect("duplicate key layout");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance duplicate layout");
+        let beta_duplicate = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta duplicate");
+        assert!(beta_duplicate.contains(
+            "\"id\":\"beta-004\",\"criterion\":\"Voxel TriWiki improves cache layout.\",\"status\":\"partial\""
+        ));
+
+        fs::write(
+            cache_dir.join("cache-layout-improvement.json"),
+            concat!(
+                "{\n",
+                "  \"schema\": \"opensks.cache-layout-improvement.v1\",\n",
+                "  \"scope\": \"voxel_triwiki_cache_layout\",\n",
+                "  \"strategy\": \"stable_prefix_dynamic_suffix\",\n",
+                "  \"layout_gate_passed\": true,\n",
+                "  \"status\": \"local_cache_layout_improved_provider_unverified\",\n",
+                "  \"baseline_available\": true,\n",
+                "  \"voxel_triwiki_segment_present\": true,\n",
+                "  \"stable_segment_count\": 2,\n",
+                "  \"dynamic_segment_count\": 1,\n",
+                "  \"total_segment_count\": 3,\n",
+                "  \"stable_prefix_bytes\": 100,\n",
+                "  \"matched_stable_prefix_bytes\": 100,\n",
+                "  \"local_warm_prefix_hit_percent\": 100.00,\n",
+                "  \"target_hit_percent\": 95.00,\n",
+                "  \"provider_metrics_available\": false,\n",
+                "  \"live_provider_cache_metrics\": false\n",
+                "}\n"
+            ),
+        )
+        .expect("missing dynamic suffix layout");
+        run_cli(["acceptance", "audit"], &root).expect("acceptance missing dynamic suffix");
+        let beta_missing_dynamic_suffix = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("beta-acceptance.json"),
+        )
+        .expect("beta missing dynamic suffix");
+        assert!(beta_missing_dynamic_suffix.contains(
+            "\"id\":\"beta-004\",\"criterion\":\"Voxel TriWiki improves cache layout.\",\"status\":\"partial\""
+        ));
+
+        let findings = fs::read_to_string(
+            root.join(OPEN_SKSDIR)
+                .join("acceptance")
+                .join("acceptance-findings.jsonl"),
+        )
+        .expect("findings");
+        assert!(findings.contains("\"id\":\"beta-004\""));
+    }
+
+    #[test]
     fn cli_v3_plane_commands_write_named_artifacts() {
         let root = temp_workspace("cli-v3");
         fs::write(
@@ -11122,9 +11640,20 @@ mod tests {
         let acceptance = fs::read_to_string(open.join("acceptance/acceptance-summary.json"))
             .expect("acceptance");
         assert!(acceptance.contains("\"schema\": \"opensks.acceptance-summary.v1\""));
-        assert!(acceptance.contains("\"passed\":14"));
-        assert!(acceptance.contains("\"partial\":9"));
+        assert!(acceptance.contains("\"passed\":15"));
+        assert!(acceptance.contains("\"partial\":8"));
         assert!(acceptance.contains("\"goal_complete\": false"));
+        let beta = fs::read_to_string(open.join("acceptance/beta-acceptance.json")).expect("beta");
+        assert!(beta.contains("\"passed\":2"));
+        assert!(beta.contains("\"partial\":4"));
+        assert!(beta.contains(
+            "\"id\":\"beta-004\",\"criterion\":\"Voxel TriWiki improves cache layout.\",\"status\":\"passed\""
+        ));
+        assert!(beta.contains("cache-layout-improvement.json"));
+        assert!(beta.contains("layout_gate_passed=true"));
+        assert!(
+            beta.contains("provider/runtime cache-layout telemetry remains explicitly unavailable")
+        );
         let mvp = fs::read_to_string(open.join("acceptance/mvp-acceptance.json")).expect("mvp");
         assert!(mvp.contains("OpenRouter/OpenAI provider adapters work."));
         assert!(mvp.contains("GUI shows mission status and worker lanes."));
@@ -11167,6 +11696,7 @@ mod tests {
         assert!(production.contains("live H-proof route gate"));
         let findings = fs::read_to_string(open.join("acceptance/acceptance-findings.jsonl"))
             .expect("findings");
+        assert!(!findings.contains("\"id\":\"beta-004\""));
         assert!(!findings.contains("\"id\":\"prod-001\""));
         assert!(!findings.contains("\"id\":\"prod-002\""));
         assert!(!findings.contains("\"id\":\"prod-005\""));

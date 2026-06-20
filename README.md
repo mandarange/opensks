@@ -80,11 +80,20 @@ explicit local release-history zero-leak denominator. Live external production
 telemetry remains false. `cache warm`
 hashes local cache segments and writes `cache-hit-report.json` plus
 `cache-layout-improvement.json`, comparing the current stable prefix with the
-previous warm snapshot. `prod-001` passes only for that local stable-prefix
-artifact evidence when the local warm-prefix hit is at least 95%; provider
-cached-token counters are still marked not connected. The cache-layout gate only
-passes for the Voxel TriWiki scope when `.opensks/triwiki/voxels.jsonl` is
-present in the stable prefix.
+previous warm snapshot. The beta-004 "Voxel TriWiki improves cache layout"
+slice is bound only to the local `.opensks/cache/cache-layout-improvement.json`
+artifact with schema `opensks.cache-layout-improvement.v1`, scope
+`voxel_triwiki_cache_layout`, and strategy
+`stable_prefix_dynamic_suffix`. Its local gate requires
+`layout_gate_passed=true`, `baseline_available=true`,
+`voxel_triwiki_segment_present=true`, and
+`local_warm_prefix_hit_percent >= target_hit_percent`; it also records
+`provider_metrics_available=false` and `live_provider_cache_metrics=false`.
+`prod-001` passes only for that local stable-prefix artifact evidence when the
+local warm-prefix hit is at least 95%; provider/runtime cache-layout
+improvement and provider cached-token counters remain unverified. The
+cache-layout gate only passes for the Voxel TriWiki scope when
+`.opensks/triwiki/voxels.jsonl` is present in the stable prefix.
 `bench` records timed local runtime checks plus explicit multi-LLM roster,
 role-assignment, disagreement, quorum, and collaboration preflight artifacts
 with hidden fallback disabled. `auth` discovers configured provider environment variables without
