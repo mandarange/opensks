@@ -1,10 +1,13 @@
 # OpenSKS Runtime Truth Matrix
 
-Baseline recorded before this sprint:
+Baseline sealed for the conversation-first directive (full verified audit:
+[baselines/ad186549-audit.md](baselines/ad186549-audit.md)):
 
 | Item | Value |
 |---|---|
-| OpenSKS baseline commit | `9a96a61121147a9fff2c7340089ee2e681ab8fea` |
+| OpenSKS baseline commit | `ad18654935d351df6cff103f763eaa9b8983ff11` (`Build OpenSKS graph engine foundations`) |
+| Previous-sprint baseline | `9a96a61121147a9fff2c7340089ee2e681ab8fea` |
+| CI evidence at baseline | No combined status (`total_count: 0`). Checks API: `core` = **failure** (Clippy step), `integration`/`security`/`macos-app` = success, `performance` did not run. "workflow exists" is **not** "workflow passed". |
 | Work order SHA-256 | `abfc8d3d1cf323e3791b16cd966dae5f383477e04b614dfa6c4a9ce462d9f0fe` |
 | Product language | English identifiers, schemas, logs, and UI copy |
 
@@ -33,6 +36,24 @@ Baseline recorded before this sprint:
 | Git Studio/outbox | PR-017 foundation | `opensks-git` has an outbox model that blocks secret-looking staged paths, keeps protected branch push in `awaiting_approval`, prevents duplicate remote writes by idempotency key, and proves a dry-run dispatch callback is not called without matching approval. The daemon can emit the same dry-run dispatch report. No live commit/push worker or external write executor consumes approvals yet. Swift Git Studio remains future work. |
 | Retention/release hardening | PR-018 foundation | `opensks-retention` creates safe GC plans that protect active runs and shared records, plus release proof that stays NotVerified unless signing/notarization/fresh install/fresh clone/upgrade are all true. Real packaging/signing/notarization remain future work. |
 | Full live engine completion | Roadmap | Live provider-backed workers, live remote provider worker bus, persistent background scheduler subscriptions, real approval leases/external side-effect enforcement, full graph editor, full AST CodeGraph, hook inspector, image providers, Git Studio, GC execution, and signed release packaging must not be claimed as complete. |
+
+## Conversation-First Directive — Target Surfaces (absent at baseline)
+
+These surfaces are required by the conversation-first directive and do **not**
+exist at baseline `ad18654`. They must not be claimed as present. See
+[baselines/ad186549-audit.md](baselines/ad186549-audit.md) for evidence.
+
+| Target surface | Status | Note |
+|---|---|---|
+| Project / conversation / message domain | Absent | No `Project`/`Conversation`/`Message` type; planned owner `opensks-conversation`. |
+| Editable code workspace | Absent | `EditorView` is a read-only viewer; no save/undo/conflict. |
+| Explicit streaming protocol (terminal frames) | Absent | Completion inferred from a 150ms quiet window; `subscribe_events` is a ≤5s polling tail. |
+| Live per-node pipeline projection bound to a conversation | Absent | Execution envelope lacks conversation/turn/node identity; run is synchronous. |
+| Real async worker + enforced pause/cancel/steer | Absent | Deterministic stub worker; control events are write-only audit records. |
+| Git Studio (status/branch/commit/push) + durable outbox | Absent | Only isolation/patch primitives; in-memory no-op outbox, no real push executor. |
+| Safe-write file service (containment/TOCTOU/symlink) | Absent | Only an atomic-rename helper; ~215 raw write sites in `src/lib.rs`. |
+| Portable design engine + `.opensks/design-systems/` plane | Absent | No design package/registry/compiler/audit; shared plane not created. |
+| Canonical logo in the in-window UI | Absent | SVG ships only as the macOS app icon; the in-app mark is the synthetic `AgentMark`. |
 
 ## Migration Note
 

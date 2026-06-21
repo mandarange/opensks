@@ -12,6 +12,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Architecture and path guard
+        run: bash scripts/check-architecture-ownership.sh
       - name: Cargo metadata
         run: cargo metadata --format-version 1 --no-deps
       - name: Format
@@ -26,10 +28,3 @@ jobs:
         run: git diff --exit-code -- schemas
       - name: Dependency audit placeholder
         run: cargo tree --workspace --locked >/tmp/opensks-cargo-tree.txt
-      - name: Architecture and path guard
-        run: |
-          test "$(wc -l < src/lib.rs)" -le 20550
-          BAD_DEV_PATH="/Users/"'weklem'
-          BAD_PRD_SLUG="opensks_""prd_v3"
-          ! grep -R "$BAD_DEV_PATH\\|[P]RD_SOURCE_PATH\\|$BAD_PRD_SLUG" Cargo.toml src docs README.md .github crates schemas
-          ! grep -n '^\\.opensks/$' .gitignore
