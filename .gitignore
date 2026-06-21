@@ -16,6 +16,7 @@ target
 # OpenSKS local runtime artifacts
 .opensks/
 .sneakoscope/
+.omc/
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

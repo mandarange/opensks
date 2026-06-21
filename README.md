@@ -8,6 +8,7 @@ progress ledger, and a final seal.
 ## Usage
 
 ```bash
+cargo run
 cargo run -- goal "Implement a bounded goal loop with Voxel TriWiki"
 cargo run -- goal "Implement MCP browser QA" --mode naruto --max-waves 2
 cargo run -- goal status <mission-id>
@@ -40,6 +41,24 @@ cargo run -- worktree create "worker lane one"
 cargo run -- patch propose "describe a safe patch"
 cargo run -- prd coverage
 ```
+
+Running `opensks` with no arguments, including double-clicking the built
+`target/debug/opensks` file on macOS, writes `.opensks/macos/OpenSKS.app` and
+opens that native app bundle. The app is **OpenSKS Studio**, a native macOS
+SwiftUI desktop shell (no Objective-C): an autonomous-coding IDE with an icon
+rail, a real file explorer, a syntax-highlighted code viewer, a right-hand
+agent Composer (objective → mode → run → live lanes), a live CLI output drawer,
+and a persistent honest proof status bar. The Swift sources live under
+`swift/Sources/` and are embedded in the Rust binary and compiled with `swiftc`
+when the bundle is generated. The Swift shell talks to the Rust core over a
+single boundary: `opensks app-data <workspace>` emits the dashboard as JSON, and
+action buttons shell the embedded `opensks-cli` for verbs like `goal`,
+`acceptance audit`, and `provider adapter-check`. Secrets are never read into the
+UI (provider readiness is a count + ready dot only), and completion language is
+gated so the UI never claims a goal is complete that acceptance has not verified.
+`.opensks/app/dashboard.html` remains a generated data artifact, not the launched
+UI. The bundle uses `assets/opensks-logo.svg` to generate `AppIcon.icns`. Use
+`opensks --help` for the CLI command list without launching the app.
 
 The CLI writes runtime artifacts under:
 

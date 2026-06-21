@@ -33,6 +33,7 @@ const DESIGN_SCREENSHOT_HEIGHT: usize = 32;
 const DESIGN_SCREENSHOT_MODE: &str = "deterministic_local_raster_artifact";
 const DESIGN_SCREENSHOT_RENDERER: &str = "opensks_local_source_rasterizer_v1";
 const PROVIDER_KEYCHAIN_SERVICE: &str = "opensks-provider-credentials";
+const OPEN_SKS_LOGO_SVG: &str = include_str!("../assets/opensks-logo.svg");
 const PRD_SOURCE_PATH: &str =
     "/Users/weklem/Desktop/opensks_prd_v3_goal_loop_mcp_computer_use_voxel_triwiki.md";
 
@@ -333,6 +334,27 @@ struct GuiSnapshot {
 }
 
 #[derive(Debug, Clone)]
+struct NativeAppDashboard {
+    workspace: PathBuf,
+    workspace_label: String,
+    app_bundle: PathBuf,
+    artifact_dir: PathBuf,
+    dashboard_html: PathBuf,
+    cli_path: PathBuf,
+    acceptance: NativeAcceptanceStatus,
+    gui: GuiSnapshot,
+}
+
+#[derive(Debug, Clone)]
+struct NativeAcceptanceStatus {
+    total: usize,
+    passed: usize,
+    partial: usize,
+    failed: usize,
+    goal_complete: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
 struct WorkerLaneSnapshot {
     mission_id: String,
     status: String,
@@ -592,7 +614,10 @@ where
     S: Into<String>,
 {
     let args: Vec<String> = args.into_iter().map(Into::into).collect();
-    if args.is_empty() || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+    if args.is_empty() {
+        return run_default_launch_command(cwd);
+    }
+    if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
         return Ok(CliOutput {
             stdout: usage().to_string(),
         });
@@ -617,6 +642,7 @@ where
         "updater" => run_updater_command(&args[1..], cwd),
         "acceptance" => run_acceptance_command(&args[1..], cwd),
         "app" => run_app_command(&args[1..], cwd),
+        "app-data" => run_app_data_command(&args[1..], cwd),
         "scheduler" => run_scheduler_command(&args[1..], cwd),
         "worktree" => run_worktree_command(&args[1..], cwd),
         "patch" => run_patch_command(&args[1..], cwd),
@@ -1556,6 +1582,105 @@ fn run_app_command(_args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksErr
             dir.join("dashboard.html").display()
         ),
     })
+}
+
+fn run_default_launch_command(cwd: &Path) -> Result<CliOutput, OpenSksError> {
+    let output = run_app_command(&[], cwd)?;
+    let app_bundle = create_native_app_bundle(cwd)?;
+    let dashboard = cwd.join(OPEN_SKSDIR).join("app").join("dashboard.html");
+    Ok(CliOutput {
+        stdout: format!(
+            "created OpenSKS macOS app launcher\n{}\napp: {}\ndashboard_data: {}\nnext: double-click OpenSKS.app or run `open {}`\n",
+            output.stdout,
+            app_bundle.display(),
+            dashboard.display(),
+            app_bundle.display()
+        ),
+    })
+}
+
+fn run_app_data_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
+    let workspace = args
+        .first()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cwd.to_path_buf());
+    let dashboard = native_app_dashboard(&workspace)?;
+    Ok(CliOutput {
+        stdout: render_app_data_json(&dashboard),
+    })
+}
+
+/// Emit the SwiftUI app's domain data as JSON. This is the only Rust→Swift data
+/// boundary; the app shells `opensks-cli app-data <workspace>` and decodes it.
+fn render_app_data_json(d: &NativeAppDashboard) -> String {
+    let g = &d.gui;
+    let a = &d.acceptance;
+    let goal_complete = match a.goal_complete {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "null",
+    };
+    let lanes = render_worker_lane_items_json(&g.worker_lanes);
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"opensks.app-data.v1\",\n",
+            "  \"workspace\": {workspace},\n",
+            "  \"workspace_label\": {workspace_label},\n",
+            "  \"app_bundle\": {app_bundle},\n",
+            "  \"artifact_dir\": {artifact_dir},\n",
+            "  \"dashboard_html\": {dashboard_html},\n",
+            "  \"missions_dir\": {missions_dir},\n",
+            "  \"cli_path\": {cli_path},\n",
+            "  \"acceptance\": {{\"total\": {total}, \"passed\": {passed}, ",
+            "\"partial\": {partial}, \"failed\": {failed}, \"goal_complete\": {goal_complete}}},\n",
+            "  \"gui\": {{\"prd_total\": {prd_total}, \"prd_implemented\": {prd_implemented}, ",
+            "\"prd_artifact_mvp\": {prd_artifact_mvp}, \"prd_planned\": {prd_planned}, ",
+            "\"prd_missing_live\": {prd_missing_live}, \"qa_status\": {qa_status}, ",
+            "\"security_status\": {security_status}, ",
+            "\"provider_configured_count\": {provider_configured_count}, ",
+            "\"voxel_count\": {voxel_count}, \"mission_count\": {mission_count}, ",
+            "\"browser_sessions\": {browser_sessions}, \"computer_sessions\": {computer_sessions}, ",
+            "\"app_sessions\": {app_sessions}, \"worker_lane_missions\": {worker_lane_missions}, ",
+            "\"worker_lane_count\": {worker_lane_count}}},\n",
+            "  \"worker_lanes\": {lanes}\n",
+            "}}\n"
+        ),
+        workspace = json_string(&d.workspace.display().to_string()),
+        workspace_label = json_string(&d.workspace_label),
+        app_bundle = json_string(&d.app_bundle.display().to_string()),
+        artifact_dir = json_string(&d.artifact_dir.display().to_string()),
+        dashboard_html = json_string(&d.dashboard_html.display().to_string()),
+        missions_dir = json_string(
+            &d.workspace
+                .join(OPEN_SKSDIR)
+                .join("missions")
+                .display()
+                .to_string()
+        ),
+        cli_path = json_string(&d.cli_path.display().to_string()),
+        total = a.total,
+        passed = a.passed,
+        partial = a.partial,
+        failed = a.failed,
+        goal_complete = goal_complete,
+        prd_total = g.prd_total,
+        prd_implemented = g.prd_implemented,
+        prd_artifact_mvp = g.prd_artifact_mvp,
+        prd_planned = g.prd_planned,
+        prd_missing_live = g.prd_missing_live,
+        qa_status = json_string(&g.qa_status),
+        security_status = json_string(&g.security_status),
+        provider_configured_count = g.provider_configured_count,
+        voxel_count = g.voxel_count,
+        mission_count = g.mission_count,
+        browser_sessions = g.browser_sessions,
+        computer_sessions = g.computer_sessions,
+        app_sessions = g.app_sessions,
+        worker_lane_missions = g.worker_lane_missions,
+        worker_lane_count = g.worker_lane_count,
+        lanes = lanes,
+    )
 }
 
 fn run_scheduler_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
@@ -14667,6 +14792,7 @@ fn usage() -> &'static str {
     concat!(
         "OpenSKS\n\n",
         "Usage:\n",
+        "  opensks                  # create and open the native macOS app\n",
         "  opensks goal \"<goal text>\" [--kind <kind>] [--mode goal|direct|naruto] [--max-waves <n>]\n",
         "  opensks goal status <mission-id>\n",
         "  opensks run \"<goal text>\"\n",
@@ -14731,6 +14857,431 @@ fn goal_usage() -> &'static str {
 
 pub fn default_cwd() -> Result<PathBuf, OpenSksError> {
     Ok(env::current_dir()?)
+}
+
+pub fn native_app_bundle_path(cwd: &Path) -> PathBuf {
+    cwd.join(OPEN_SKSDIR).join("macos").join("OpenSKS.app")
+}
+
+fn create_native_app_bundle(cwd: &Path) -> Result<PathBuf, OpenSksError> {
+    let bundle = native_app_bundle_path(cwd);
+    let contents = bundle.join("Contents");
+    let macos_dir = contents.join("MacOS");
+    let resources_dir = contents.join("Resources");
+    fs::create_dir_all(&macos_dir)?;
+    fs::create_dir_all(&resources_dir)?;
+
+    let current_exe = env::current_exe()?;
+    // The bundle executable is the compiled SwiftUI app; the Rust binary is
+    // embedded as the CLI engine the Swift shell drives.
+    let bundle_executable = macos_dir.join("OpenSKS");
+    compile_swift_app(&bundle_executable)?;
+    make_executable(&bundle_executable)?;
+
+    let cli_copy = resources_dir.join("opensks-cli");
+    fs::copy(&current_exe, &cli_copy)?;
+    make_executable(&cli_copy)?;
+
+    write_text_atomic(
+        &resources_dir.join("workspace-path.txt"),
+        &format!("{}\n", cwd.display()),
+    )?;
+    write_text_atomic(&resources_dir.join("opensks-logo.svg"), OPEN_SKS_LOGO_SVG)?;
+    create_macos_icon_assets(&resources_dir)?;
+
+    write_text_atomic(&contents.join("Info.plist"), &render_macos_app_info_plist())?;
+    Ok(bundle)
+}
+
+/// The SwiftUI app shell, embedded so the bundle is self-contained (the UI ships
+/// with OpenSKS, not the user's workspace). Edited as real files under
+/// `swift/Sources/` and compiled together as one whole-module swiftc unit.
+const SWIFT_SOURCES: &[(&str, &str)] = &[
+    ("Theme.swift", include_str!("../swift/Sources/Theme.swift")),
+    (
+        "Models.swift",
+        include_str!("../swift/Sources/Models.swift"),
+    ),
+    (
+        "SyntaxHighlighter.swift",
+        include_str!("../swift/Sources/SyntaxHighlighter.swift"),
+    ),
+    (
+        "Backend.swift",
+        include_str!("../swift/Sources/Backend.swift"),
+    ),
+    (
+        "Components.swift",
+        include_str!("../swift/Sources/Components.swift"),
+    ),
+    ("App.swift", include_str!("../swift/Sources/App.swift")),
+    (
+        "RootView.swift",
+        include_str!("../swift/Sources/RootView.swift"),
+    ),
+    (
+        "CommandPalette.swift",
+        include_str!("../swift/Sources/CommandPalette.swift"),
+    ),
+    (
+        "TitleBarView.swift",
+        include_str!("../swift/Sources/TitleBarView.swift"),
+    ),
+    (
+        "StatusBarView.swift",
+        include_str!("../swift/Sources/StatusBarView.swift"),
+    ),
+    (
+        "RailView.swift",
+        include_str!("../swift/Sources/RailView.swift"),
+    ),
+    (
+        "ExplorerView.swift",
+        include_str!("../swift/Sources/ExplorerView.swift"),
+    ),
+    (
+        "EditorView.swift",
+        include_str!("../swift/Sources/EditorView.swift"),
+    ),
+    (
+        "ComposerView.swift",
+        include_str!("../swift/Sources/ComposerView.swift"),
+    ),
+    (
+        "HomeView.swift",
+        include_str!("../swift/Sources/HomeView.swift"),
+    ),
+    (
+        "TerminalView.swift",
+        include_str!("../swift/Sources/TerminalView.swift"),
+    ),
+];
+
+/// Compile the embedded SwiftUI app into `output` with `swiftc`. This is the only
+/// place Swift is built; the cargo verification chain stays Rust-native, and the
+/// app is (re)built whenever the bundle is generated.
+#[cfg(target_os = "macos")]
+fn compile_swift_app(output: &Path) -> Result<(), OpenSksError> {
+    // Under `cargo test`, do not shell out to swiftc: it is slow and races with
+    // env-mutating tests (concurrent setenv corrupts a child's environment).
+    // A placeholder keeps bundle-structure assertions valid; real `cargo build`
+    // binaries always compile the Swift app below.
+    if cfg!(test) {
+        fs::copy(env::current_exe()?, output)?;
+        return Ok(());
+    }
+    let build_dir = env::temp_dir().join(format!(
+        "opensks-swift-{}",
+        output.display().to_string().replace(['/', '.', ' '], "_")
+    ));
+    let _ = fs::remove_dir_all(&build_dir);
+    fs::create_dir_all(&build_dir)?;
+    let mut files = Vec::new();
+    for (name, contents) in SWIFT_SOURCES {
+        let path = build_dir.join(name);
+        write_text_atomic(&path, contents)?;
+        files.push(path);
+    }
+
+    let sdk = process::Command::new("xcrun")
+        .args(["--sdk", "macosx", "--show-sdk-path"])
+        .output()?;
+    if !sdk.status.success() {
+        return Err(OpenSksError::Invalid(format!(
+            "xcrun could not locate the macOS SDK: {}",
+            String::from_utf8_lossy(&sdk.stderr)
+        )));
+    }
+    let sdk_path = String::from_utf8_lossy(&sdk.stdout).trim().to_string();
+    let arch = if std::env::consts::ARCH == "aarch64" {
+        "arm64"
+    } else {
+        "x86_64"
+    };
+    let target = format!("{arch}-apple-macosx14.0");
+
+    let mut command = process::Command::new("swiftc");
+    command
+        .arg("-O")
+        .arg("-parse-as-library")
+        .arg("-o")
+        .arg(output);
+    for source in &files {
+        command.arg(source);
+    }
+    command.args([
+        "-sdk",
+        &sdk_path,
+        "-target",
+        &target,
+        "-framework",
+        "SwiftUI",
+        "-framework",
+        "AppKit",
+    ]);
+    let built = command.output()?;
+    let _ = fs::remove_dir_all(&build_dir);
+    if !built.status.success() {
+        return Err(OpenSksError::Invalid(format!(
+            "swiftc failed to build the OpenSKS app:\n{}",
+            String::from_utf8_lossy(&built.stderr)
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn compile_swift_app(output: &Path) -> Result<(), OpenSksError> {
+    let _ = output;
+    Err(OpenSksError::Invalid(
+        "the SwiftUI app can only be built on macOS".to_string(),
+    ))
+}
+
+fn render_macos_app_info_plist() -> String {
+    concat!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" ",
+        "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
+        "<plist version=\"1.0\">\n",
+        "<dict>\n",
+        "  <key>CFBundleDevelopmentRegion</key>\n",
+        "  <string>en</string>\n",
+        "  <key>CFBundleExecutable</key>\n",
+        "  <string>OpenSKS</string>\n",
+        "  <key>CFBundleIconFile</key>\n",
+        "  <string>AppIcon</string>\n",
+        "  <key>CFBundleIdentifier</key>\n",
+        "  <string>dev.opensks.local</string>\n",
+        "  <key>CFBundleInfoDictionaryVersion</key>\n",
+        "  <string>6.0</string>\n",
+        "  <key>CFBundleName</key>\n",
+        "  <string>OpenSKS</string>\n",
+        "  <key>CFBundlePackageType</key>\n",
+        "  <string>APPL</string>\n",
+        "  <key>CFBundleShortVersionString</key>\n",
+        "  <string>0.1.0</string>\n",
+        "  <key>CFBundleVersion</key>\n",
+        "  <string>1</string>\n",
+        "  <key>LSMinimumSystemVersion</key>\n",
+        "  <string>14.0</string>\n",
+        "  <key>NSHighResolutionCapable</key>\n",
+        "  <true/>\n",
+        "  <key>NSPrincipalClass</key>\n",
+        "  <string>NSApplication</string>\n",
+        "  <key>LSApplicationCategoryType</key>\n",
+        "  <string>public.app-category.developer-tools</string>\n",
+        "</dict>\n",
+        "</plist>\n"
+    )
+    .to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn create_macos_icon_assets(resources_dir: &Path) -> Result<(), OpenSksError> {
+    let svg = resources_dir.join("opensks-logo.svg");
+    let iconset = resources_dir.join("OpenSKS.iconset");
+    fs::create_dir_all(&iconset)?;
+    let specs = [
+        (16, "icon_16x16.png"),
+        (32, "icon_16x16@2x.png"),
+        (32, "icon_32x32.png"),
+        (64, "icon_32x32@2x.png"),
+        (128, "icon_128x128.png"),
+        (256, "icon_128x128@2x.png"),
+        (256, "icon_256x256.png"),
+        (512, "icon_256x256@2x.png"),
+        (512, "icon_512x512.png"),
+        (1024, "icon_512x512@2x.png"),
+    ];
+    for (size, name) in specs {
+        let output = process::Command::new("qlmanage")
+            .arg("-t")
+            .arg("-s")
+            .arg(size.to_string())
+            .arg("--out")
+            .arg(&iconset)
+            .arg(&svg)
+            .output()?;
+        if !output.status.success() {
+            return Err(OpenSksError::Invalid(format!(
+                "failed to render app icon PNG `{name}`: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        let rendered = iconset.join("opensks-logo.svg.png");
+        if !rendered.is_file() {
+            return Err(OpenSksError::Invalid(format!(
+                "qlmanage did not write expected icon PNG for `{name}`"
+            )));
+        }
+        let target = iconset.join(name);
+        if target.exists() {
+            fs::remove_file(&target)?;
+        }
+        fs::rename(rendered, target)?;
+    }
+    let output = process::Command::new("iconutil")
+        .arg("-c")
+        .arg("icns")
+        .arg(&iconset)
+        .arg("-o")
+        .arg(resources_dir.join("AppIcon.icns"))
+        .output()?;
+    if !output.status.success() {
+        return Err(OpenSksError::Invalid(format!(
+            "failed to build AppIcon.icns: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn create_macos_icon_assets(resources_dir: &Path) -> Result<(), OpenSksError> {
+    let _ = resources_dir;
+    Ok(())
+}
+
+fn make_executable(path: &Path) -> Result<(), OpenSksError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
+fn native_app_dashboard(workspace: &Path) -> Result<NativeAppDashboard, OpenSksError> {
+    let acceptance_path = workspace
+        .join(OPEN_SKSDIR)
+        .join("acceptance")
+        .join("acceptance-summary.json");
+    let acceptance = fs::read_to_string(&acceptance_path).unwrap_or_default();
+    let goal_complete = if json_bool_field_equals(&acceptance, "goal_complete", true) {
+        Some(true)
+    } else if json_bool_field_equals(&acceptance, "goal_complete", false) {
+        Some(false)
+    } else {
+        None
+    };
+    let resources_dir = current_app_resources_dir()?.unwrap_or_else(|| {
+        native_app_bundle_path(workspace)
+            .join("Contents")
+            .join("Resources")
+    });
+    Ok(NativeAppDashboard {
+        workspace: workspace.to_path_buf(),
+        workspace_label: compact_display_path(workspace),
+        app_bundle: native_app_bundle_path(workspace),
+        artifact_dir: workspace.join(OPEN_SKSDIR).join("app"),
+        dashboard_html: workspace
+            .join(OPEN_SKSDIR)
+            .join("app")
+            .join("dashboard.html"),
+        cli_path: resources_dir.join("opensks-cli"),
+        acceptance: NativeAcceptanceStatus {
+            total: extract_json_number_field(&acceptance, "total").unwrap_or(0),
+            passed: extract_json_number_field(&acceptance, "passed").unwrap_or(0),
+            partial: extract_json_number_field(&acceptance, "partial").unwrap_or(0),
+            failed: extract_json_number_field(&acceptance, "failed").unwrap_or(0),
+            goal_complete,
+        },
+        gui: collect_gui_snapshot(workspace),
+    })
+}
+
+fn compact_display_path(path: &Path) -> String {
+    let raw = path.display().to_string();
+    let Some(home) = env::var_os("HOME").map(PathBuf::from) else {
+        return raw;
+    };
+    if let Ok(relative) = path.strip_prefix(&home) {
+        if relative.as_os_str().is_empty() {
+            "~".to_string()
+        } else {
+            format!("~/{}", relative.display())
+        }
+    } else {
+        raw
+    }
+}
+
+pub fn default_launch_cwd() -> Result<PathBuf, OpenSksError> {
+    let current = env::current_dir()?;
+    if looks_like_opensks_workspace(&current) {
+        return Ok(current);
+    }
+
+    let executable = env::current_exe()?;
+    for ancestor in executable.ancestors() {
+        if looks_like_opensks_workspace(ancestor) {
+            return Ok(ancestor.to_path_buf());
+        }
+    }
+
+    Ok(current)
+}
+
+pub fn current_app_bundle_workspace() -> Result<Option<PathBuf>, OpenSksError> {
+    let Some(resources_dir) = current_app_resources_dir()? else {
+        return Ok(None);
+    };
+    let workspace = fs::read_to_string(resources_dir.join("workspace-path.txt"))?;
+    let workspace = workspace.trim();
+    if workspace.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(PathBuf::from(workspace)))
+    }
+}
+
+fn current_app_resources_dir() -> Result<Option<PathBuf>, OpenSksError> {
+    let executable = env::current_exe()?;
+    let Some(macos_dir) = executable.parent() else {
+        return Ok(None);
+    };
+    let Some(contents_dir) = macos_dir.parent() else {
+        return Ok(None);
+    };
+    if macos_dir.file_name().and_then(|name| name.to_str()) == Some("MacOS")
+        && contents_dir.file_name().and_then(|name| name.to_str()) == Some("Contents")
+    {
+        Ok(Some(contents_dir.join("Resources")))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn open_path_for_user(path: &Path) -> Result<(), OpenSksError> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = process::Command::new("open").arg(path).status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(OpenSksError::Invalid(format!(
+                "`open {}` exited with status {status}",
+                path.display()
+            )))
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+fn looks_like_opensks_workspace(path: &Path) -> bool {
+    path.join("Cargo.toml").is_file() && path.join("src").join("lib.rs").is_file()
 }
 
 #[cfg(test)]
@@ -15432,6 +15983,84 @@ mod tests {
         let root = temp_workspace("missing-text");
         let error = run_cli(["goal"], &root).expect_err("goal text required");
         assert!(matches!(error, OpenSksError::Usage(_)));
+    }
+
+    #[test]
+    fn empty_args_creates_native_app_bundle() {
+        let root = temp_workspace("empty-args-native-app");
+        let output = run_cli(Vec::<String>::new(), &root).expect("empty launch");
+        assert!(output.stdout.contains("created OpenSKS macOS app launcher"));
+        assert!(output.stdout.contains("OpenSKS.app"));
+        let bundle = native_app_bundle_path(&root);
+        assert!(bundle.join("Contents").join("Info.plist").exists());
+        assert!(
+            bundle
+                .join("Contents")
+                .join("MacOS")
+                .join("OpenSKS")
+                .exists()
+        );
+        assert!(
+            bundle
+                .join("Contents")
+                .join("Resources")
+                .join("opensks-cli")
+                .exists()
+        );
+        assert!(
+            bundle
+                .join("Contents")
+                .join("Resources")
+                .join("workspace-path.txt")
+                .exists()
+        );
+        assert!(
+            bundle
+                .join("Contents")
+                .join("Resources")
+                .join("opensks-logo.svg")
+                .exists()
+        );
+        #[cfg(target_os = "macos")]
+        assert!(
+            bundle
+                .join("Contents")
+                .join("Resources")
+                .join("AppIcon.icns")
+                .exists()
+        );
+        assert!(
+            root.join(OPEN_SKSDIR)
+                .join("app")
+                .join("dashboard.html")
+                .exists()
+        );
+        assert!(
+            root.join(OPEN_SKSDIR)
+                .join("app")
+                .join("gui-data.json")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn help_still_prints_usage_without_writing_app_artifacts() {
+        let root = temp_workspace("help-no-app");
+        let output = run_cli(["--help"], &root).expect("help");
+        assert!(output.stdout.contains("Usage:"));
+        assert!(
+            output
+                .stdout
+                .contains("opensks                  # create and open the native macOS app")
+        );
+        assert!(!native_app_bundle_path(&root).exists());
+        assert!(
+            !root
+                .join(OPEN_SKSDIR)
+                .join("app")
+                .join("dashboard.html")
+                .exists()
+        );
     }
 
     #[test]
