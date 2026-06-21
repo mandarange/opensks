@@ -6,6 +6,7 @@ members = [
   "crates/opensks-contracts",
   "crates/opensks-cli",
   "crates/opensks-daemon",
+  "crates/opensks-design",
   "crates/opensks-engine",
   "crates/opensks-event-store",
   "crates/opensks-git",

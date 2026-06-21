@@ -20,22 +20,13 @@ struct VibrantBackground: NSViewRepresentable {
     }
 }
 
-/// The OpenSKS mark: a teal→violet rounded square with an inset seal.
+/// The OpenSKS mark, rendered from the canonical bundled logo asset.
+/// Thin wrapper over `OpenSKSLogoView` kept so existing call sites compile; the
+/// former synthetic gradient + SF Symbol substitute has been removed (PR-021).
 struct AgentMark: View {
     var size: CGFloat
     var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-            .fill(LinearGradient(
-                colors: [Theme.accent, Theme.violet],
-                startPoint: .topLeading, endPoint: .bottomTrailing
-            ))
-            .frame(width: size, height: size)
-            .overlay(
-                Image(systemName: "checkmark.seal.fill")
-                    .font(.system(size: size * 0.46, weight: .bold))
-                    .foregroundStyle(Theme.accentInk)
-            )
-            .shadow(color: Theme.accent.opacity(0.25), radius: size * 0.18, y: 1)
+        OpenSKSLogoView(size: size)
     }
 }
 

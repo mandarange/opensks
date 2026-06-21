@@ -1,0 +1,17 @@
+[package]
+name = "opensks-design"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "gen-swift-tokens"
+path = "src/bin/gen_swift_tokens.rs"
+
+[lints]
+workspace = true

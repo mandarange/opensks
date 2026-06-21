@@ -1,0 +1,26 @@
+{
+  "schema": "opensks.design-project.v1",
+  "id": "opensks-studio-dark",
+  "name": "OpenSKS Studio Dark",
+  "version": "1.0.0",
+  "category": "application-shell",
+  "description": "Dark-only design system for the OpenSKS native Studio app.",
+  "source": {
+    "kind": "project",
+    "origin": "mandarange/opensks",
+    "revision": "ad18654935d351df6cff103f763eaa9b8983ff11",
+    "imported_at": null
+  },
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.json",
+    "components": "components.json",
+    "usage": null
+  },
+  "platforms": ["macos-swiftui", "web-css", "agent-prompt"],
+  "security": {
+    "contains_executable_code": false,
+    "contains_remote_urls": false,
+    "allowed_asset_media_types": ["image/png", "image/svg+xml"]
+  }
+}

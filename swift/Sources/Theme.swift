@@ -1,7 +1,9 @@
-// Theme.swift — all design tokens in code (no asset catalog).
+// Theme.swift — semantic color aliases over `GeneratedDesignTokens` (compiled
+// from the `opensks-studio-dark` design package, .opensks/design-systems/...).
 // One teal accent carries brand/action/ready/pass; violet is reserved for the
 // mark + keywords; gold/coral are the honesty palette only. Hierarchy comes from
 // a four-plane elevation ladder + real materials, not borders-on-everything.
+// Remaining literals are app-local and migrate to tokens in later PRs.
 
 import SwiftUI
 
@@ -28,12 +30,12 @@ extension Color {
 
 enum Theme {
     // Surfaces — elevation ladder.
-    static let bg = Color(hex: "0E1015")
-    static let sidebar = Color(hex: "101216")
+    static let bg = GeneratedDesignTokens.colorCanvas
+    static let sidebar = GeneratedDesignTokens.colorSurfaceSidebar
     static let explorer = Color(hex: "0F1116")
-    static let panel = Color(hex: "13161B")
+    static let panel = GeneratedDesignTokens.colorSurfaceBase
     static let panelDeep = Color(hex: "0F1116")
-    static let input = Color(hex: "181B21")
+    static let input = GeneratedDesignTokens.colorSurfaceRaised
     static let editor = Color(hex: "0E1015")
     static let gutter = Color(hex: "0C0E12")
     static let terminal = Color(hex: "0C0E12")
@@ -42,27 +44,27 @@ enum Theme {
     static let currentLine = Color(hex: "14181E")
 
     // Strokes / seams.
-    static let stroke = Color(hex: "262A32")
-    static let strokeSoft = Color(hex: "2C313A")
+    static let stroke = GeneratedDesignTokens.colorBorderSubtle
+    static let strokeSoft = GeneratedDesignTokens.colorBorderStrong
     static let seam = Color(hex: "2A605A")
 
     // Text.
-    static let text = Color(hex: "E9EDF3")
-    static let textSoft = Color(hex: "BCC4D0")
-    static let muted = Color(hex: "7E8796")
+    static let text = GeneratedDesignTokens.colorTextPrimary
+    static let textSoft = GeneratedDesignTokens.colorTextSecondary
+    static let muted = GeneratedDesignTokens.colorTextMuted
     static let faint = Color(hex: "5A6473")
     static let gutterText = Color(hex: "4A5260")
 
     // Accent + semantic.
-    static let accent = Color(hex: "5EDEC4")
+    static let accent = GeneratedDesignTokens.colorAccentPrimary
     static let accentInk = Color(hex: "09100F")
     static let accentTint = Color(hex: "5EDEC422")
     static let accentSeam = Color(hex: "3A6B64")
-    static let violet = Color(hex: "9D8EF5")
-    static let blue = Color(hex: "70B0F4")
+    static let violet = GeneratedDesignTokens.colorAccentSecondary
+    static let blue = GeneratedDesignTokens.colorStatusRunning
     static let green = Color(hex: "7FD98C")
-    static let gold = Color(hex: "E0B25C")
-    static let coral = Color(hex: "E0876E")
+    static let gold = GeneratedDesignTokens.colorStatusWarning
+    static let coral = GeneratedDesignTokens.colorStatusDanger
 
     // Honesty palette aliases.
     static let pass = accent

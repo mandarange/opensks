@@ -1,0 +1,11 @@
+{
+  "schema": "opensks.brand-attribution.v1",
+  "logo": {
+    "name": "OpenSKS",
+    "source": "assets/opensks-logo.svg",
+    "rasterized_to": "OpenSKSLogo.png",
+    "rasterizer": "qlmanage",
+    "owner": "mandarange/opensks",
+    "note": "Canonical OpenSKS mark. Rasterized from the tracked SVG; the same SVG is the macOS app icon."
+  }
+}
