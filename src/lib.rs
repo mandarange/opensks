@@ -34,7 +34,9 @@ const DESIGN_SCREENSHOT_MODE: &str = "deterministic_local_raster_artifact";
 const DESIGN_SCREENSHOT_RENDERER: &str = "opensks_local_source_rasterizer_v1";
 const PROVIDER_KEYCHAIN_SERVICE: &str = "opensks-provider-credentials";
 const OPEN_SKS_LOGO_SVG: &str = include_str!("../assets/opensks-logo.svg");
+#[cfg(target_os = "macos")]
 const SWIFT_PACKAGE_DIR_ENV: &str = "OPENSKS_SWIFT_PACKAGE_DIR";
+#[cfg(target_os = "macos")]
 const SWIFT_STUDIO_PRODUCT: &str = "OpenSKSStudio";
 const PRD_SOURCE_LABEL: &str =
     "project-prd:opensks-prd-v3-goal-loop-mcp-computer-use-voxel-triwiki";
@@ -14789,6 +14791,7 @@ fn create_native_app_bundle(cwd: &Path) -> Result<PathBuf, OpenSksError> {
     Ok(bundle)
 }
 
+#[cfg(target_os = "macos")]
 fn swift_package_dir_from_root(root: &Path) -> Option<PathBuf> {
     if root.join("Package.swift").is_file() {
         return Some(root.to_path_buf());
@@ -14800,6 +14803,7 @@ fn swift_package_dir_from_root(root: &Path) -> Option<PathBuf> {
     None
 }
 
+#[cfg(target_os = "macos")]
 fn swift_package_dir_from_ancestors(start: &Path) -> Option<PathBuf> {
     for ancestor in start.ancestors() {
         if let Some(package_dir) = swift_package_dir_from_root(ancestor) {
@@ -14809,6 +14813,7 @@ fn swift_package_dir_from_ancestors(start: &Path) -> Option<PathBuf> {
     None
 }
 
+#[cfg(target_os = "macos")]
 fn find_swift_package_dir(cwd: &Path) -> Option<PathBuf> {
     if let Some(configured) = env::var_os(SWIFT_PACKAGE_DIR_ENV).map(PathBuf::from) {
         if let Some(package_dir) = swift_package_dir_from_root(&configured) {
@@ -15193,6 +15198,7 @@ mod tests {
         fs::write(root.join("src/lib.rs"), source).expect("write cargo source");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn swift_package_dir_from_root_prefers_nested_package() {
         let root = temp_workspace("swift-package-dir");
