@@ -1,0 +1,20 @@
+[package]
+name = "opensks-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+opensks-contracts = { path = "../opensks-contracts" }
+opensks-engine = { path = "../opensks-engine" }
+opensks-event-store = { path = "../opensks-event-store" }
+opensks-git = { path = "../opensks-git" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+opensks-graph = { path = "../opensks-graph" }
+
+[lints]
+workspace = true

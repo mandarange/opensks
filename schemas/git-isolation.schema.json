@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GitIsolationReport",
+  "type": "object",
+  "required": [
+    "git_available",
+    "id",
+    "lfs_detected",
+    "mode",
+    "reason_code",
+    "schema",
+    "submodule_detected",
+    "worktree_path"
+  ],
+  "properties": {
+    "base_commit": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "git_available": {
+      "type": "boolean"
+    },
+    "id": {
+      "type": "string"
+    },
+    "lfs_detected": {
+      "type": "boolean"
+    },
+    "mode": {
+      "$ref": "#/definitions/IsolationMode"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "repository_root": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema": {
+      "type": "string"
+    },
+    "submodule_detected": {
+      "type": "boolean"
+    },
+    "worktree_path": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "IsolationMode": {
+      "type": "string",
+      "enum": [
+        "git_worktree",
+        "snapshot"
+      ]
+    }
+  }
+}

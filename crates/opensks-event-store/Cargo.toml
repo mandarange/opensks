@@ -1,0 +1,16 @@
+[package]
+name = "opensks-event-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+opensks-artifacts = { path = "../opensks-artifacts" }
+opensks-contracts = { path = "../opensks-contracts" }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

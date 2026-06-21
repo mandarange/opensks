@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RoutingDecision",
+  "type": "object",
+  "required": [
+    "id",
+    "model_snapshot_hash",
+    "reason_code",
+    "schema",
+    "status"
+  ],
+  "properties": {
+    "eligible_model_ids": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "id": {
+      "type": "string"
+    },
+    "model_snapshot_hash": {
+      "type": "string"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "rejected_models": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ModelRejection"
+      }
+    },
+    "schema": {
+      "type": "string"
+    },
+    "selected_model_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "$ref": "#/definitions/RoutingStatus"
+    }
+  },
+  "definitions": {
+    "ModelRejection": {
+      "type": "object",
+      "required": [
+        "model_id",
+        "reason_code"
+      ],
+      "properties": {
+        "model_id": {
+          "type": "string"
+        },
+        "reason_code": {
+          "type": "string"
+        }
+      }
+    },
+    "RoutingStatus": {
+      "type": "string",
+      "enum": [
+        "routed",
+        "blocked_missing_capability",
+        "blocked_disabled",
+        "blocked_policy",
+        "blocked_provider_health"
+      ]
+    }
+  }
+}

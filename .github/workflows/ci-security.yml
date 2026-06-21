@@ -1,0 +1,32 @@
+name: ci-security
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Secret scan command
+        run: cargo run -- security audit
+      - name: Path and rollback guards
+        run: cargo test -p opensks-git --lib
+      - name: Disabled model invariant
+        run: cargo test -p opensks-provider disabled_model_is_never_routed -- --exact
+      - name: Hook secret invariant
+        run: cargo test -p opensks-hooks secret_payload_is_blocked_before_hook_reads_it -- --exact
+      - name: TriWiki secret publish invariant
+        run: cargo test -p opensks-triwiki shared_record_write_blocks_secret_content -- --exact
+      - name: Push approval invariant
+        run: cargo test -p opensks-policy git_push_requires_approval_by_default -- --exact
+      - name: Image disabled model invariant
+        run: cargo test -p opensks-image disabled_image_model_is_never_called -- --exact
+      - name: Outbox protected push invariant
+        run: cargo test -p opensks-git outbox_dispatch_never_executes_push_without_matching_approval -- --exact
+      - name: No broad OpenSKS ignore
+        run: '! grep -n "^\\.opensks/$" .gitignore'

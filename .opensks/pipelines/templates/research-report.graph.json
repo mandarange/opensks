@@ -1,0 +1,136 @@
+{
+  "schema": "opensks.pipeline-graph.v1",
+  "id": "research-report",
+  "name": "Research & Report",
+  "version": 1,
+  "entry_nodes": [
+    "goal"
+  ],
+  "nodes": {
+    "delegate": {
+      "id": "delegate",
+      "kind": "delegate",
+      "display_name": "Delegate to model",
+      "enabled": true,
+      "position": {
+        "x": 220.0,
+        "y": 0.0
+      },
+      "inputs": {},
+      "config": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 0,
+        "retryable_reason_codes": []
+      },
+      "approval": {
+        "required": false,
+        "scope": "none"
+      },
+      "hook_refs": []
+    },
+    "goal": {
+      "id": "goal",
+      "kind": "goal_input",
+      "display_name": "Goal input",
+      "enabled": true,
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "inputs": {},
+      "config": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 0,
+        "retryable_reason_codes": []
+      },
+      "approval": {
+        "required": false,
+        "scope": "none"
+      },
+      "hook_refs": []
+    },
+    "research": {
+      "id": "research",
+      "kind": "web_research",
+      "display_name": "Web research",
+      "enabled": true,
+      "position": {
+        "x": 220.0,
+        "y": 130.0
+      },
+      "inputs": {},
+      "config": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 0,
+        "retryable_reason_codes": []
+      },
+      "approval": {
+        "required": true,
+        "scope": "external_network"
+      },
+      "hook_refs": []
+    },
+    "seal": {
+      "id": "seal",
+      "kind": "final_seal",
+      "display_name": "Final seal",
+      "enabled": true,
+      "position": {
+        "x": 460.0,
+        "y": 0.0
+      },
+      "inputs": {},
+      "config": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 0,
+        "retryable_reason_codes": []
+      },
+      "approval": {
+        "required": false,
+        "scope": "none"
+      },
+      "hook_refs": []
+    }
+  },
+  "edges": [
+    {
+      "id": "edge-goal-research",
+      "from": {
+        "node_id": "goal",
+        "port": "out"
+      },
+      "to": {
+        "node_id": "research",
+        "port": "in"
+      },
+      "kind": "control"
+    },
+    {
+      "id": "edge-research-seal",
+      "from": {
+        "node_id": "research",
+        "port": "out"
+      },
+      "to": {
+        "node_id": "seal",
+        "port": "in"
+      },
+      "kind": "control"
+    }
+  ],
+  "variables": {},
+  "policies": {
+    "max_parallelism": 1,
+    "allow_external_side_effects": false,
+    "final_seal_required": true
+  },
+  "metadata": {
+    "description": "Default automatic safe pipeline with one compatible model.",
+    "created_by": "opensks-graph",
+    "evidence_refs": []
+  }
+}

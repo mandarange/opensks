@@ -1,0 +1,25 @@
+[package]
+name = "opensks-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+opensks-contracts = { path = "../opensks-contracts" }
+opensks-codegraph = { path = "../opensks-codegraph" }
+opensks-context = { path = "../opensks-context" }
+opensks-daemon = { path = "../opensks-daemon" }
+opensks-event-store = { path = "../opensks-event-store" }
+opensks-git = { path = "../opensks-git" }
+opensks-graph = { path = "../opensks-graph" }
+opensks-hooks = { path = "../opensks-hooks" }
+opensks-image = { path = "../opensks-image" }
+opensks-policy = { path = "../opensks-policy" }
+opensks-provider = { path = "../opensks-provider" }
+opensks-reasoning = { path = "../opensks-reasoning" }
+opensks-retention = { path = "../opensks-retention" }
+opensks-scheduler = { path = "../opensks-scheduler" }
+opensks-triwiki = { path = "../opensks-triwiki" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

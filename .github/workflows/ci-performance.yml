@@ -1,0 +1,21 @@
+name: ci-performance
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  performance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: 10k scheduler simulation
+        run: cargo test -p opensks-scheduler scheduler_simulates_ten_thousand_items_without_loss -- --exact
+      - name: Graph compile smoke
+        run: cargo run -- graph compile extreme-parallel
+      - name: CodeGraph index smoke
+        run: cargo run -- codegraph index
+      - name: Event store replay smoke
+        run: cargo test -p opensks-event-store append_then_replay_preserves_order_and_redacts_sensitive_payload -- --exact

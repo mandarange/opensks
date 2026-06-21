@@ -1,0 +1,58 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ReleaseProof",
+  "type": "object",
+  "required": [
+    "fresh_clone_checked",
+    "fresh_install_checked",
+    "notarized",
+    "rollback_plan_ref",
+    "schema",
+    "signed_app",
+    "status",
+    "upgrade_checked",
+    "version"
+  ],
+  "properties": {
+    "fresh_clone_checked": {
+      "type": "boolean"
+    },
+    "fresh_install_checked": {
+      "type": "boolean"
+    },
+    "notarized": {
+      "type": "boolean"
+    },
+    "rollback_plan_ref": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "signed_app": {
+      "type": "boolean"
+    },
+    "status": {
+      "$ref": "#/definitions/TrustStatus"
+    },
+    "upgrade_checked": {
+      "type": "boolean"
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "TrustStatus": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "verified_with_partial_evidence",
+        "not_verified",
+        "stale",
+        "partial",
+        "unavailable"
+      ]
+    }
+  }
+}

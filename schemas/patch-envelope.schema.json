@@ -1,0 +1,127 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PatchEnvelope",
+  "type": "object",
+  "required": [
+    "id",
+    "lease_id",
+    "producer",
+    "rollback_ref",
+    "schema",
+    "secret_scan",
+    "unified_diff_ref",
+    "work_item_id"
+  ],
+  "properties": {
+    "after_hashes": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "base_commit": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "before_hashes": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "id": {
+      "type": "string"
+    },
+    "lease_id": {
+      "type": "string"
+    },
+    "producer": {
+      "$ref": "#/definitions/ProducerRef"
+    },
+    "requirement_ids": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "rollback_ref": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "secret_scan": {
+      "$ref": "#/definitions/GateResult"
+    },
+    "target_paths": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unified_diff_ref": {
+      "type": "string"
+    },
+    "work_item_id": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "GateResult": {
+      "type": "object",
+      "required": [
+        "reason_code",
+        "secret_value_exposed",
+        "status"
+      ],
+      "properties": {
+        "evidence_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "secret_value_exposed": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/definitions/GateStatus"
+        }
+      }
+    },
+    "GateStatus": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "failed",
+        "blocked",
+        "pending"
+      ]
+    },
+    "ProducerRef": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

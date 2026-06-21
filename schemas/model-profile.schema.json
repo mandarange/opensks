@@ -1,0 +1,229 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ModelProfile",
+  "type": "object",
+  "required": [
+    "capabilities",
+    "config_ref",
+    "display_name",
+    "enabled",
+    "health",
+    "id",
+    "limits",
+    "provider_id",
+    "schema"
+  ],
+  "properties": {
+    "capabilities": {
+      "$ref": "#/definitions/ModelCapabilities"
+    },
+    "config_ref": {
+      "$ref": "#/definitions/SecretlessConfigRef"
+    },
+    "display_name": {
+      "type": "string"
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "health": {
+      "$ref": "#/definitions/HealthState"
+    },
+    "id": {
+      "type": "string"
+    },
+    "limits": {
+      "$ref": "#/definitions/ModelLimits"
+    },
+    "pricing": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/PricingInfo"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "provider_id": {
+      "type": "string"
+    },
+    "role_scores": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/RoleScore"
+      }
+    },
+    "schema": {
+      "type": "string"
+    },
+    "user_tags": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "definitions": {
+    "HealthState": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "healthy",
+        "degraded",
+        "unavailable",
+        "open_circuit"
+      ]
+    },
+    "ModelCapabilities": {
+      "type": "object",
+      "required": [
+        "code",
+        "image_edit",
+        "image_output",
+        "long_context",
+        "streaming",
+        "structured_output",
+        "text",
+        "tool_use",
+        "vision_input"
+      ],
+      "properties": {
+        "code": {
+          "type": "boolean"
+        },
+        "image_edit": {
+          "type": "boolean"
+        },
+        "image_output": {
+          "type": "boolean"
+        },
+        "long_context": {
+          "type": "boolean"
+        },
+        "streaming": {
+          "type": "boolean"
+        },
+        "structured_output": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "boolean"
+        },
+        "tool_use": {
+          "type": "boolean"
+        },
+        "vision_input": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ModelLimits": {
+      "type": "object",
+      "properties": {
+        "max_concurrency": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "max_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "requests_per_minute": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "tokens_per_minute": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "PricingInfo": {
+      "type": "object",
+      "properties": {
+        "image_output_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "input_per_million_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "output_per_million_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      }
+    },
+    "RoleScore": {
+      "type": "object",
+      "required": [
+        "score"
+      ],
+      "properties": {
+        "evidence_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "score": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "SecretlessConfigRef": {
+      "type": "object",
+      "required": [
+        "reference",
+        "source"
+      ],
+      "properties": {
+        "reference": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

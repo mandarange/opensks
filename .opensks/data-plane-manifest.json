@@ -1,0 +1,237 @@
+{
+  "schema": "opensks.data-plane-manifest.v1",
+  "version": "2026-06-21.p0",
+  "managed_by": "OpenSKS managed local state block plus data-plane manifest",
+  "default_gitignore_block_ref": ".gitignore#OpenSKS managed local state",
+  "shared_paths": [
+    {
+      "path": ".opensks/data-plane-manifest.json",
+      "plane": "shared_durable",
+      "git_tracking": "track",
+      "retention": "keep_until_replaced_by_new_contract",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": false,
+      "allows_raw_provider_responses": false,
+      "notes": "Machine-readable tracked/local path policy for first-sprint bootstrap."
+    },
+    {
+      "path": ".opensks/wiki/records/",
+      "plane": "shared_durable",
+      "git_tracking": "track",
+      "retention": "keep_until_superseded",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": false,
+      "allows_raw_provider_responses": false,
+      "notes": "Merge-friendly shared project memory shards."
+    },
+    {
+      "path": ".opensks/history/runs/*/summary.json",
+      "plane": "shared_durable",
+      "git_tracking": "track",
+      "retention": "keep_compact_history",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": false,
+      "allows_raw_provider_responses": false,
+      "notes": "Compact run summaries that are safe to share."
+    },
+    {
+      "path": ".opensks/history/runs/*/proof.json",
+      "plane": "shared_durable",
+      "git_tracking": "track",
+      "retention": "keep_compact_history",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": false,
+      "allows_raw_provider_responses": false,
+      "notes": "Completion proof envelopes without raw logs or secrets."
+    },
+    {
+      "path": ".opensks/history/runs/*/events.digest.json",
+      "plane": "shared_durable",
+      "git_tracking": "track",
+      "retention": "keep_compact_history",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": false,
+      "allows_raw_provider_responses": false,
+      "notes": "Digest-only event evidence for portable history."
+    },
+    {
+      "path": ".opensks/pipelines/templates/",
+      "plane": "shared_durable",
+      "git_tracking": "track",
+      "retention": "keep_until_template_removed",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": false,
+      "allows_raw_provider_responses": false,
+      "notes": "Default pipeline graph templates."
+    },
+    {
+      "path": ".opensks/architecture/",
+      "plane": "shared_durable",
+      "git_tracking": "track",
+      "retention": "keep_until_superseded",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": false,
+      "allows_raw_provider_responses": false,
+      "notes": "Architecture records visible in Project Intelligence."
+    },
+    {
+      "path": ".opensks/glossary/",
+      "plane": "shared_durable",
+      "git_tracking": "track",
+      "retention": "keep_until_superseded",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": false,
+      "allows_raw_provider_responses": false,
+      "notes": "Shared glossary records with freshness metadata."
+    }
+  ],
+  "local_paths": [
+    {
+      "path": ".opensks/runtime/",
+      "plane": "ephemeral_local",
+      "git_tracking": "ignore",
+      "retention": "gc_safe_after_inactive",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": true,
+      "allows_raw_provider_responses": false,
+      "notes": "Engine database, leases, sockets, and process-local state."
+    },
+    {
+      "path": ".opensks/cache/",
+      "plane": "ephemeral_local",
+      "git_tracking": "ignore",
+      "retention": "rebuildable",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": false,
+      "allows_raw_provider_responses": false,
+      "notes": "Local caches and generated context shards."
+    },
+    {
+      "path": ".opensks/tmp/",
+      "plane": "ephemeral_local",
+      "git_tracking": "ignore",
+      "retention": "delete_on_gc",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": true,
+      "allows_raw_provider_responses": true,
+      "notes": "Temporary files and transient provider fragments."
+    },
+    {
+      "path": ".opensks/logs/",
+      "plane": "local_durable",
+      "git_tracking": "ignore",
+      "retention": "bounded_retention",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": true,
+      "allows_raw_provider_responses": true,
+      "notes": "Local raw logs derived from structured events."
+    },
+    {
+      "path": ".opensks/secrets/",
+      "plane": "secret_local",
+      "git_tracking": "ignore",
+      "retention": "never_publish",
+      "contains_secrets": true,
+      "allows_machine_absolute_paths": true,
+      "allows_raw_provider_responses": false,
+      "notes": "Secret material placeholders only; real secret values stay out of Git."
+    },
+    {
+      "path": ".opensks/worktrees/",
+      "plane": "ephemeral_local",
+      "git_tracking": "ignore",
+      "retention": "delete_after_run_close",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": true,
+      "allows_raw_provider_responses": false,
+      "notes": "Git worktree or snapshot isolation directories."
+    },
+    {
+      "path": ".opensks/workers/",
+      "plane": "ephemeral_local",
+      "git_tracking": "ignore",
+      "retention": "delete_after_run_close",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": true,
+      "allows_raw_provider_responses": false,
+      "notes": "Local worker runtime leases, heartbeats, bus, routing, and final state."
+    },
+    {
+      "path": ".opensks/macos/",
+      "plane": "local_durable",
+      "git_tracking": "ignore",
+      "retention": "rebuildable",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": true,
+      "allows_raw_provider_responses": false,
+      "notes": "Local generated app bundle."
+    },
+    {
+      "path": ".opensks/providers/local/",
+      "plane": "local_durable",
+      "git_tracking": "ignore",
+      "retention": "keep_local_only",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": true,
+      "allows_raw_provider_responses": false,
+      "notes": "Local provider probes and endpoint state."
+    },
+    {
+      "path": ".opensks/pipelines/compiled/",
+      "plane": "ephemeral_local",
+      "git_tracking": "ignore",
+      "retention": "rebuildable",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": false,
+      "allows_raw_provider_responses": false,
+      "notes": "Compiled pipeline plans generated from source graphs."
+    },
+    {
+      "path": ".opensks/wiki/indexes/",
+      "plane": "ephemeral_local",
+      "git_tracking": "ignore",
+      "retention": "rebuildable",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": false,
+      "allows_raw_provider_responses": false,
+      "notes": "Search indexes generated from shared wiki records."
+    },
+    {
+      "path": ".opensks/wiki/context-packs/generated/",
+      "plane": "ephemeral_local",
+      "git_tracking": "ignore",
+      "retention": "rebuildable",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": false,
+      "allows_raw_provider_responses": false,
+      "notes": "Generated context packs with token budgets."
+    },
+    {
+      "path": ".opensks/history/raw/",
+      "plane": "local_durable",
+      "git_tracking": "ignore",
+      "retention": "bounded_retention",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": true,
+      "allows_raw_provider_responses": true,
+      "notes": "Raw local run evidence that is not safe as shared history."
+    },
+    {
+      "path": ".opensks/assets/candidates/",
+      "plane": "ephemeral_local",
+      "git_tracking": "ignore",
+      "retention": "gc_after_selection",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": false,
+      "allows_raw_provider_responses": false,
+      "notes": "Temporary image candidates before selection or proof capture."
+    }
+  ],
+  "invariants": [
+    "secret_local_paths_never_tracked",
+    "shared_paths_must_not_contain_raw_provider_responses",
+    "shared_paths_must_not_contain_machine_absolute_paths",
+    "ephemeral_local_paths_must_be_rebuildable_or_gc_safe",
+    "broad_dot_opensks_ignore_is_not_allowed"
+  ]
+}

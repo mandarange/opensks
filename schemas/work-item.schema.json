@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WorkItem",
+  "type": "object",
+  "required": [
+    "id",
+    "reason_code",
+    "run_id",
+    "schema",
+    "state",
+    "title"
+  ],
+  "properties": {
+    "depends_on": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "id": {
+      "type": "string"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/definitions/ExecutionStatus"
+    },
+    "title": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "ExecutionStatus": {
+      "type": "string",
+      "enum": [
+        "ready",
+        "queued",
+        "leased",
+        "running",
+        "waiting",
+        "verifying",
+        "awaiting_approval",
+        "applying",
+        "paused",
+        "retrying",
+        "blocked",
+        "failed",
+        "cancelled",
+        "completed"
+      ]
+    }
+  }
+}

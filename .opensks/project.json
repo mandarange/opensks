@@ -1,0 +1,26 @@
+{
+  "schema": "opensks.project.v1",
+  "name": "OpenSKS",
+  "baseline_commit": "9a96a61121147a9fff2c7340089ee2e681ab8fea",
+  "work_order_sha256": "abfc8d3d1cf323e3791b16cd966dae5f383477e04b614dfa6c4a9ce462d9f0fe",
+  "shared_planes": [
+    ".opensks/pipelines",
+    ".opensks/wiki/records",
+    ".opensks/wiki/glossary",
+    ".opensks/wiki/wrongness",
+    ".opensks/wiki/avoidance-rules",
+    ".opensks/wiki/codegraph",
+    ".opensks/wiki/manifests",
+    ".opensks/history/runs"
+  ],
+  "local_planes": [
+    ".opensks/runtime",
+    ".opensks/cache",
+    ".opensks/tmp",
+    ".opensks/logs",
+    ".opensks/secrets",
+    ".opensks/worktrees",
+    ".opensks/macos",
+    ".opensks/providers/local"
+  ]
+}

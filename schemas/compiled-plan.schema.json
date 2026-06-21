@@ -1,0 +1,274 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CompiledPlan",
+  "type": "object",
+  "required": [
+    "dependency_index",
+    "graph_hash",
+    "graph_id",
+    "graph_version",
+    "plan_hash",
+    "proof_contract",
+    "resource_plan",
+    "schema"
+  ],
+  "properties": {
+    "approval_points": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ApprovalPoint"
+      }
+    },
+    "dependency_index": {
+      "$ref": "#/definitions/DependencyIndex"
+    },
+    "diagnostics": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/CompileDiagnostic"
+      }
+    },
+    "graph_hash": {
+      "type": "string"
+    },
+    "graph_id": {
+      "type": "string"
+    },
+    "graph_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "plan_hash": {
+      "type": "string"
+    },
+    "proof_contract": {
+      "$ref": "#/definitions/CompletionContract"
+    },
+    "resource_plan": {
+      "$ref": "#/definitions/ResourcePlan"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "work_templates": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/WorkTemplate"
+      }
+    }
+  },
+  "definitions": {
+    "ApprovalPoint": {
+      "type": "object",
+      "required": [
+        "node_id",
+        "reason_code",
+        "scope"
+      ],
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        }
+      }
+    },
+    "CapabilityRequirements": {
+      "type": "object",
+      "required": [
+        "code",
+        "image_edit",
+        "image_output",
+        "structured_output",
+        "text",
+        "tool_use",
+        "vision_input"
+      ],
+      "properties": {
+        "code": {
+          "type": "boolean"
+        },
+        "image_edit": {
+          "type": "boolean"
+        },
+        "image_output": {
+          "type": "boolean"
+        },
+        "structured_output": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "boolean"
+        },
+        "tool_use": {
+          "type": "boolean"
+        },
+        "vision_input": {
+          "type": "boolean"
+        }
+      }
+    },
+    "CompileDiagnostic": {
+      "type": "object",
+      "required": [
+        "message",
+        "reason_code",
+        "severity"
+      ],
+      "properties": {
+        "edge_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/definitions/DiagnosticSeverity"
+        }
+      }
+    },
+    "CompletionContract": {
+      "type": "object",
+      "required": [
+        "evidence_required"
+      ],
+      "properties": {
+        "evidence_required": {
+          "type": "boolean"
+        },
+        "final_seal_node_ids": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "required_requirement_ids": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "DependencyIndex": {
+      "type": "object",
+      "properties": {
+        "prerequisites": {
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "DiagnosticSeverity": {
+      "type": "string",
+      "enum": [
+        "info",
+        "warning",
+        "error"
+      ]
+    },
+    "ResourcePlan": {
+      "type": "object",
+      "required": [
+        "max_parallelism",
+        "requires_external_side_effect_approval",
+        "requires_git_worktree",
+        "requires_image"
+      ],
+      "properties": {
+        "max_parallelism": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "requires_external_side_effect_approval": {
+          "type": "boolean"
+        },
+        "requires_git_worktree": {
+          "type": "boolean"
+        },
+        "requires_image": {
+          "type": "boolean"
+        }
+      }
+    },
+    "WorkKind": {
+      "type": "string",
+      "enum": [
+        "planning",
+        "model_inference",
+        "tool_execution",
+        "write_candidate",
+        "verification",
+        "integration",
+        "approval",
+        "external_side_effect"
+      ]
+    },
+    "WorkTemplate": {
+      "type": "object",
+      "required": [
+        "capability_requirements",
+        "id",
+        "kind",
+        "node_id"
+      ],
+      "properties": {
+        "capability_requirements": {
+          "$ref": "#/definitions/CapabilityRequirements"
+        },
+        "dependencies": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/WorkKind"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "requirement_ids": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

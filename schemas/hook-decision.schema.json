@@ -1,0 +1,72 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "HookDecision",
+  "type": "object",
+  "required": [
+    "action",
+    "hook_id",
+    "invocation_id",
+    "payload",
+    "phase",
+    "reason_code",
+    "redacted",
+    "schema"
+  ],
+  "properties": {
+    "action": {
+      "$ref": "#/definitions/HookAction"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "hook_id": {
+      "type": "string"
+    },
+    "invocation_id": {
+      "type": "string"
+    },
+    "payload": true,
+    "phase": {
+      "$ref": "#/definitions/HookPhase"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "redacted": {
+      "type": "boolean"
+    },
+    "schema": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "HookAction": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "block",
+        "modify",
+        "redirect",
+        "retry"
+      ]
+    },
+    "HookPhase": {
+      "type": "string",
+      "enum": [
+        "before_run",
+        "before_node",
+        "before_provider_call",
+        "before_tool_call",
+        "before_apply_patch",
+        "before_external_write",
+        "after_node",
+        "after_run",
+        "on_error"
+      ]
+    }
+  }
+}

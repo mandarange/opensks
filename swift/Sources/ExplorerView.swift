@@ -1,6 +1,5 @@
 // ExplorerView.swift — column-2 content host. Its body swaps with the selected
-// rail section: a real file tree, agent-run cards, or honest provider/proof/
-// artifact panels.
+// rail section and keeps not-live surfaces explicitly marked.
 
 import SwiftUI
 
@@ -21,11 +20,16 @@ struct ExplorerView: View {
             .padding(.bottom, 8)
 
             switch state.selectedRail {
-            case .explorer: fileTree
-            case .agentRuns: agentRuns
-            case .providers: providers
-            case .proof: proof
-            case .artifacts: artifacts
+            case .home: home
+            case .graph: graphEditor
+            case .runs: agentRuns
+            case .queue: queue
+            case .models: providers
+            case .intelligence: projectIntelligence
+            case .git: notVerified("Git Studio requires real worktree and Outbox APIs.")
+            case .evidence: proof
+            case .files: fileTree
+            case .settings: artifacts
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -44,19 +48,266 @@ struct ExplorerView: View {
         .environment(\.defaultMinListRowHeight, 26)
     }
 
+    private var home: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                MetricCallout(value: state.engineStatus, label: "engine daemon", accent: state.engineStatus == "Ready" ? Theme.accent : Theme.gold)
+                ForEach(state.engineEvents.prefix(4)) { event in
+                    eventRow(event)
+                }
+                GhostButton(title: "Check engine health", systemImage: "heart.text.square") {
+                    state.connectEngine()
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
+        }
+    }
+
+    private func eventRow(_ event: EngineEvent) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(event.eventType.rawValue)
+                .font(Theme.ui(12, .semibold))
+                .foregroundStyle(event.severity.isError ? Theme.coral : Theme.text)
+            Text(event.message)
+                .font(Theme.ui(11))
+                .foregroundStyle(Theme.muted)
+                .lineLimit(2)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: Theme.rMd).fill(Theme.panel))
+        .overlay(RoundedRectangle(cornerRadius: Theme.rMd).strokeBorder(Theme.stroke, lineWidth: 1))
+    }
+
+    private func notVerified(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            StatePill(label: "Not verified", color: Theme.gold)
+            Text(message)
+                .font(Theme.ui(12))
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 12)
+    }
+
     private var agentRuns: some View {
         ScrollView {
             VStack(spacing: 8) {
-                ForEach((state.data?.workerLanes ?? []).reversed()) { lane in
-                    laneCard(lane)
+                if !state.executionStore.runs.isEmpty {
+                    LazyVGrid(columns: [
+                        GridItem(.flexible(), spacing: 8),
+                        GridItem(.flexible(), spacing: 8)
+                    ], alignment: .leading, spacing: 8) {
+                        GhostButton(title: "Pause", systemImage: "pause.fill") {
+                            state.pauseEngineRun()
+                        }
+                        GhostButton(title: "Resume", systemImage: "play.fill") {
+                            state.resumeEngineRun()
+                        }
+                        GhostButton(title: "Cancel", systemImage: "xmark.circle") {
+                            state.cancelEngineRun()
+                        }
+                        GhostButton(title: "Replay", systemImage: "arrow.clockwise") {
+                            state.replayEngineRun()
+                        }
+                        GhostButton(title: "Tail", systemImage: "dot.radiowaves.left.and.right") {
+                            state.tailEngineRun()
+                        }
+                    }
+                    LazyVGrid(columns: [
+                        GridItem(.flexible(), spacing: 8),
+                        GridItem(.flexible(), spacing: 8)
+                    ], alignment: .leading, spacing: 8) {
+                        GhostButton(title: "Request", systemImage: "hand.raised") {
+                            state.requestEngineApproval()
+                        }
+                        GhostButton(title: "Approve", systemImage: "checkmark.seal") {
+                            state.approveFirstApproval()
+                        }
+                        GhostButton(title: "Deny", systemImage: "xmark.seal") {
+                            state.denyFirstApproval()
+                        }
+                    }
+                    ForEach(state.executionStore.runs) { run in
+                        runCard(run)
+                    }
+                    ForEach(state.executionStore.approvals) { approval in
+                        approvalCard(approval)
+                    }
+                } else {
+                    ForEach((state.data?.workerLanes ?? []).reversed()) { lane in
+                        laneCard(lane)
+                    }
                 }
-                if (state.data?.workerLanes ?? []).isEmpty {
+                if state.executionStore.runs.isEmpty && (state.data?.workerLanes ?? []).isEmpty {
                     emptyNote("No agent runs yet.")
                 }
             }
             .padding(.horizontal, 12)
             .padding(.bottom, 12)
         }
+    }
+
+    private var queue: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                StatePill(label: state.executionStore.queueItems.isEmpty ? "Not verified" : "Event sourced", color: state.executionStore.queueItems.isEmpty ? Theme.gold : Theme.accent)
+                ForEach(state.executionStore.queueItems) { item in
+                    queueCard(item)
+                }
+                if state.executionStore.queueItems.isEmpty {
+                    emptyNote("Queue state will reconstruct from execution events.")
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
+        }
+    }
+
+    private var graphEditor: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                StatePill(label: state.graphEditorStore.problems.isEmpty ? "Compiled" : "Problems", color: state.graphEditorStore.problems.isEmpty ? Theme.accent : Theme.gold)
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 8),
+                    GridItem(.flexible(), spacing: 8)
+                ], alignment: .leading, spacing: 8) {
+                    GhostButton(title: "Template", systemImage: "square.grid.2x2") {
+                        state.loadGraphTemplate()
+                    }
+                    GhostButton(title: "Save", systemImage: "square.and.arrow.down") {
+                        state.saveGraphEditorDocument()
+                    }
+                    GhostButton(title: "Load", systemImage: "folder") {
+                        state.loadGraphEditorDocument()
+                    }
+                    GhostButton(title: "Run", systemImage: "play.fill") {
+                        state.runGraphEditorDocument()
+                    }
+                }
+                MetricCallout(value: "\(state.graphEditorStore.nodes.count)", label: "graph nodes", accent: Theme.accent)
+                Text(state.graphEditorStore.documentName)
+                    .font(Theme.ui(12, .semibold))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                if let path = state.graphEditorStore.lastSavedPath {
+                    Text(path)
+                        .font(Theme.mono(10.5))
+                        .foregroundStyle(Theme.muted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                if let path = state.graphEditorStore.lastExportedGraphPath {
+                    Text("export \(path)")
+                        .font(Theme.mono(10.5))
+                        .foregroundStyle(Theme.muted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                ForEach(state.graphEditorStore.visibleNodes(limit: 12)) { node in
+                    HStack {
+                        Text(node.title).font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+                        Spacer()
+                        Chip(text: node.kind, color: Theme.muted)
+                    }
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: Theme.rMd).fill(Theme.panel))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.rMd).strokeBorder(Theme.stroke, lineWidth: 1))
+                }
+                ForEach(state.graphEditorStore.problems.prefix(4)) { problem in
+                    Text(problem.message).font(Theme.ui(11)).foregroundStyle(Theme.gold)
+                }
+                if state.graphEditorStore.nodes.isEmpty {
+                    emptyNote("Graph editor state is ready for templates and compile diagnostics.")
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
+        }
+    }
+
+    private var projectIntelligence: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                StatePill(label: state.intelligenceStore.freshnessLabel, color: state.intelligenceStore.freshnessLabel == "Fresh" ? Theme.accent : Theme.gold)
+                MetricCallout(value: "\(state.intelligenceStore.records.count)", label: "intelligence records", accent: Theme.accent)
+                ForEach(state.intelligenceStore.visibleRecords(limit: 12)) { record in
+                    Button {
+                        if let path = state.intelligenceStore.sourcePath(for: record.id) {
+                            state.openFile(path)
+                            state.selectedRail = .files
+                        }
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(record.title).font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+                                Text(record.summary).font(Theme.ui(10.5)).foregroundStyle(Theme.muted).lineLimit(2)
+                            }
+                            Spacer()
+                            Chip(text: record.kind, color: Theme.muted)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: Theme.rMd).fill(Theme.panel))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.rMd).strokeBorder(Theme.stroke, lineWidth: 1))
+                }
+                if state.intelligenceStore.records.isEmpty {
+                    emptyNote("Project Intelligence will lazy-load CodeGraph and TriWiki records.")
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
+        }
+    }
+
+    private func runCard(_ run: RunRecord) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(run.id).font(Theme.ui(11.5, .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+                Spacer()
+                Chip(text: run.state, color: LaneStatus.color(run.state))
+            }
+            Text(run.lastMessage).font(Theme.ui(10.5)).foregroundStyle(Theme.muted).lineLimit(2)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: Theme.rMd).fill(Theme.panel))
+        .overlay(RoundedRectangle(cornerRadius: Theme.rMd).strokeBorder(Theme.stroke, lineWidth: 1))
+    }
+
+    private func queueCard(_ item: QueueItemRecord) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: LaneStatus.symbol(item.state))
+                .font(.system(size: 12))
+                .foregroundStyle(LaneStatus.color(item.state))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.id).font(Theme.ui(11.5, .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+                Text("\(item.state) · priority \(item.priority)").font(Theme.ui(10.5)).foregroundStyle(Theme.muted)
+            }
+            Spacer()
+            Chip(text: "#\(item.lastSequence)", color: Theme.muted)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: Theme.rMd).fill(Theme.panel))
+        .overlay(RoundedRectangle(cornerRadius: Theme.rMd).strokeBorder(Theme.stroke, lineWidth: 1))
+    }
+
+    private func approvalCard(_ approval: ApprovalRecord) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: approval.state == "approved" ? "checkmark.seal.fill" : "hand.raised")
+                .font(.system(size: 12))
+                .foregroundStyle(approval.state == "denied" ? Theme.coral : Theme.gold)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(approval.id).font(Theme.ui(11.5, .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+                Text("\(approval.scope) · \(approval.state)").font(Theme.ui(10.5)).foregroundStyle(Theme.muted)
+            }
+            Spacer()
+            Chip(text: "#\(approval.lastSequence)", color: Theme.muted)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: Theme.rMd).fill(Theme.panel))
+        .overlay(RoundedRectangle(cornerRadius: Theme.rMd).strokeBorder(Theme.stroke, lineWidth: 1))
     }
 
     private func laneCard(_ lane: WorkerLane) -> some View {

@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RetentionPlan",
+  "type": "object",
+  "required": [
+    "active_run_protected",
+    "schema"
+  ],
+  "properties": {
+    "active_run_protected": {
+      "type": "boolean"
+    },
+    "blocked_paths": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "delete_paths": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "keep_paths": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "schema": {
+      "type": "string"
+    }
+  }
+}

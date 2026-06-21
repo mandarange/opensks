@@ -1,0 +1,72 @@
+name: ci-macos-app
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  macos-app:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust build
+        run: cargo build --workspace
+      - name: Swift package build
+        run: swift build --package-path swift
+      - name: Swift package tests
+        run: swift test --package-path swift
+      - name: Daemon persistent stdio test
+        run: cargo test --test daemon_stdio_stream --quiet
+      - name: Daemon bridge smoke
+        run: cargo run -- daemon --stdio --workspace "$PWD"
+      - name: Daemon run.start bridge smoke
+        run: |
+          cargo run -- graph templates
+          printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-macos-run","kind":"run_start","protocol_version":"opensks.contracts.v1","params":{"pipeline_id":"single-model-safe","objective":"macOS daemon graph run","run_id":"run-macos-daemon"}}' \
+            | cargo run -- daemon --stdio --workspace "$PWD" \
+            | tee /tmp/opensks-macos-daemon-run-start.ndjson
+          grep '"kind":"snapshot_written"' /tmp/opensks-macos-daemon-run-start.ndjson
+      - name: Daemon graph_path bridge smoke
+        run: |
+          printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-macos-run-graph-path","kind":"run_start","protocol_version":"opensks.contracts.v1","params":{"pipeline_id":"editor-export-smoke","graph_path":".opensks/pipelines/templates/single-model-safe.graph.json","objective":"macOS daemon saved graph run","run_id":"run-macos-graph-path"}}' \
+            | cargo run -- daemon --stdio --workspace "$PWD" \
+            | tee /tmp/opensks-macos-daemon-graph-path.ndjson
+          grep '"graph_source":"workspace_graph_path"' /tmp/opensks-macos-daemon-graph-path.ndjson
+          grep '"kind":"snapshot_written"' /tmp/opensks-macos-daemon-graph-path.ndjson
+      - name: Daemon subscription replay smoke
+        run: |
+          printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-macos-subscribe","kind":"subscribe_events","protocol_version":"opensks.contracts.v1","params":{"run_id":"run-macos-daemon","since_sequence":1,"tail_ms":1,"poll_interval_ms":1,"reason_code":"reconnect_replay_requested"}}' \
+            | cargo run -- daemon --stdio --workspace "$PWD" \
+            | tee /tmp/opensks-macos-daemon-subscribe.ndjson
+          grep '"event-store:replay-since"' /tmp/opensks-macos-daemon-subscribe.ndjson
+          grep '"daemon:subscription-tail-complete"' /tmp/opensks-macos-daemon-subscribe.ndjson
+          grep '"kind":"snapshot_written"' /tmp/opensks-macos-daemon-subscribe.ndjson
+      - name: Daemon run control bridge smoke
+        run: |
+          {
+            printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-macos-control-start","kind":"run_start","protocol_version":"opensks.contracts.v1","params":{"pipeline_id":"single-model-safe","objective":"macOS daemon control run","run_id":"run-macos-control"}}'
+            printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-macos-control-cancel","kind":"run_cancel","protocol_version":"opensks.contracts.v1","params":{"run_id":"run-macos-control","reason_code":"cancelled_by_user","message":"cancel smoke"}}'
+          } | cargo run -- daemon --stdio --workspace "$PWD" \
+            | tee /tmp/opensks-macos-daemon-run-control.ndjson
+          grep '"kind":"run_cancelled"' /tmp/opensks-macos-daemon-run-control.ndjson
+      - name: Daemon approval bridge smoke
+        run: |
+          {
+            printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-macos-approval-start","kind":"run_start","protocol_version":"opensks.contracts.v1","params":{"pipeline_id":"single-model-safe","objective":"macOS daemon approval run","run_id":"run-macos-approval"}}'
+            printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-macos-approval-request","kind":"approval_request","protocol_version":"opensks.contracts.v1","params":{"run_id":"run-macos-approval","approval_id":"approval-macos","scope":"git_push","message":"approval smoke","reason_code":"approval_required"}}'
+            printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-macos-approval-deny","kind":"approval_deny","protocol_version":"opensks.contracts.v1","params":{"run_id":"run-macos-approval","approval_id":"approval-macos","scope":"git_push","message":"denied smoke","reason_code":"permission_denied"}}'
+          } | cargo run -- daemon --stdio --workspace "$PWD" \
+            | tee /tmp/opensks-macos-daemon-approval.ndjson
+          grep '"kind":"approval_requested"' /tmp/opensks-macos-daemon-approval.ndjson
+          grep '"kind":"approval_denied"' /tmp/opensks-macos-daemon-approval.ndjson
+      - name: Native app bundle smoke
+        run: |
+          rm -rf .opensks/macos
+          OPENSKS_SKIP_DASHBOARD_OPEN=1 cargo run --quiet
+          test -x .opensks/macos/OpenSKS.app/Contents/MacOS/OpenSKS
+          file .opensks/macos/OpenSKS.app/Contents/MacOS/OpenSKS | grep 'Mach-O'
+          test -x .opensks/macos/OpenSKS.app/Contents/Resources/opensks-cli
+          test -f .opensks/macos/OpenSKS.app/Contents/Resources/workspace-path.txt

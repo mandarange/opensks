@@ -1,0 +1,13 @@
+[package]
+name = "opensks-image"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+opensks-contracts = { path = "../opensks-contracts" }
+opensks-provider = { path = "../opensks-provider" }
+opensks-policy = { path = "../opensks-policy" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

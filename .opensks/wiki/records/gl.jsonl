@@ -1,0 +1,1 @@
+{"schema":"opensks.triwiki-record.v1","id":"glossary-work-item","kind":"glossary","title":"WorkItem","body":"A schedulable unit reconstructed from execution events and admitted by the durable scheduler governor.","tags":["glossary"],"evidence_refs":["crates/opensks-scheduler/src/lib.rs"],"shard":"gl.jsonl","redacted":true}

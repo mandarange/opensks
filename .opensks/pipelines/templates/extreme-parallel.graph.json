@@ -1,0 +1,194 @@
+{
+  "schema": "opensks.pipeline-graph.v1",
+  "id": "extreme-parallel",
+  "name": "Extreme Parallel",
+  "version": 1,
+  "entry_nodes": [
+    "goal"
+  ],
+  "nodes": {
+    "delegate": {
+      "id": "delegate",
+      "kind": "delegate",
+      "display_name": "Delegate to model",
+      "enabled": true,
+      "position": {
+        "x": 220.0,
+        "y": 0.0
+      },
+      "inputs": {},
+      "config": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 0,
+        "retryable_reason_codes": []
+      },
+      "approval": {
+        "required": false,
+        "scope": "none"
+      },
+      "hook_refs": []
+    },
+    "goal": {
+      "id": "goal",
+      "kind": "goal_input",
+      "display_name": "Goal input",
+      "enabled": true,
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "inputs": {},
+      "config": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 0,
+        "retryable_reason_codes": []
+      },
+      "approval": {
+        "required": false,
+        "scope": "none"
+      },
+      "hook_refs": []
+    },
+    "seal": {
+      "id": "seal",
+      "kind": "final_seal",
+      "display_name": "Final seal",
+      "enabled": true,
+      "position": {
+        "x": 460.0,
+        "y": 0.0
+      },
+      "inputs": {},
+      "config": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 0,
+        "retryable_reason_codes": []
+      },
+      "approval": {
+        "required": false,
+        "scope": "none"
+      },
+      "hook_refs": []
+    },
+    "verify": {
+      "id": "verify",
+      "kind": "verifier_pool",
+      "display_name": "Verifier pool",
+      "enabled": true,
+      "position": {
+        "x": 340.0,
+        "y": 120.0
+      },
+      "inputs": {},
+      "config": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 0,
+        "retryable_reason_codes": []
+      },
+      "approval": {
+        "required": false,
+        "scope": "none"
+      },
+      "hook_refs": []
+    },
+    "workers": {
+      "id": "workers",
+      "kind": "worker_pool",
+      "display_name": "Worker pool",
+      "enabled": true,
+      "position": {
+        "x": 220.0,
+        "y": 180.0
+      },
+      "inputs": {},
+      "config": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 0,
+        "retryable_reason_codes": []
+      },
+      "approval": {
+        "required": false,
+        "scope": "none"
+      },
+      "hook_refs": []
+    }
+  },
+  "edges": [
+    {
+      "id": "edge-goal-delegate",
+      "from": {
+        "node_id": "goal",
+        "port": "out"
+      },
+      "to": {
+        "node_id": "delegate",
+        "port": "in"
+      },
+      "kind": "control"
+    },
+    {
+      "id": "edge-delegate-verify",
+      "from": {
+        "node_id": "delegate",
+        "port": "out"
+      },
+      "to": {
+        "node_id": "verify",
+        "port": "in"
+      },
+      "kind": "control"
+    },
+    {
+      "id": "edge-verify-seal",
+      "from": {
+        "node_id": "verify",
+        "port": "out"
+      },
+      "to": {
+        "node_id": "seal",
+        "port": "in"
+      },
+      "kind": "control"
+    },
+    {
+      "id": "edge-delegate-workers",
+      "from": {
+        "node_id": "delegate",
+        "port": "out"
+      },
+      "to": {
+        "node_id": "workers",
+        "port": "in"
+      },
+      "kind": "control"
+    },
+    {
+      "id": "edge-workers-verify",
+      "from": {
+        "node_id": "workers",
+        "port": "out"
+      },
+      "to": {
+        "node_id": "verify",
+        "port": "in"
+      },
+      "kind": "control"
+    }
+  ],
+  "variables": {},
+  "policies": {
+    "max_parallelism": 28,
+    "allow_external_side_effects": false,
+    "final_seal_required": true
+  },
+  "metadata": {
+    "description": "Default automatic safe pipeline with one compatible model.",
+    "created_by": "opensks-graph",
+    "evidence_refs": []
+  }
+}

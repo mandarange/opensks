@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExecutionEvent",
+  "type": "object",
+  "required": [
+    "event_id",
+    "message",
+    "phase",
+    "reason_code",
+    "run_id",
+    "schema",
+    "status",
+    "timestamp_ms",
+    "trust_status"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "message": {
+      "type": "string"
+    },
+    "phase": {
+      "type": "string"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/definitions/ExecutionStatus"
+    },
+    "timestamp_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "trust_status": {
+      "$ref": "#/definitions/TrustStatus"
+    }
+  },
+  "definitions": {
+    "ExecutionStatus": {
+      "type": "string",
+      "enum": [
+        "ready",
+        "queued",
+        "leased",
+        "running",
+        "waiting",
+        "verifying",
+        "awaiting_approval",
+        "applying",
+        "paused",
+        "retrying",
+        "blocked",
+        "failed",
+        "cancelled",
+        "completed"
+      ]
+    },
+    "TrustStatus": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "verified_with_partial_evidence",
+        "not_verified",
+        "stale",
+        "partial",
+        "unavailable"
+      ]
+    }
+  }
+}

@@ -1,0 +1,448 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PipelineGraph",
+  "type": "object",
+  "required": [
+    "id",
+    "metadata",
+    "name",
+    "policies",
+    "schema",
+    "version"
+  ],
+  "properties": {
+    "edges": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/EdgeSpec"
+      }
+    },
+    "entry_nodes": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "id": {
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/definitions/GraphMetadata"
+    },
+    "name": {
+      "type": "string"
+    },
+    "nodes": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/NodeSpec"
+      }
+    },
+    "policies": {
+      "$ref": "#/definitions/GraphPolicies"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "variables": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/GraphValue"
+      }
+    },
+    "version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "ApprovalPolicy": {
+      "type": "object",
+      "required": [
+        "required",
+        "scope"
+      ],
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "scope": {
+          "type": "string"
+        }
+      }
+    },
+    "EdgeKind": {
+      "type": "string",
+      "enum": [
+        "data",
+        "control",
+        "error",
+        "evidence",
+        "cancellation"
+      ]
+    },
+    "EdgeSpec": {
+      "type": "object",
+      "required": [
+        "from",
+        "id",
+        "kind",
+        "to"
+      ],
+      "properties": {
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Expression"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "from": {
+          "$ref": "#/definitions/PortRef"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/EdgeKind"
+        },
+        "to": {
+          "$ref": "#/definitions/PortRef"
+        }
+      }
+    },
+    "Expression": {
+      "type": "object",
+      "required": [
+        "language",
+        "source"
+      ],
+      "properties": {
+        "language": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      }
+    },
+    "GraphMetadata": {
+      "type": "object",
+      "required": [
+        "created_by",
+        "description"
+      ],
+      "properties": {
+        "created_by": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "GraphPoint": {
+      "type": "object",
+      "required": [
+        "x",
+        "y"
+      ],
+      "properties": {
+        "x": {
+          "type": "number",
+          "format": "double"
+        },
+        "y": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "GraphPolicies": {
+      "type": "object",
+      "required": [
+        "allow_external_side_effects",
+        "final_seal_required",
+        "max_parallelism"
+      ],
+      "properties": {
+        "allow_external_side_effects": {
+          "type": "boolean"
+        },
+        "final_seal_required": {
+          "type": "boolean"
+        },
+        "max_parallelism": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "GraphValue": {
+      "type": "object",
+      "required": [
+        "value_type"
+      ],
+      "properties": {
+        "secret_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": true,
+        "value_type": {
+          "$ref": "#/definitions/PortType"
+        }
+      }
+    },
+    "NodeKind": {
+      "type": "string",
+      "enum": [
+        "goal_input",
+        "requirement_extractor",
+        "requirement_gate",
+        "branch",
+        "switch",
+        "join_all",
+        "join_any",
+        "loop",
+        "delay",
+        "queue",
+        "approval",
+        "breakpoint",
+        "subgraph",
+        "final_seal",
+        "code_graph_query",
+        "context_pack",
+        "tri_wiki_recall",
+        "wrongness_recall",
+        "glossary_query",
+        "architecture_snapshot",
+        "web_research",
+        "mcp_resource",
+        "reasoning_strategy",
+        "socratic_review",
+        "debate",
+        "red_team",
+        "consensus",
+        "arbiter",
+        "decompose",
+        "critique",
+        "synthesize",
+        "model_call",
+        "delegate",
+        "candidate_pool",
+        "worker_pool",
+        "verifier_pool",
+        "role_router",
+        "fallback_router",
+        "quorum",
+        "read_files",
+        "search_code",
+        "run_command",
+        "mcp_tool",
+        "skill",
+        "generate_patch",
+        "apply_patch",
+        "run_tests",
+        "static_analysis",
+        "security_scan",
+        "image_generate",
+        "image_edit",
+        "image_variation",
+        "screenshot_capture",
+        "visual_review",
+        "image_voxel_anchor",
+        "before_after_compare",
+        "git_status",
+        "git_diff",
+        "git_worktree",
+        "git_stage",
+        "git_commit",
+        "git_push",
+        "pull_request",
+        "browser_observe",
+        "browser_action",
+        "app_inspect",
+        "app_action",
+        "computer_observe",
+        "computer_action",
+        "cancelled",
+        "blocked"
+      ]
+    },
+    "NodeSpec": {
+      "type": "object",
+      "required": [
+        "approval",
+        "config",
+        "display_name",
+        "enabled",
+        "id",
+        "kind",
+        "position",
+        "retry"
+      ],
+      "properties": {
+        "approval": {
+          "$ref": "#/definitions/ApprovalPolicy"
+        },
+        "config": true,
+        "display_name": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "hook_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "inputs": {
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/PortBinding"
+          }
+        },
+        "kind": {
+          "$ref": "#/definitions/NodeKind"
+        },
+        "position": {
+          "$ref": "#/definitions/GraphPoint"
+        },
+        "retry": {
+          "$ref": "#/definitions/RetryPolicy"
+        },
+        "timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "PortBinding": {
+      "type": "object",
+      "required": [
+        "port_type",
+        "required"
+      ],
+      "properties": {
+        "port_type": {
+          "$ref": "#/definitions/PortType"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PortRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": true
+      }
+    },
+    "PortRef": {
+      "type": "object",
+      "required": [
+        "node_id",
+        "port"
+      ],
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "port": {
+          "type": "string"
+        }
+      }
+    },
+    "PortType": {
+      "type": "string",
+      "enum": [
+        "string",
+        "boolean",
+        "integer",
+        "float",
+        "json",
+        "file_ref",
+        "file_set",
+        "symbol_ref",
+        "code_graph_query",
+        "context_pack",
+        "requirement_set",
+        "work_item_set",
+        "model_selector",
+        "model_response",
+        "patch_envelope",
+        "verification_result",
+        "image_ref",
+        "image_set",
+        "visual_anchor_set",
+        "git_diff",
+        "git_commit_ref",
+        "evidence_ref",
+        "proof_ref",
+        "error",
+        "control"
+      ]
+    },
+    "RetryPolicy": {
+      "type": "object",
+      "required": [
+        "backoff_ms",
+        "max_attempts"
+      ],
+      "properties": {
+        "backoff_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_attempts": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "retryable_reason_codes": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

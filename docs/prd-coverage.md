@@ -1,10 +1,15 @@
 # PRD v3 Coverage Ledger
 
-This repository is being implemented against:
+This repository is being implemented against a portable project PRD source
+label:
 
 ```text
-/Users/weklem/Desktop/opensks_prd_v3_goal_loop_mcp_computer_use_voxel_triwiki.md
+project-prd:opensks-prd-v3-goal-loop-mcp-computer-use-voxel-triwiki
 ```
+
+The source label avoids recording a developer-local home path in shared
+artifacts. Future PRs can resolve it through a project-relative document, an
+explicit CLI flag, or local config without changing the shared coverage schema.
 
 The CLI can generate the machine-readable ledger:
 
@@ -84,11 +89,15 @@ Current live local slices:
 - `computer-use` brokers safe observation, blocks or marks mouse/keyboard and sensitive actions for approval, and writes screenshot/final-state/action-plan/policy-decision artifacts. The scoped `beta-002` pass is local isolated computer/browser observation-loop evidence only: it requires `isolated-browser-container.json`, `computer-browser-loop.json`, `computer-browser-loop-events.jsonl`, `isolated-browser-runtime/index.html`, policy evidence, and final-state evidence. Deterministic synthetic local HTML open/click/type event artifacts are recorded with policy approval boundaries; this does not claim live browser container control, live mouse/keyboard execution, external web control, or arbitrary browser automation.
 - `app-use` brokers native app intents for the scoped `mvp-008` pass, "App use can inspect macOS accessibility tree", as local artifact evidence only. It writes `accessibility-tree.json`, `running-apps.json`, `app-final-state.json`, and policy/action-plan artifacts. The scoped acceptance check requires a captured accessibility-tree node or frontmost app, a running-app inventory, inspection attempted, policy allowed inspection, and `live_app_actions_executed=false`; it does not prove full native app action execution, arbitrary UI control, or live macOS app automation.
 - `app` writes a static `.opensks/app/dashboard.html` plus `gui-data.json` and `worker-lanes.json` from local PRD, QA/security, Voxel TriWiki, provider, mission status, worker-lane, and use-plane artifacts, and also writes platform, module, macOS integration, source-note, and product-statement manifests.
+- `opensks-cli` now owns daemon command parsing, daemon stdio handoff, `history init`, `graph templates|compile`, `hooks replay`, `codegraph index|query`, `triwiki seed`, `context pack`, `worktree create|isolate`, `provider route`, `patch propose|check`, `image ledger`, `reasoning debate`, `git outbox`, `gc plan`, `release proof`, `scheduler run|simulate|dispatch|recover`, and `worker runtime` as narrow crate-extraction steps toward the work-order facade requirement. The rest of the legacy command router still lives mostly in the root package and remains a monolith-reduction gap.
+- `swift/Package.swift` is now the native Studio app source of truth for CI and local bundle generation. The generated `OpenSKS.app` copies the SwiftPM `OpenSKSStudio` product into `Contents/MacOS/OpenSKS`; root Rust no longer manually embeds `swift/Sources/*.swift` before compiling the app.
+- The daemon stream bridge now accepts request lines into a bounded pending request router, so a finite tailing `subscribe_events` request does not block a later health/control request on the same stdio session. The Swift daemon bridge keeps one per-workspace daemon child process, decodes daemon/execution event labels as typed enums with unknown-label preservation, and routes pending response streams by request/run ownership so concurrent health/run/control/approval/subscribe responses, including overlapping same-run start/subscribe requests, do not drain each other's lines. This is not yet a persistent live scheduler subscription bus or live provider worker bridge.
 - `design qa` scans local design surfaces and records static accessibility/responsive/color-token findings. The scoped `beta-003` pass is deterministic local raster screenshot artifact plus pixel diff evidence only: it writes generated local PPM screenshot artifacts, `design-screenshot-snapshots.jsonl`, and `design-screenshot-diff-report.json` from local renderer state between runs. It does not claim live browser-rendered screenshot capture, Chrome Extension evidence, gpt-image-2/ImageGen review, Product Design plugin visual comparison, or external design service execution.
 - `mcp audit` writes a broker policy that denies raw model tool calls by default.
 - `mcp describe`, `mcp invoke`, and `mcp serve --once` provide a local MCP-style JSON-RPC surface for allowlisted OpenSKS tools.
 - `scheduler run` writes a bounded local scheduler plan, event stream, final state, and local `stage-overlap-report.json` from concurrent runtime metadata checks, which is the artifact scope for the `prod-002` local scheduler overlap target.
-- `worktree create` creates an isolated snapshot under `.opensks/worktrees/.../workspace`.
+- `worker runtime` writes local worker lease, heartbeat, daemon-visible bus, routing, and final-state artifacts under `.opensks/workers/<run-id>/`, including active leases, expired lease recovery by reassignment, and concurrent local request routing. Live provider workers and a live remote provider bus remain explicitly false.
+- `worktree create` remains the legacy isolated snapshot command under `.opensks/worktrees/.../workspace`; `worktree isolate` uses `opensks-git` to create a real detached Git worktree for Git repositories and snapshot fallback only for non-Git workspaces.
 - `patch propose` writes a patch envelope plus gate result that blocks final apply until real checks pass.
 
 The project is not complete until the acceptance criteria in PRD section 18 are

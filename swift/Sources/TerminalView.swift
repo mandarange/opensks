@@ -92,7 +92,7 @@ struct TerminalView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
             }
-            .onChange(of: state.lines.count) { _, _ in
+            .onChange(of: state.lines.count) { _ in
                 withAnimation(.linear(duration: 0.1)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
         }

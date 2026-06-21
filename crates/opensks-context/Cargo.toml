@@ -1,0 +1,12 @@
+[package]
+name = "opensks-context"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+opensks-contracts = { path = "../opensks-contracts" }
+opensks-triwiki = { path = "../opensks-triwiki" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

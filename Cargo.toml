@@ -1,6 +1,64 @@
-[package]
-name = "opensks"
+[workspace]
+resolver = "2"
+members = [
+  ".",
+  "crates/opensks-artifacts",
+  "crates/opensks-contracts",
+  "crates/opensks-cli",
+  "crates/opensks-daemon",
+  "crates/opensks-engine",
+  "crates/opensks-event-store",
+  "crates/opensks-git",
+  "crates/opensks-graph",
+  "crates/opensks-hooks",
+  "crates/opensks-codegraph",
+  "crates/opensks-context",
+  "crates/opensks-image",
+  "crates/opensks-policy",
+  "crates/opensks-proof",
+  "crates/opensks-provider",
+  "crates/opensks-reasoning",
+  "crates/opensks-retention",
+  "crates/opensks-scheduler",
+  "crates/opensks-testkit",
+  "crates/opensks-triwiki",
+  "xtask",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+readme = "README.md"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "0.8"
+thiserror = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+debug = 1
+
+[package]
+name = "opensks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme.workspace = true
 
 [dependencies]
+opensks-contracts = { path = "crates/opensks-contracts" }
+opensks-cli = { path = "crates/opensks-cli" }
+opensks-daemon = { path = "crates/opensks-daemon" }
+serde_json = { workspace = true }

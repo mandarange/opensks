@@ -1,0 +1,121 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CodeGraphIndex",
+  "type": "object",
+  "required": [
+    "freshness",
+    "schema",
+    "workspace_fingerprint"
+  ],
+  "properties": {
+    "edges": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/CodeGraphEdge"
+      }
+    },
+    "freshness": {
+      "type": "string"
+    },
+    "records": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/CodeGraphRecord"
+      }
+    },
+    "schema": {
+      "type": "string"
+    },
+    "workspace_fingerprint": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "CodeGraphEdge": {
+      "type": "object",
+      "required": [
+        "from_id",
+        "kind",
+        "to_id"
+      ],
+      "properties": {
+        "from_id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/CodeGraphEdgeKind"
+        },
+        "to_id": {
+          "type": "string"
+        }
+      }
+    },
+    "CodeGraphEdgeKind": {
+      "type": "string",
+      "enum": [
+        "contains",
+        "imports",
+        "calls",
+        "tests",
+        "references",
+        "owns_route"
+      ]
+    },
+    "CodeGraphNodeKind": {
+      "type": "string",
+      "enum": [
+        "file",
+        "symbol",
+        "import",
+        "test",
+        "route"
+      ]
+    },
+    "CodeGraphRecord": {
+      "type": "object",
+      "required": [
+        "content_hash",
+        "id",
+        "kind",
+        "line",
+        "name",
+        "path",
+        "schema"
+      ],
+      "properties": {
+        "content_hash": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/CodeGraphNodeKind"
+        },
+        "line": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

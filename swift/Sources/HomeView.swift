@@ -84,8 +84,8 @@ struct HomeView: View {
             actionCard(
                 "Read the codebase",
                 "Browse the workspace and open files in the syntax-highlighted viewer.",
-                "Open explorer", "folder"
-            ) { state.selectedRail = .explorer }
+                "Open files", "folder"
+            ) { state.selectedRail = .files }
         }
     }
 

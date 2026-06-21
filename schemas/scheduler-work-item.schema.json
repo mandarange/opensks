@@ -1,0 +1,294 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SchedulerWorkItem",
+  "type": "object",
+  "required": [
+    "budget",
+    "capability_requirements",
+    "id",
+    "idempotency_key",
+    "kind",
+    "node_id",
+    "path_scope",
+    "priority",
+    "retry",
+    "run_id",
+    "schema",
+    "state"
+  ],
+  "properties": {
+    "budget": {
+      "$ref": "#/definitions/WorkBudget"
+    },
+    "capability_requirements": {
+      "$ref": "#/definitions/CapabilityRequirements"
+    },
+    "dependencies": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "id": {
+      "type": "string"
+    },
+    "idempotency_key": {
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/definitions/WorkKind"
+    },
+    "lease": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Lease"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "model_selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "node_id": {
+      "type": "string"
+    },
+    "parent_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "path_scope": {
+      "$ref": "#/definitions/PathScope"
+    },
+    "priority": {
+      "type": "integer",
+      "format": "int32"
+    },
+    "requirement_ids": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "retry": {
+      "$ref": "#/definitions/RetryPolicy"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/definitions/WorkState"
+    }
+  },
+  "definitions": {
+    "CapabilityRequirements": {
+      "type": "object",
+      "required": [
+        "code",
+        "image_edit",
+        "image_output",
+        "structured_output",
+        "text",
+        "tool_use",
+        "vision_input"
+      ],
+      "properties": {
+        "code": {
+          "type": "boolean"
+        },
+        "image_edit": {
+          "type": "boolean"
+        },
+        "image_output": {
+          "type": "boolean"
+        },
+        "structured_output": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "boolean"
+        },
+        "tool_use": {
+          "type": "boolean"
+        },
+        "vision_input": {
+          "type": "boolean"
+        }
+      }
+    },
+    "Lease": {
+      "type": "object",
+      "required": [
+        "acquired_at_ms",
+        "holder",
+        "id",
+        "lease_type",
+        "ttl_ms"
+      ],
+      "properties": {
+        "acquired_at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "holder": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "last_heartbeat_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "lease_type": {
+          "$ref": "#/definitions/LeaseType"
+        },
+        "ttl_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "LeaseType": {
+      "type": "string",
+      "enum": [
+        "path_write",
+        "git_worktree",
+        "provider_slot",
+        "tool_session",
+        "browser_session",
+        "approval",
+        "integration"
+      ]
+    },
+    "PathScope": {
+      "type": "object",
+      "required": [
+        "allow_external_write"
+      ],
+      "properties": {
+        "allow_external_write": {
+          "type": "boolean"
+        },
+        "workspace_relative_roots": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "RetryPolicy": {
+      "type": "object",
+      "required": [
+        "backoff_ms",
+        "max_attempts"
+      ],
+      "properties": {
+        "backoff_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_attempts": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "retryable_reason_codes": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "WorkBudget": {
+      "type": "object",
+      "required": [
+        "max_attempts"
+      ],
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "max_cost_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "WorkKind": {
+      "type": "string",
+      "enum": [
+        "planning",
+        "model_inference",
+        "tool_execution",
+        "write_candidate",
+        "verification",
+        "integration",
+        "approval",
+        "external_side_effect"
+      ]
+    },
+    "WorkState": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "ready",
+        "leased",
+        "dispatched",
+        "running",
+        "result_received",
+        "verifying",
+        "awaiting_approval",
+        "applying",
+        "completed",
+        "retry_wait",
+        "blocked",
+        "failed",
+        "cancelled",
+        "superseded"
+      ]
+    }
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ReasoningReport",
+  "type": "object",
+  "required": [
+    "hidden_reasoning_persisted",
+    "id",
+    "max_rounds",
+    "rounds",
+    "schema",
+    "status",
+    "strategy"
+  ],
+  "properties": {
+    "claims": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ReasoningClaim"
+      }
+    },
+    "hidden_reasoning_persisted": {
+      "type": "boolean"
+    },
+    "id": {
+      "type": "string"
+    },
+    "max_rounds": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "rounds": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "schema": {
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/definitions/TrustStatus"
+    },
+    "strategy": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "ReasoningClaim": {
+      "type": "object",
+      "required": [
+        "claim",
+        "counterexample",
+        "evidence",
+        "id",
+        "role"
+      ],
+      "properties": {
+        "claim": {
+          "type": "string"
+        },
+        "counterexample": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        }
+      }
+    },
+    "TrustStatus": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "verified_with_partial_evidence",
+        "not_verified",
+        "stale",
+        "partial",
+        "unavailable"
+      ]
+    }
+  }
+}

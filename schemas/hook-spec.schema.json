@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "HookSpec",
+  "type": "object",
+  "required": [
+    "action",
+    "allow_secret_read",
+    "enabled",
+    "id",
+    "order",
+    "phase",
+    "reason_code",
+    "schema",
+    "timeout_ms"
+  ],
+  "properties": {
+    "action": {
+      "$ref": "#/definitions/HookAction"
+    },
+    "allow_secret_read": {
+      "type": "boolean"
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "id": {
+      "type": "string"
+    },
+    "order": {
+      "type": "integer",
+      "format": "int32"
+    },
+    "phase": {
+      "$ref": "#/definitions/HookPhase"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "HookAction": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "block",
+        "modify",
+        "redirect",
+        "retry"
+      ]
+    },
+    "HookPhase": {
+      "type": "string",
+      "enum": [
+        "before_run",
+        "before_node",
+        "before_provider_call",
+        "before_tool_call",
+        "before_apply_patch",
+        "before_external_write",
+        "after_node",
+        "after_run",
+        "on_error"
+      ]
+    }
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OutboxDispatchReport",
+  "type": "object",
+  "required": [
+    "action",
+    "attempt_count",
+    "executed",
+    "item_id",
+    "reason_code",
+    "schema",
+    "state",
+    "target"
+  ],
+  "properties": {
+    "action": {
+      "$ref": "#/definitions/OutboxAction"
+    },
+    "approval_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "attempt_count": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "executed": {
+      "type": "boolean"
+    },
+    "item_id": {
+      "type": "string"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "state": {
+      "type": "string"
+    },
+    "target": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "OutboxAction": {
+      "type": "string",
+      "enum": [
+        "commit",
+        "push",
+        "pull_request",
+        "external_send"
+      ]
+    }
+  }
+}

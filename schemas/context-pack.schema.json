@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ContextPack",
+  "type": "object",
+  "required": [
+    "body",
+    "estimated_tokens",
+    "id",
+    "schema",
+    "token_budget"
+  ],
+  "properties": {
+    "body": {
+      "type": "string"
+    },
+    "estimated_tokens": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "id": {
+      "type": "string"
+    },
+    "record_ids": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "schema": {
+      "type": "string"
+    },
+    "token_budget": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  }
+}

@@ -1,5 +1,6 @@
 // ComposerView.swift — the right-hand hero. Objective → mode → run → live lanes
-// → pinned honest proof footer. The run buttons map 1:1 to CLI verbs.
+// → pinned honest proof footer. Legacy runs still shell CLI verbs while Engine
+// run feeds the daemon event stream into ExecutionStore.
 
 import SwiftUI
 
@@ -81,7 +82,7 @@ struct ComposerView: View {
                     .strokeBorder(objectiveFocused ? Theme.accentSeam : Theme.strokeSoft,
                                   lineWidth: objectiveFocused ? 1.4 : 1)
             )
-            .onChange(of: state.focusObjective) { _, newValue in
+            .onChange(of: state.focusObjective) { newValue in
                 if newValue { objectiveFocused = true; state.focusObjective = false }
             }
         }
@@ -106,6 +107,14 @@ struct ComposerView: View {
                     enabled: canRun
                 ) { state.startRun() }
                 .keyboardShortcut(.return, modifiers: .command)
+
+                GhostButton(title: "Engine", systemImage: "bolt.horizontal") {
+                    state.startEngineRun()
+                }
+
+                GhostButton(title: "Steer", systemImage: "arrow.triangle.turn.up.right.circle") {
+                    state.steerEngineRun()
+                }
 
                 GhostButton(title: "Acceptance", systemImage: "checkmark.seal") {
                     state.runAcceptance()

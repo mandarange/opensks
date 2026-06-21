@@ -26,7 +26,10 @@ struct RootView: View {
             }
         }
         .environmentObject(state)
-        .onAppear { state.loadData() }
+        .onAppear {
+            state.loadData()
+            state.connectEngine()
+        }
         .sheet(isPresented: $state.showPalette) { CommandPalette() }
     }
 

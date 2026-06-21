@@ -1,0 +1,108 @@
+name: ci-integration
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Fake provider routing
+        run: cargo run -- provider route code
+      - name: Graph compile
+        run: |
+          cargo run -- graph templates
+          cargo run -- graph compile extreme-parallel
+      - name: Daemon persistent stdio test
+        run: cargo test --test daemon_stdio_stream --quiet
+      - name: Daemon run.start event stream
+        run: |
+          printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-ci-run","kind":"run_start","protocol_version":"opensks.contracts.v1","params":{"pipeline_id":"single-model-safe","objective":"CI daemon graph run","run_id":"run-ci-daemon"}}' \
+            | cargo run -- daemon --stdio --workspace "$PWD" \
+            | tee /tmp/opensks-daemon-run-start.ndjson
+          grep '"event_type":"execution_event"' /tmp/opensks-daemon-run-start.ndjson
+          grep '"kind":"work_item_running"' /tmp/opensks-daemon-run-start.ndjson
+          grep '"kind":"snapshot_written"' /tmp/opensks-daemon-run-start.ndjson
+      - name: Daemon graph_path event stream
+        run: |
+          printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-ci-run-graph-path","kind":"run_start","protocol_version":"opensks.contracts.v1","params":{"pipeline_id":"editor-export-smoke","graph_path":".opensks/pipelines/templates/single-model-safe.graph.json","objective":"CI daemon saved graph run","run_id":"run-ci-graph-path"}}' \
+            | cargo run -- daemon --stdio --workspace "$PWD" \
+            | tee /tmp/opensks-daemon-graph-path.ndjson
+          grep '"kind":"run_started"' /tmp/opensks-daemon-graph-path.ndjson
+          grep '"graph_source":"workspace_graph_path"' /tmp/opensks-daemon-graph-path.ndjson
+          grep '"daemon:graph-path-run-start-request"' /tmp/opensks-daemon-graph-path.ndjson
+          grep '"kind":"snapshot_written"' /tmp/opensks-daemon-graph-path.ndjson
+      - name: Daemon subscription replay
+        run: |
+          printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-ci-subscribe","kind":"subscribe_events","protocol_version":"opensks.contracts.v1","params":{"run_id":"run-ci-daemon","since_sequence":1,"tail_ms":1,"poll_interval_ms":1,"reason_code":"reconnect_replay_requested"}}' \
+            | cargo run -- daemon --stdio --workspace "$PWD" \
+            | tee /tmp/opensks-daemon-subscribe.ndjson
+          grep '"request_id":"req-ci-subscribe"' /tmp/opensks-daemon-subscribe.ndjson
+          grep '"event-store:replay-since"' /tmp/opensks-daemon-subscribe.ndjson
+          grep '"daemon:subscription-tail-complete"' /tmp/opensks-daemon-subscribe.ndjson
+          grep '"kind":"snapshot_written"' /tmp/opensks-daemon-subscribe.ndjson
+      - name: Daemon run control event stream
+        run: |
+          {
+            printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-ci-control-start","kind":"run_start","protocol_version":"opensks.contracts.v1","params":{"pipeline_id":"single-model-safe","objective":"CI daemon control run","run_id":"run-ci-control"}}'
+            printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-ci-control-cancel","kind":"run_cancel","protocol_version":"opensks.contracts.v1","params":{"run_id":"run-ci-control","reason_code":"cancelled_by_user","message":"cancel smoke"}}'
+            printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-ci-control-steer","kind":"run_steer","protocol_version":"opensks.contracts.v1","params":{"run_id":"run-ci-control","target_id":"work-template-delegate","reason_code":"user_steering","message":"focus tests"}}'
+          } | cargo run -- daemon --stdio --workspace "$PWD" \
+            | tee /tmp/opensks-daemon-run-control.ndjson
+          grep '"kind":"run_cancelled"' /tmp/opensks-daemon-run-control.ndjson
+          grep '"kind":"steering_requested"' /tmp/opensks-daemon-run-control.ndjson
+          grep '"daemon:run-control-request"' /tmp/opensks-daemon-run-control.ndjson
+      - name: Daemon approval event stream
+        run: |
+          {
+            printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-ci-approval-start","kind":"run_start","protocol_version":"opensks.contracts.v1","params":{"pipeline_id":"single-model-safe","objective":"CI daemon approval run","run_id":"run-ci-approval"}}'
+            printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-ci-approval-request","kind":"approval_request","protocol_version":"opensks.contracts.v1","params":{"run_id":"run-ci-approval","approval_id":"approval-ci","scope":"git_push","message":"approval smoke","reason_code":"approval_required"}}'
+            printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-ci-approval-approve","kind":"approval_approve","protocol_version":"opensks.contracts.v1","params":{"run_id":"run-ci-approval","approval_id":"approval-ci","scope":"git_push","message":"approved smoke","reason_code":"approved_by_user"}}'
+          } | cargo run -- daemon --stdio --workspace "$PWD" \
+            | tee /tmp/opensks-daemon-approval.ndjson
+          grep '"kind":"approval_requested"' /tmp/opensks-daemon-approval.ndjson
+          grep '"kind":"approval_approved"' /tmp/opensks-daemon-approval.ndjson
+          grep '"approval_id":"approval-ci"' /tmp/opensks-daemon-approval.ndjson
+          grep '"daemon:approval-request"' /tmp/opensks-daemon-approval.ndjson
+      - name: Daemon outbox approval gate
+        run: |
+          {
+            printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-ci-outbox-blocked","kind":"outbox_dispatch","protocol_version":"opensks.contracts.v1","params":{"target_id":"main","scope":"git_push","reason_code":"outbox_dispatch_requested"}}'
+            printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-ci-outbox-approved","kind":"outbox_dispatch","protocol_version":"opensks.contracts.v1","params":{"target_id":"main","approval_id":"approval-push-main","scope":"git_push","reason_code":"outbox_dispatch_requested"}}'
+          } | cargo run -- daemon --stdio --workspace "$PWD" \
+            | tee /tmp/opensks-daemon-outbox.ndjson
+          grep '"schema":"opensks.outbox-dispatch-report.v1"' /tmp/opensks-daemon-outbox.ndjson
+          grep '"state":"awaiting_approval"' /tmp/opensks-daemon-outbox.ndjson
+          grep '"reason_code":"approval_required"' /tmp/opensks-daemon-outbox.ndjson
+          grep '"state":"executed"' /tmp/opensks-daemon-outbox.ndjson
+          grep '"daemon:outbox-dispatch"' /tmp/opensks-daemon-outbox.ndjson
+      - name: Hook replay
+        run: cargo run -- hooks replay
+      - name: CodeGraph and context smoke
+        run: |
+          cargo run -- codegraph index
+          cargo run -- codegraph query ExecutionStore
+          cargo run -- triwiki seed
+          cargo run -- context pack 120
+      - name: Image reasoning outbox retention smoke
+        run: |
+          cargo run -- image ledger
+          cargo run -- reasoning debate
+          cargo run -- git outbox
+          cargo run -- gc plan
+          cargo run -- release proof
+      - name: Durable scheduler simulation
+        run: cargo run -- scheduler simulate 512
+      - name: Git worktree and rollback fixtures
+        run: cargo test -p opensks-git --lib
+      - name: Scheduler crash/replay fixtures
+        run: cargo test -p opensks-scheduler --lib
+      - name: Fresh schema regeneration
+        run: |
+          cargo run -p xtask -- schemas
+          git diff --exit-code -- schemas

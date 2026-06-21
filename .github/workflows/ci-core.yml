@@ -1,0 +1,35 @@
+name: ci-core
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cargo metadata
+        run: cargo metadata --format-version 1 --no-deps
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo test --workspace
+      - name: Generate schemas
+        run: cargo run -p xtask -- schemas
+      - name: Schema drift
+        run: git diff --exit-code -- schemas
+      - name: Dependency audit placeholder
+        run: cargo tree --workspace --locked >/tmp/opensks-cargo-tree.txt
+      - name: Architecture and path guard
+        run: |
+          test "$(wc -l < src/lib.rs)" -le 20550
+          BAD_DEV_PATH="/Users/"'weklem'
+          BAD_PRD_SLUG="opensks_""prd_v3"
+          ! grep -R "$BAD_DEV_PATH\\|[P]RD_SOURCE_PATH\\|$BAD_PRD_SLUG" Cargo.toml src docs README.md .github crates schemas
+          ! grep -n '^\\.opensks/$' .gitignore

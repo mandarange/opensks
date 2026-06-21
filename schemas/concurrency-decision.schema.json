@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ConcurrencyDecision",
+  "type": "object",
+  "required": [
+    "admitted",
+    "headless_lanes",
+    "requested",
+    "sampled_at",
+    "schema",
+    "visible_lanes"
+  ],
+  "properties": {
+    "admitted": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "backpressure": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "headless_lanes": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "limits": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "format": "uint32",
+        "minimum": 0.0
+      }
+    },
+    "requested": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "sampled_at": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "visible_lanes": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  }
+}

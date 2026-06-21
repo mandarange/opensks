@@ -1,0 +1,104 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DataPlaneManifest",
+  "type": "object",
+  "required": [
+    "default_gitignore_block_ref",
+    "managed_by",
+    "schema",
+    "version"
+  ],
+  "properties": {
+    "default_gitignore_block_ref": {
+      "type": "string"
+    },
+    "invariants": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "local_paths": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DataPlanePathRule"
+      }
+    },
+    "managed_by": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "shared_paths": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DataPlanePathRule"
+      }
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "DataPlane": {
+      "type": "string",
+      "enum": [
+        "shared_durable",
+        "local_durable",
+        "ephemeral_local",
+        "secret_local"
+      ]
+    },
+    "DataPlanePathRule": {
+      "type": "object",
+      "required": [
+        "allows_machine_absolute_paths",
+        "allows_raw_provider_responses",
+        "contains_secrets",
+        "git_tracking",
+        "notes",
+        "path",
+        "plane",
+        "retention"
+      ],
+      "properties": {
+        "allows_machine_absolute_paths": {
+          "type": "boolean"
+        },
+        "allows_raw_provider_responses": {
+          "type": "boolean"
+        },
+        "contains_secrets": {
+          "type": "boolean"
+        },
+        "git_tracking": {
+          "$ref": "#/definitions/GitTrackingPolicy"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "plane": {
+          "$ref": "#/definitions/DataPlane"
+        },
+        "retention": {
+          "type": "string"
+        }
+      }
+    },
+    "GitTrackingPolicy": {
+      "type": "string",
+      "enum": [
+        "track",
+        "ignore",
+        "never_track"
+      ]
+    }
+  }
+}

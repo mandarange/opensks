@@ -1,0 +1,9 @@
+[package]
+name = "opensks-retention"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+opensks-contracts = { path = "../opensks-contracts" }

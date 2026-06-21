@@ -1,0 +1,1 @@
+{"schema":"opensks.triwiki-record.v1","id":"wrongness-foundation-not-live","kind":"wrongness","title":"Foundation is not live completion","body":"Foundation crates and fixture tests must not be described as live provider-backed worker dispatch or a complete graph engine.","tags":["wrongness"],"evidence_refs":["docs/runtime-truth-matrix.md"],"shard":"wr.jsonl","redacted":true}

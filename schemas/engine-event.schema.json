@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EngineEvent",
+  "type": "object",
+  "required": [
+    "event_id",
+    "event_type",
+    "message",
+    "protocol_version",
+    "redacted",
+    "schema",
+    "severity",
+    "timestamp_ms"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string"
+    },
+    "event_type": {
+      "$ref": "#/definitions/EngineEventType"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "message": {
+      "type": "string"
+    },
+    "protocol_version": {
+      "type": "string"
+    },
+    "redacted": {
+      "type": "boolean"
+    },
+    "request_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema": {
+      "type": "string"
+    },
+    "severity": {
+      "$ref": "#/definitions/EventSeverity"
+    },
+    "timestamp_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "EngineEventType": {
+      "type": "string",
+      "enum": [
+        "engine_hello",
+        "engine_health",
+        "execution_event",
+        "error"
+      ]
+    },
+    "EventSeverity": {
+      "type": "string",
+      "enum": [
+        "info",
+        "warning",
+        "error"
+      ]
+    }
+  }
+}

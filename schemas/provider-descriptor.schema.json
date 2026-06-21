@@ -1,0 +1,111 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProviderDescriptor",
+  "type": "object",
+  "required": [
+    "capabilities",
+    "config_ref",
+    "display_name",
+    "enabled",
+    "health",
+    "id",
+    "schema",
+    "secret_value_exposed"
+  ],
+  "properties": {
+    "capabilities": {
+      "$ref": "#/definitions/ModelCapabilities"
+    },
+    "config_ref": {
+      "$ref": "#/definitions/SecretlessConfigRef"
+    },
+    "display_name": {
+      "type": "string"
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "health": {
+      "$ref": "#/definitions/HealthState"
+    },
+    "id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "secret_value_exposed": {
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+    "HealthState": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "healthy",
+        "degraded",
+        "unavailable",
+        "open_circuit"
+      ]
+    },
+    "ModelCapabilities": {
+      "type": "object",
+      "required": [
+        "code",
+        "image_edit",
+        "image_output",
+        "long_context",
+        "streaming",
+        "structured_output",
+        "text",
+        "tool_use",
+        "vision_input"
+      ],
+      "properties": {
+        "code": {
+          "type": "boolean"
+        },
+        "image_edit": {
+          "type": "boolean"
+        },
+        "image_output": {
+          "type": "boolean"
+        },
+        "long_context": {
+          "type": "boolean"
+        },
+        "streaming": {
+          "type": "boolean"
+        },
+        "structured_output": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "boolean"
+        },
+        "tool_use": {
+          "type": "boolean"
+        },
+        "vision_input": {
+          "type": "boolean"
+        }
+      }
+    },
+    "SecretlessConfigRef": {
+      "type": "object",
+      "required": [
+        "reference",
+        "source"
+      ],
+      "properties": {
+        "reference": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
