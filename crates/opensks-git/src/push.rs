@@ -549,10 +549,15 @@ pub fn redact_remote(value: &str) -> String {
         }
         return value.to_string();
     }
-    // scp-like user@host:path — redact only when there is a ':' after the '@'.
-    if let Some(at) = value.find('@') {
-        if value[at..].contains(':') {
-            return value[at + 1..].to_string();
+    // scp-like user@host:path — use the LAST '@' so a multi-`@` userinfo
+    // (`a@b:tok@host:path`) is fully stripped, and redact when the host part
+    // after it contains a ':' OR a '/' so `user:tok@host/path` is never echoed
+    // verbatim. A bare `foo@bar` (no ':' or '/') is left untouched. Kept in lock
+    // step with `opensks_git_service::redact_remote`.
+    if let Some(at) = value.rfind('@') {
+        let host_part = &value[at + 1..];
+        if host_part.contains(':') || host_part.contains('/') {
+            return host_part.to_string();
         }
     }
     value.to_string()
@@ -935,5 +940,18 @@ mod tests {
         );
         // A plain local path is left untouched.
         assert_eq!(redact_remote("/tmp/remote.git"), "/tmp/remote.git");
+        // Regression: an scp-shaped credential whose path uses '/' (no ':' in the
+        // host tail) must NOT be echoed verbatim — this is the leak the outbox
+        // could otherwise persist.
+        let red = redact_remote("user:tok@host/acme/repo.git");
+        assert!(!red.contains(":tok@"), "leaked credential: {red}");
+        assert_eq!(red, "host/acme/repo.git");
+        // Regression: a malformed multi-`@` userinfo is fully stripped (last '@').
+        assert_eq!(
+            redact_remote("a@b:tok@host:acme/repo.git"),
+            "host:acme/repo.git"
+        );
+        // A bare `foo@bar` (no ':' or '/') is not a remote and is left untouched.
+        assert_eq!(redact_remote("foo@bar"), "foo@bar");
     }
 }
