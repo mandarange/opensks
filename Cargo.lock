@@ -215,6 +215,7 @@ dependencies = [
 name = "opensks-engine"
 version = "0.1.0"
 dependencies = [
+ "opensks-artifacts",
  "opensks-contracts",
  "opensks-event-store",
  "opensks-graph",

@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use opensks_artifacts::redact_secrets;
 use opensks_contracts::{
     CompiledPlan, EXECUTION_EVENT_ENVELOPE_SCHEMA, EventKind, PipelineGraph, SchedulerSnapshot,
     SchedulerWorkItem, Sensitivity, WorkState,
@@ -7,8 +8,8 @@ use opensks_contracts::{
 use opensks_event_store::{EventStore, EventStoreError};
 use opensks_graph::compile_graph;
 use opensks_scheduler::{
-    DeterministicWorker, DurableScheduler, SchedulerConfig, SchedulerError, WorkerDispatchReport,
-    make_work_item,
+    ControlledDispatch, DeterministicWorker, DurableScheduler, SchedulerConfig, SchedulerError,
+    SteerReceipt, WorkerDispatchReport, make_work_item, recover_work_item_states,
 };
 use thiserror::Error;
 
@@ -46,6 +47,8 @@ pub struct EngineRunResult {
 #[derive(Debug, Clone)]
 pub struct EngineControlResult {
     pub event: opensks_contracts::ExecutionEventEnvelope,
+    /// Present for steer commands: the validation receipt for the target.
+    pub steer_receipt: Option<SteerReceipt>,
 }
 
 #[derive(Debug, Clone)]
@@ -231,9 +234,21 @@ pub fn append_run_control_event(
     }
 
     let mut store = EventStore::open_workspace(workspace)?;
+
+    // A steer command is validated against the run's recovered work-item states.
+    // The receipt is Applied only for a known, non-terminal (steerable) target.
+    let steer_receipt = if kind == EventKind::SteeringRequested {
+        Some(validate_steer_target(&store, run_id, target_id)?)
+    } else {
+        None
+    };
+
     let next_sequence = store.next_sequence(run_id)?;
+    // The steer message may carry user-provided text; redact secrets before it
+    // is persisted to the durable event store.
+    let safe_message = redact_secrets(message);
     let mut payload = serde_json::json!({
-        "message": message,
+        "message": safe_message,
         "reason_code": reason_code,
     });
     if let Some(target_id) = target_id {
@@ -243,6 +258,9 @@ pub fn append_run_control_event(
     if kind == EventKind::SteeringRequested {
         payload["steering_id"] =
             serde_json::Value::String(format!("steer-{run_id}-{next_sequence}"));
+        if let Some(receipt) = &steer_receipt {
+            payload["steer_receipt"] = serde_json::to_value(receipt)?;
+        }
     }
 
     let event = opensks_contracts::ExecutionEventEnvelope {
@@ -260,7 +278,57 @@ pub fn append_run_control_event(
         evidence_refs: vec!["daemon:run-control-request".to_string()],
     };
     let event = store.append_event(event)?;
-    Ok(EngineControlResult { event })
+    Ok(EngineControlResult {
+        event,
+        steer_receipt,
+    })
+}
+
+/// Validate a steer target against a run's durable, replayed work-item states.
+fn validate_steer_target(
+    store: &EventStore,
+    run_id: &str,
+    target_id: Option<&str>,
+) -> Result<SteerReceipt, EngineError> {
+    let Some(target_id) = target_id else {
+        return Ok(SteerReceipt::Rejected {
+            target_id: String::new(),
+            reason: "missing_target_id".to_string(),
+        });
+    };
+    let states = recover_work_item_states(store, run_id)?;
+    let receipt = match states.get(target_id) {
+        None => SteerReceipt::Rejected {
+            target_id: target_id.to_string(),
+            reason: "unknown_work_item".to_string(),
+        },
+        Some(state) if state.is_terminal() => SteerReceipt::Rejected {
+            target_id: target_id.to_string(),
+            reason: format!("work_item_terminal:{state:?}"),
+        },
+        Some(_) => SteerReceipt::Applied {
+            target_id: target_id.to_string(),
+        },
+    };
+    Ok(receipt)
+}
+
+/// Dispatch a graph run while honoring the durable control mailbox.
+///
+/// A run whose control events already carry a `Cancel` or `Pause` does not
+/// dispatch new work: cancel transitions still-queued items to `Cancelled`;
+/// pause quiesces to the true `paused` state. With no control events this is
+/// equivalent to [`dispatch_graph_run`].
+pub fn dispatch_graph_run_with_control(
+    run_id: &str,
+    graph: &PipelineGraph,
+    store: &mut EventStore,
+) -> Result<ControlledDispatch, EngineError> {
+    let run_plan = plan_graph_for_scheduler(run_id, graph)?;
+    let mut scheduler =
+        DurableScheduler::new(run_id, run_plan.work_items, SchedulerConfig::default());
+    let mut worker = DeterministicWorker::new("engine-local-worker");
+    Ok(scheduler.dispatch_until_idle_with_control(store, &mut worker)?)
 }
 
 pub fn append_approval_event(
@@ -477,6 +545,163 @@ mod tests {
             "work-template-delegate"
         );
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn engine_steer_returns_applied_or_rejected_receipt() {
+        // Acceptance criterion 4 (engine boundary): append_run_control_event
+        // RETURNS a typed steer receipt; we assert the receipt, not just an event.
+        let workspace =
+            std::env::temp_dir().join(format!("opensks-engine-steer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(&workspace).expect("workspace");
+
+        // Start a run, then derive a steerable target from its work items.
+        let mut store = EventStore::open_workspace(&workspace).expect("store");
+        let graph = opensks_graph::single_model_safe_template();
+        let run_plan = plan_graph_for_scheduler("run-steer", &graph).expect("plan");
+        let mut scheduler =
+            DurableScheduler::new("run-steer", run_plan.work_items, SchedulerConfig::default());
+        // Lease a ready item so it has a non-terminal recovered state.
+        let target_id = scheduler
+            .ready_items()
+            .first()
+            .cloned()
+            .expect("ready item");
+        scheduler
+            .lease_ready_item(&mut store, &target_id, "worker")
+            .expect("lease target");
+        drop(store);
+
+        let applied = append_run_control_event(
+            &workspace,
+            "run-steer",
+            EventKind::SteeringRequested,
+            Some(&target_id),
+            "focus on tests",
+            "user_steering",
+        )
+        .expect("steer applied");
+        assert_eq!(
+            applied.steer_receipt,
+            Some(SteerReceipt::Applied {
+                target_id: target_id.clone()
+            })
+        );
+
+        let rejected = append_run_control_event(
+            &workspace,
+            "run-steer",
+            EventKind::SteeringRequested,
+            Some("not-a-real-item"),
+            "steer ghost",
+            "user_steering",
+        )
+        .expect("steer rejected");
+        assert!(matches!(
+            rejected.steer_receipt,
+            Some(SteerReceipt::Rejected { reason, .. }) if reason == "unknown_work_item"
+        ));
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn engine_steer_message_is_redacted_before_persistence() {
+        let workspace = std::env::temp_dir().join(format!(
+            "opensks-engine-steer-redact-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        run_template_with_event_stream(
+            &workspace,
+            "run-redact",
+            "single-model-safe",
+            "prove redaction",
+        )
+        .expect("start run");
+
+        let steered = append_run_control_event(
+            &workspace,
+            "run-redact",
+            EventKind::SteeringRequested,
+            Some("work-template-delegate"),
+            "use sk-supersecret-token now",
+            "user_steering",
+        )
+        .expect("steer event");
+        let message = steered.event.payload["message"].as_str().unwrap();
+        assert!(!message.contains("sk-supersecret-token"));
+        assert!(message.contains("[redacted]"));
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn engine_prior_cancel_blocks_dispatch() {
+        // Acceptance criterion 5: a run started with a prior Cancel in its
+        // control events does not dispatch new work.
+        let mut store = EventStore::open_memory().expect("store");
+        let graph = opensks_graph::single_model_safe_template();
+        // Record a cancel into the durable mailbox before dispatch.
+        let next_sequence = store.next_sequence("run-precancel").expect("seq");
+        let event = opensks_contracts::ExecutionEventEnvelope {
+            schema: EXECUTION_EVENT_ENVELOPE_SCHEMA.to_string(),
+            id: format!("evt-run-precancel-control-{next_sequence}"),
+            run_id: "run-precancel".to_string(),
+            sequence: 0,
+            occurred_at: "engine-run-control".to_string(),
+            actor: "opensks-engine".to_string(),
+            causation_id: None,
+            correlation_id: None,
+            kind: EventKind::RunCancelled,
+            payload: serde_json::json!({
+                "message": "cancel",
+                "reason_code": "cancelled_by_user",
+            }),
+            sensitivity: Sensitivity::Public,
+            evidence_refs: vec!["daemon:run-control-request".to_string()],
+        };
+        store.append_event(event).expect("append cancel");
+
+        let controlled = dispatch_graph_run_with_control("run-precancel", &graph, &mut store)
+            .expect("controlled dispatch");
+        assert_eq!(
+            controlled.control_state,
+            opensks_scheduler::ExecutionControlState::Cancelled
+        );
+        assert_eq!(controlled.report.completed, 0);
+        assert!(
+            controlled
+                .snapshot
+                .work_items
+                .iter()
+                .all(|item| item.state == WorkState::Cancelled)
+        );
+    }
+
+    #[test]
+    fn engine_no_control_dispatch_runs_normally() {
+        // Acceptance criterion 5 (normal path preserved): with no control events,
+        // the control-aware dispatch behaves like a plain dispatch.
+        let mut store = EventStore::open_memory().expect("store");
+        let graph = opensks_graph::single_model_safe_template();
+        let controlled = dispatch_graph_run_with_control("run-normal", &graph, &mut store)
+            .expect("controlled dispatch");
+        assert_eq!(
+            controlled.control_state,
+            opensks_scheduler::ExecutionControlState::Running
+        );
+        assert_eq!(
+            controlled.report.completed,
+            controlled.snapshot.work_items.len()
+        );
+        assert!(
+            controlled
+                .snapshot
+                .work_items
+                .iter()
+                .all(|item| item.state == WorkState::Completed)
+        );
     }
 
     #[test]

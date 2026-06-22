@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+mod mailbox;
+
+pub use mailbox::{CommandMailbox, ControlState, SchedulerCommand};
+
 pub const SCHEDULER_SNAPSHOT_SCHEMA: &str = "opensks.scheduler-snapshot.v1";
 pub const DEFAULT_WORKER_LEASE_TTL_MS: u64 = 30_000;
 
@@ -87,6 +91,53 @@ pub struct WorkerDispatchReport {
     pub failed: usize,
     pub worker_ids: Vec<String>,
     pub outcomes: Vec<WorkerDispatchOutcome>,
+}
+
+/// Outcome of validating and recording a steer command against a run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SteerReceipt {
+    /// The target is a known, steerable (non-terminal) work item.
+    Applied { target_id: String },
+    /// The target is unknown or terminal; carries the reason it was rejected.
+    Rejected { target_id: String, reason: String },
+}
+
+impl SteerReceipt {
+    pub fn is_applied(&self) -> bool {
+        matches!(self, SteerReceipt::Applied { .. })
+    }
+}
+
+/// Report describing how a cancel command enforced on the dispatch path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelReport {
+    pub run_id: String,
+    pub reason_code: String,
+    /// Items that were still non-terminal and got transitioned to `Cancelled`.
+    pub cancelled: Vec<String>,
+    /// Items that were already `Completed` and left untouched (partial run).
+    pub completed: Vec<String>,
+}
+
+/// The true control state a dispatch resolved to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecutionControlState {
+    /// Dispatch ran normally to idle.
+    Running,
+    /// Dispatch was blocked by a pause; the run quiesced to `paused`.
+    Paused,
+    /// Dispatch was blocked by a cancel; queued work was cancelled.
+    Cancelled,
+}
+
+/// Result of a control-aware dispatch, reporting the TRUE control state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlledDispatch {
+    pub snapshot: SchedulerSnapshot,
+    pub report: WorkerDispatchReport,
+    pub control_state: ExecutionControlState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel: Option<CancelReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -639,6 +690,139 @@ impl DurableScheduler {
         Ok((snapshot, report))
     }
 
+    /// Derive the durable control state for this run by replaying its events.
+    ///
+    /// The control events (cancel / pause / resume / steer) ARE the mailbox, so
+    /// this recovers the same intent after a restart from a fresh replay.
+    pub fn control_state(&self, store: &EventStore) -> Result<ControlState, SchedulerError> {
+        let events = store.replay(&self.run_id)?;
+        Ok(ControlState::from_events(&events))
+    }
+
+    /// Derive the pending command mailbox for this run from its events.
+    pub fn command_mailbox(&self, store: &EventStore) -> Result<CommandMailbox, SchedulerError> {
+        let events = store.replay(&self.run_id)?;
+        Ok(CommandMailbox::from_events(&events))
+    }
+
+    /// Validate a steer target against the run's work items and state.
+    ///
+    /// Returns [`SteerReceipt::Applied`] when the target is a known, non-terminal
+    /// (steerable) work item, otherwise [`SteerReceipt::Rejected`] with a reason.
+    pub fn validate_steer_target(&self, target_id: &str) -> SteerReceipt {
+        match self.items.get(target_id) {
+            None => SteerReceipt::Rejected {
+                target_id: target_id.to_string(),
+                reason: "unknown_work_item".to_string(),
+            },
+            Some(item) if item.state.is_terminal() => SteerReceipt::Rejected {
+                target_id: target_id.to_string(),
+                reason: format!("work_item_terminal:{:?}", item.state),
+            },
+            Some(_) => SteerReceipt::Applied {
+                target_id: target_id.to_string(),
+            },
+        }
+    }
+
+    /// Enforce a cancel command: transition every still non-terminal item to
+    /// `Cancelled` with an explicit reason. Already-completed items stay
+    /// completed (partial run). New dispatch is blocked by the caller.
+    pub fn apply_cancel(
+        &mut self,
+        store: &mut EventStore,
+        reason_code: &str,
+    ) -> Result<CancelReport, SchedulerError> {
+        let mut report = CancelReport {
+            run_id: self.run_id.clone(),
+            reason_code: reason_code.to_string(),
+            cancelled: Vec::new(),
+            completed: Vec::new(),
+        };
+        let item_ids: Vec<String> = self.items.keys().cloned().collect();
+        for item_id in item_ids {
+            let state = self
+                .items
+                .get(&item_id)
+                .map(|item| item.state.clone())
+                .ok_or_else(|| SchedulerError::UnknownWorkItem(item_id.clone()))?;
+            if state == WorkState::Completed {
+                report.completed.push(item_id);
+                continue;
+            }
+            if state.is_terminal() {
+                continue;
+            }
+            let mut payload = Map::new();
+            payload.insert(
+                "reason_code".to_string(),
+                Value::String(reason_code.to_string()),
+            );
+            payload.insert(
+                "cancel_origin".to_string(),
+                Value::String("run_cancel_command".to_string()),
+            );
+            self.transition_with_payload(
+                store,
+                &item_id,
+                WorkState::Cancelled,
+                vec!["scheduler:run-cancel".to_string()],
+                payload,
+            )?;
+            report.cancelled.push(item_id);
+        }
+        Ok(report)
+    }
+
+    /// Dispatch like [`Self::dispatch_until_idle`], but consult the durable
+    /// control mailbox first. A prior `Cancel` cancels still-queued work and
+    /// dispatches nothing further; a prior `Pause` blocks new dispatch and the
+    /// run reports the true `paused` state (the synchronous worker is always
+    /// between items here, so quiescence is immediate).
+    pub fn dispatch_until_idle_with_control<D: WorkerDriver>(
+        &mut self,
+        store: &mut EventStore,
+        driver: &mut D,
+    ) -> Result<ControlledDispatch, SchedulerError> {
+        let control = self.control_state(store)?;
+        if control.cancelled {
+            let reason = control
+                .cancel_reason
+                .clone()
+                .unwrap_or_else(|| "cancelled".to_string());
+            let cancel = self.apply_cancel(store, &reason)?;
+            let decision = self.governor_decision("worker-dispatch-cancelled");
+            let report = WorkerDispatchReport::new(self.run_id.clone(), decision.clone());
+            let snapshot =
+                self.snapshot_with_evidence(decision, vec!["scheduler:run-cancel".to_string()]);
+            return Ok(ControlledDispatch {
+                snapshot,
+                report,
+                control_state: ExecutionControlState::Cancelled,
+                cancel: Some(cancel),
+            });
+        }
+        if control.paused {
+            let decision = self.governor_decision("worker-dispatch-paused");
+            let report = WorkerDispatchReport::new(self.run_id.clone(), decision.clone());
+            let snapshot =
+                self.snapshot_with_evidence(decision, vec!["scheduler:run-pause".to_string()]);
+            return Ok(ControlledDispatch {
+                snapshot,
+                report,
+                control_state: ExecutionControlState::Paused,
+                cancel: None,
+            });
+        }
+        let (snapshot, report) = self.dispatch_until_idle(store, driver)?;
+        Ok(ControlledDispatch {
+            snapshot,
+            report,
+            control_state: ExecutionControlState::Running,
+            cancel: None,
+        })
+    }
+
     fn dispatch_ready_batch_with_decision<D: WorkerDriver>(
         &mut self,
         store: &mut EventStore,
@@ -922,6 +1106,55 @@ pub fn recover_completed_ids(
     Ok(completed)
 }
 
+/// Fold the latest known [`WorkState`] for each work item from a run's events.
+///
+/// Each scheduler transition event carries `work_item_id` and a `to` state in
+/// its payload; the last `to` per item wins. This lets callers validate steer
+/// targets and reconstruct partial run state purely from the durable log.
+pub fn recover_work_item_states(
+    store: &EventStore,
+    run_id: &str,
+) -> Result<BTreeMap<String, WorkState>, SchedulerError> {
+    let events = store.replay(run_id)?;
+    let mut states = BTreeMap::new();
+    for event in events {
+        let work_item_id = event
+            .payload
+            .get("work_item_id")
+            .and_then(serde_json::Value::as_str);
+        let to_state = event
+            .payload
+            .get("to")
+            .and_then(serde_json::Value::as_str)
+            .and_then(parse_work_state);
+        if let (Some(work_item_id), Some(to_state)) = (work_item_id, to_state) {
+            states.insert(work_item_id.to_string(), to_state);
+        }
+    }
+    Ok(states)
+}
+
+fn parse_work_state(label: &str) -> Option<WorkState> {
+    match label {
+        "Draft" => Some(WorkState::Draft),
+        "Ready" => Some(WorkState::Ready),
+        "Leased" => Some(WorkState::Leased),
+        "Dispatched" => Some(WorkState::Dispatched),
+        "Running" => Some(WorkState::Running),
+        "ResultReceived" => Some(WorkState::ResultReceived),
+        "Verifying" => Some(WorkState::Verifying),
+        "AwaitingApproval" => Some(WorkState::AwaitingApproval),
+        "Applying" => Some(WorkState::Applying),
+        "Completed" => Some(WorkState::Completed),
+        "RetryWait" => Some(WorkState::RetryWait),
+        "Blocked" => Some(WorkState::Blocked),
+        "Failed" => Some(WorkState::Failed),
+        "Cancelled" => Some(WorkState::Cancelled),
+        "Superseded" => Some(WorkState::Superseded),
+        _ => None,
+    }
+}
+
 fn is_valid_transition(from: &WorkState, to: &WorkState) -> bool {
     if from.is_terminal() {
         return false;
@@ -1203,6 +1436,277 @@ mod tests {
                     && event.payload["work_item_id"] == "stale"
                     && event.payload["to"] == "Ready")
         );
+    }
+
+    fn append_control_event(
+        store: &mut EventStore,
+        run_id: &str,
+        kind: EventKind,
+        target_id: Option<&str>,
+        reason_code: &str,
+    ) {
+        let next_sequence = store.next_sequence(run_id).expect("next sequence");
+        let mut payload = serde_json::json!({
+            "message": "control",
+            "reason_code": reason_code,
+        });
+        if let Some(target_id) = target_id {
+            payload["target_id"] = Value::String(target_id.to_string());
+            payload["work_item_id"] = Value::String(target_id.to_string());
+        }
+        let event = ExecutionEventEnvelope {
+            schema: EXECUTION_EVENT_ENVELOPE_SCHEMA.to_string(),
+            id: format!("evt-{run_id}-control-{next_sequence}"),
+            run_id: run_id.to_string(),
+            sequence: 0,
+            occurred_at: "test-control".to_string(),
+            actor: "test".to_string(),
+            causation_id: None,
+            correlation_id: target_id.map(str::to_string),
+            kind,
+            payload,
+            sensitivity: Sensitivity::Public,
+            evidence_refs: vec!["test:control".to_string()],
+        };
+        store.append_event(event).expect("append control event");
+    }
+
+    #[test]
+    fn cancel_prevents_queued_dispatch() {
+        // Acceptance criterion 2: a Cancel blocks new dispatch immediately and
+        // transitions still-queued items to Cancelled; completed items stay
+        // completed (partial run); the report reflects the split.
+        let run_id = "run-cancel-dispatch";
+        let items = vec![
+            make_work_item(run_id, "done", Vec::new()),
+            make_work_item(run_id, "queued-a", Vec::new()),
+            make_work_item(run_id, "queued-b", Vec::new()),
+        ];
+        let mut scheduler = DurableScheduler::new(run_id, items, SchedulerConfig::default());
+        let mut store = EventStore::open_memory().expect("event store");
+
+        // Complete one item, then a cancel arrives in the durable mailbox.
+        scheduler
+            .lease_ready_item(&mut store, "done", "worker")
+            .expect("lease done");
+        scheduler
+            .transition(&mut store, "done", WorkState::Running, Vec::new())
+            .expect("run done");
+        scheduler
+            .transition(
+                &mut store,
+                "done",
+                WorkState::Completed,
+                vec!["proof".to_string()],
+            )
+            .expect("complete done");
+        append_control_event(
+            &mut store,
+            run_id,
+            EventKind::RunCancelled,
+            None,
+            "cancelled_by_user",
+        );
+
+        let mut worker = DeterministicWorker::new("worker");
+        let controlled = scheduler
+            .dispatch_until_idle_with_control(&mut store, &mut worker)
+            .expect("controlled dispatch");
+
+        assert_eq!(controlled.control_state, ExecutionControlState::Cancelled);
+        // No new dispatch happened: nothing was attempted/completed by the worker.
+        assert_eq!(controlled.report.attempted, 0);
+        let cancel = controlled.cancel.expect("cancel report");
+        assert_eq!(cancel.reason_code, "cancelled_by_user");
+        assert_eq!(cancel.completed, vec!["done"]);
+        let mut cancelled = cancel.cancelled.clone();
+        cancelled.sort();
+        assert_eq!(cancelled, vec!["queued-a", "queued-b"]);
+
+        let items = scheduler.work_items();
+        let state_of = |id: &str| {
+            items
+                .iter()
+                .find(|item| item.id == id)
+                .map(|item| item.state.clone())
+                .unwrap()
+        };
+        assert_eq!(state_of("done"), WorkState::Completed);
+        assert_eq!(state_of("queued-a"), WorkState::Cancelled);
+        assert_eq!(state_of("queued-b"), WorkState::Cancelled);
+
+        // The cancellation is durable: cancel transitions were appended.
+        let events = store.replay(run_id).expect("replay");
+        assert!(events.iter().any(|event| {
+            event.kind == EventKind::WorkItemQueued
+                && event.payload["to"] == "Cancelled"
+                && event.payload["reason_code"] == "cancelled_by_user"
+        }));
+    }
+
+    #[test]
+    fn deterministic_worker_terminates_within_bound() {
+        // The deterministic worker is retained for tests and must terminate
+        // within a bounded number of dispatch transitions.
+        let run_id = "run-deterministic-bound";
+        let items: Vec<_> = (0..16)
+            .map(|index| make_work_item(run_id, format!("wi-{index:02}"), Vec::new()))
+            .collect();
+        let item_count = items.len();
+        let mut scheduler = DurableScheduler::new(run_id, items, SchedulerConfig::default());
+        let mut store = EventStore::open_memory().expect("event store");
+        let mut worker = DeterministicWorker::new("bound-worker");
+        let controlled = scheduler
+            .dispatch_until_idle_with_control(&mut store, &mut worker)
+            .expect("controlled dispatch terminates");
+        assert_eq!(controlled.control_state, ExecutionControlState::Running);
+        assert_eq!(controlled.report.completed, item_count);
+        assert_eq!(controlled.report.failed, 0);
+        assert!(
+            controlled
+                .snapshot
+                .work_items
+                .iter()
+                .all(|item| item.state == WorkState::Completed)
+        );
+    }
+
+    #[test]
+    fn pause_blocks_new_dispatch_and_reports_true_state() {
+        // Acceptance criterion 3: a Pause stops new dispatch; with the
+        // synchronous worker nothing is mid-flight, so the run reaches the TRUE
+        // paused state. Resume clears it and dispatch proceeds.
+        let run_id = "run-pause";
+        let items = vec![
+            make_work_item(run_id, "first", Vec::new()),
+            make_work_item(run_id, "second", Vec::new()),
+        ];
+        let mut scheduler = DurableScheduler::new(run_id, items, SchedulerConfig::default());
+        let mut store = EventStore::open_memory().expect("event store");
+        append_control_event(
+            &mut store,
+            run_id,
+            EventKind::RunPaused,
+            None,
+            "paused_by_user",
+        );
+
+        let mut worker = DeterministicWorker::new("pause-worker");
+        let paused = scheduler
+            .dispatch_until_idle_with_control(&mut store, &mut worker)
+            .expect("paused dispatch");
+        assert_eq!(paused.control_state, ExecutionControlState::Paused);
+        assert_eq!(paused.report.attempted, 0);
+        assert!(
+            scheduler
+                .work_items()
+                .iter()
+                .all(|item| item.state == WorkState::Ready)
+        );
+
+        // Resume clears the pause and dispatch completes the work.
+        append_control_event(
+            &mut store,
+            run_id,
+            EventKind::RunResumed,
+            None,
+            "resumed_by_user",
+        );
+        let resumed = scheduler
+            .dispatch_until_idle_with_control(&mut store, &mut worker)
+            .expect("resumed dispatch");
+        assert_eq!(resumed.control_state, ExecutionControlState::Running);
+        assert_eq!(resumed.report.completed, 2);
+    }
+
+    #[test]
+    fn steer_is_applied_or_rejected() {
+        // Acceptance criterion 4: validate_steer_target returns a typed receipt:
+        // Applied for a known steerable item, Rejected otherwise. We assert the
+        // RETURNED receipt directly (not merely an appended event).
+        let run_id = "run-steer";
+        let items = vec![
+            make_work_item(run_id, "steerable", Vec::new()),
+            make_work_item(run_id, "finished", Vec::new()),
+        ];
+        let mut scheduler = DurableScheduler::new(run_id, items, SchedulerConfig::default());
+        let mut store = EventStore::open_memory().expect("event store");
+        scheduler
+            .lease_ready_item(&mut store, "finished", "worker")
+            .expect("lease finished");
+        scheduler
+            .transition(&mut store, "finished", WorkState::Running, Vec::new())
+            .expect("run finished");
+        scheduler
+            .transition(
+                &mut store,
+                "finished",
+                WorkState::Completed,
+                vec!["proof".to_string()],
+            )
+            .expect("complete finished");
+
+        assert_eq!(
+            scheduler.validate_steer_target("steerable"),
+            SteerReceipt::Applied {
+                target_id: "steerable".to_string()
+            }
+        );
+        let rejected_unknown = scheduler.validate_steer_target("ghost");
+        assert!(matches!(
+            rejected_unknown,
+            SteerReceipt::Rejected { reason, .. } if reason == "unknown_work_item"
+        ));
+        let rejected_terminal = scheduler.validate_steer_target("finished");
+        assert!(matches!(
+            rejected_terminal,
+            SteerReceipt::Rejected { reason, .. } if reason.starts_with("work_item_terminal")
+        ));
+    }
+
+    #[test]
+    fn control_state_recovers_from_fresh_replay() {
+        // Acceptance criterion 1 (recovery): folding the same control events from
+        // a fresh replay yields the same control state. The events ARE the
+        // durable mailbox, so it survives a restart.
+        let run_id = "run-recovery";
+        let items = vec![make_work_item(run_id, "wi", Vec::new())];
+        let scheduler = DurableScheduler::new(run_id, items, SchedulerConfig::default());
+        let mut store = EventStore::open_memory().expect("event store");
+        append_control_event(&mut store, run_id, EventKind::RunPaused, None, "paused");
+        append_control_event(&mut store, run_id, EventKind::RunResumed, None, "resumed");
+        append_control_event(
+            &mut store,
+            run_id,
+            EventKind::SteeringRequested,
+            Some("wi"),
+            "user_steering",
+        );
+        append_control_event(
+            &mut store,
+            run_id,
+            EventKind::RunCancelled,
+            None,
+            "cancelled_by_user",
+        );
+
+        // First derivation via the scheduler.
+        let live = scheduler.control_state(&store).expect("live control state");
+        // Simulate a restart: a fresh replay folded independently.
+        let replayed = store.replay(run_id).expect("replay");
+        let recovered = ControlState::from_events(&replayed);
+        assert_eq!(live, recovered);
+        assert!(recovered.cancelled);
+        assert!(!recovered.paused);
+        assert_eq!(
+            recovered.cancel_reason.as_deref(),
+            Some("cancelled_by_user")
+        );
+        assert_eq!(recovered.pending_steer_targets, vec!["wi".to_string()]);
+
+        // The mailbox commands fold to the same state.
+        let mailbox = CommandMailbox::from_events(&replayed);
+        assert_eq!(mailbox.control_state(), recovered);
     }
 
     #[test]

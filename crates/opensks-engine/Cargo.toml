@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+opensks-artifacts = { path = "../opensks-artifacts" }
 opensks-contracts = { path = "../opensks-contracts" }
 opensks-event-store = { path = "../opensks-event-store" }
 opensks-graph = { path = "../opensks-graph" }
