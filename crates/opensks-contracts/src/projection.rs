@@ -44,29 +44,27 @@ impl RunProjectionState {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
 
-    /// Monotonic information rank. Higher wins on conflict; terminal states sit
-    /// above live states so a stale/empty snapshot cannot pull a run backwards.
-    fn rank(self) -> u8 {
-        match self {
-            Self::Queued => 0,
-            Self::Paused => 1,
-            Self::Running => 2,
-            // Terminal states share the top tier; the first terminal observed
-            // for a run wins and is preserved verbatim.
-            Self::Cancelled | Self::Failed | Self::Completed => 3,
-        }
-    }
-
-    /// Merge a newly observed state into the current one without downgrading a
-    /// terminal or higher-information state.
+    /// Merge a newly observed run state, applied in event order. Three rules:
+    /// terminal states are sticky (a late/stale lower-information event never
+    /// erases them); the run never regresses to `Queued`; and pause/resume is
+    /// honoured (`Running ⇄ Paused`).
+    ///
+    /// This replaces a rank-only rule that silently dropped `running → paused`
+    /// because `Paused` ranked below `Running` (PIPE-002): a real `RunPaused`
+    /// event after `RunStarted` was ignored, so a paused run still displayed as
+    /// running. Folding remains order-dependent only, so rebuild == live.
     fn merge(self, incoming: Self) -> Self {
         if self.is_terminal() {
             return self;
         }
-        if incoming.rank() >= self.rank() {
-            incoming
-        } else {
-            self
+        if incoming.is_terminal() {
+            return incoming;
+        }
+        // Both non-terminal: allow Queued → {Running, Paused} and Running ⇄
+        // Paused, but never move backward to Queued.
+        match incoming {
+            Self::Queued => self,
+            _ => incoming,
         }
     }
 }
@@ -287,5 +285,49 @@ impl PipelineExecutionProjection {
             }
         }
         self.metrics = metrics;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fold(states: &[RunProjectionState]) -> RunProjectionState {
+        let mut p = PipelineExecutionProjection::empty("run");
+        for &s in states {
+            p.merge_run_state(s);
+        }
+        p.state
+    }
+
+    #[test]
+    fn running_can_transition_to_paused_and_back() {
+        use RunProjectionState::*;
+        // The PIPE-002 regression: a RunPaused after RunStarted must reflect.
+        assert_eq!(fold(&[Running, Paused]), Paused);
+        assert_eq!(fold(&[Running, Paused, Running]), Running);
+        assert_eq!(fold(&[Queued, Running, Paused]), Paused);
+    }
+
+    #[test]
+    fn terminal_state_is_sticky() {
+        use RunProjectionState::*;
+        assert_eq!(fold(&[Running, Completed, Running]), Completed);
+        assert_eq!(fold(&[Running, Cancelled, Paused]), Cancelled);
+        assert_eq!(fold(&[Running, Failed, Queued]), Failed);
+    }
+
+    #[test]
+    fn never_regresses_to_queued() {
+        use RunProjectionState::*;
+        assert_eq!(fold(&[Running, Queued]), Running);
+        assert_eq!(fold(&[Paused, Queued]), Paused);
+    }
+
+    #[test]
+    fn non_terminal_can_reach_terminal() {
+        use RunProjectionState::*;
+        assert_eq!(fold(&[Queued, Running, Completed]), Completed);
+        assert_eq!(fold(&[Paused, Failed]), Failed);
     }
 }
