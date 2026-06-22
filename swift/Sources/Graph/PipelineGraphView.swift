@@ -9,12 +9,18 @@
 //
 // Interaction:
 //   * Pan  — drag anywhere on the canvas.
-//   * Zoom — pinch (`MagnificationGesture`) and scroll-wheel / trackpad scroll.
-//   * Fit  — a button recentres + rescales the whole graph into view.
+//   * Zoom — pinch / trackpad magnify (`MagnificationGesture`) plus the on-canvas
+//            Zoom in / Zoom out buttons (GRAPH-101: there is no mouse scroll-wheel
+//            zoom handler, so this comment no longer claims one — the controls above
+//            are the actual zoom surface).
+//   * Fit  — a button recentres + rescales the whole graph into view; the viewport
+//            also refits automatically when the shown run changes (GRAPH-102).
 //   * LOD  — labels and per-node glyphs are hidden below a zoom threshold so a
 //            zoomed-out thousand-node graph stays legible and cheap to draw.
 //   * Select — a tap maps the point back through the transform to the nearest
 //            node, which drives `RunInspector`.
+//   * Accessibility — the canvas exposes an accessible "Pipeline outline" (one
+//            selectable row per node, A11Y-102) so it is not a single opaque image.
 //   * Reduced motion — when Accessibility "reduce motion" is on, the active-node
 //            pulse is disabled (states are still distinguishable by tint+glyph).
 
@@ -33,7 +39,10 @@ struct PipelineGraphView: View {
     @State private var offset: CGSize = .zero
     @GestureState private var gestureScale: CGFloat = 1
     @GestureState private var gestureOffset: CGSize = .zero
-    @State private var didFit = false
+    /// The run id the viewport was last fitted for (GRAPH-102). When the shown run
+    /// changes, the viewport refits the new run instead of stranding it at the
+    /// previous run's pan/zoom. `nil` = never fitted.
+    @State private var fittedRunId: String?
 
     // A slow phase used only for the active-node pulse; frozen when reduce-motion.
     @State private var pulsePhase: CGFloat = 0
@@ -58,6 +67,11 @@ struct PipelineGraphView: View {
         GeometryReader { geo in
             ZStack(alignment: .topTrailing) {
                 canvas(in: geo.size)
+                    // A11Y-102 / §13.6: replace the opaque canvas's accessibility
+                    // with an equivalent, keyboard-navigable node outline.
+                    .accessibilityRepresentation {
+                        PipelineOutlineList(projection: projection, selectedNodeId: $selectedNodeId)
+                    }
                 overlayControls
             }
             .background(Theme.panelDeep)
@@ -70,10 +84,12 @@ struct PipelineGraphView: View {
                 selectNode(at: location, viewSize: geo.size)
             }
             .onAppear { fitIfNeeded(viewSize: geo.size) }
-            .onChange(of: geo.size) { _ in fitIfNeeded(viewSize: geo.size, force: !didFit) }
+            .onChange(of: geo.size) { _ in fitIfNeeded(viewSize: geo.size, force: fittedRunId == nil) }
+            // GRAPH-102: a run/revision change refits the viewport (needsFit is true
+            // because the fitted run no longer matches the shown run).
+            .onChange(of: projection.runId) { _ in fitIfNeeded(viewSize: lastViewSize) }
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("pipeline.graph.canvas")
-            .accessibilityLabel("Pipeline graph, \(projection.nodes.count) nodes")
         }
         .onAppear(perform: startPulseIfAllowed)
     }
@@ -311,13 +327,21 @@ struct PipelineGraphView: View {
     // recompute against the live viewport.
     @State private var lastViewSize: CGSize = CGSize(width: 1, height: 1)
 
+    /// Whether the viewport needs a (re)fit for `currentRunId`: either it was never
+    /// fitted, or the shown run changed since the last fit (GRAPH-102). Pure so the
+    /// run-keyed reset is unit-testable.
+    static func needsFit(currentRunId: String, fittedRunId: String?) -> Bool {
+        fittedRunId != currentRunId
+    }
+
     private func fitIfNeeded(viewSize: CGSize, force: Bool = false) {
         lastViewSize = viewSize
-        guard force || !didFit else { return }
+        guard force || Self.needsFit(currentRunId: projection.runId, fittedRunId: fittedRunId)
+        else { return }
         let transform = layout.fitTransform(in: viewSize, minScale: minScale, maxScale: maxScale)
         scale = transform.scale
         offset = transform.offset
-        didFit = true
+        fittedRunId = projection.runId
     }
 
     private func startPulseIfAllowed() {
@@ -325,5 +349,41 @@ struct PipelineGraphView: View {
         withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
             pulsePhase = 1
         }
+    }
+}
+
+// MARK: - Accessible outline (A11Y-102 / §13.6)
+
+/// An accessible outline EQUIVALENT to the canvas: one selectable, labelled row per
+/// node, navigable by keyboard / VoiceOver. It is attached to the canvas via
+/// `accessibilityRepresentation`, so it provides the accessibility tree without
+/// changing the visual drawing. Activating a row selects that node (driving the
+/// inspector), exactly like a canvas tap.
+struct PipelineOutlineList: View {
+    let projection: PipelineExecutionProjection
+    @Binding var selectedNodeId: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Pipeline outline, \(projection.nodes.count) node\(projection.nodes.count == 1 ? "" : "s")")
+                .accessibilityAddTraits(.isHeader)
+            ForEach(projection.nodes) { node in
+                Button {
+                    selectedNodeId = node.nodeId
+                } label: {
+                    Text(Self.rowLabel(node))
+                }
+                .accessibilityLabel(Self.rowLabel(node))
+                .accessibilityAddTraits(node.nodeId == selectedNodeId ? .isSelected : [])
+                .accessibilityIdentifier("pipeline.graph.outline.\(node.nodeId)")
+            }
+        }
+        .accessibilityIdentifier("pipeline.graph.outline")
+    }
+
+    /// "<node>, <status>" — the spoken / listed label for one node. Pure so the
+    /// outline content is unit-testable.
+    static func rowLabel(_ node: NodeExecutionProjection) -> String {
+        "\(node.nodeId), \(node.state.displayLabel)"
     }
 }
