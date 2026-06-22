@@ -1,7 +1,9 @@
 // GitStatusView.swift — the Git studio surface (PR-034 reads + PR-035 LOCAL
 // mutations).
 //
-// Four columns inside one dark, token-driven, full-width region (no letterbox):
+// An ADAPTIVE region (no letterbox, no clipping): wide windows show flexible
+// branch | changes | diff | commit columns; narrow windows (< 1200pt) collapse
+// to a single segmented pane (Changes / Diff / Commit / Branches). The columns:
 //   • the branch list  — current branch marked; upstream + ahead/behind shown;
 //     a branch checked out in ANOTHER worktree is rendered occupied/disabled; a
 //     full-tile Switch action runs a dirty-aware preflight (PR-035);
@@ -22,21 +24,31 @@ struct GitStatusView: View {
 
     /// New-branch field state (the create-branch affordance in the branch column).
     @State private var newBranchName: String = ""
+    /// Which single pane is shown in the compact (narrow) layout.
+    @State private var compactPane: CompactPane = .changes
+
+    /// Below this width the four columns would clip, so the view collapses to a
+    /// single-pane tabbed layout (Appendix C rule 7: no fixed 4-column Git under
+    /// a wide window).
+    private let wideThreshold: CGFloat = 1200
+
+    enum CompactPane: String, CaseIterable, Identifiable {
+        case changes = "Changes"
+        case diff = "Diff"
+        case commit = "Commit"
+        case branches = "Branches"
+        var id: String { rawValue }
+    }
 
     var body: some View {
-        HStack(spacing: 0) {
-            branchColumn
-                .frame(width: 256)
-            Divider().overlay(Theme.stroke)
-            changesColumn
-                .frame(width: 340)
-            Divider().overlay(Theme.stroke)
-            diffColumn
-                .frame(maxWidth: .infinity)
-                .layoutPriority(1)
-            Divider().overlay(Theme.stroke)
-            CommitComposerView(store: store)
-                .frame(width: 320)
+        GeometryReader { geo in
+            Group {
+                if geo.size.width >= wideThreshold {
+                    wideLayout
+                } else {
+                    compactLayout
+                }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Theme.bg)
@@ -45,6 +57,50 @@ struct GitStatusView: View {
         .overlay(alignment: .top) { errorBanner }
         .overlay(alignment: .top) { switchBlockBanner }
         .accessibilityIdentifier("git.studio.view")
+    }
+
+    /// Wide: branch | changes | diff | commit. Columns are flexible (min/ideal/
+    /// max) rather than hard-fixed so they compress instead of clipping; the diff
+    /// fills the remaining space.
+    private var wideLayout: some View {
+        HStack(spacing: 0) {
+            branchColumn
+                .frame(minWidth: 200, idealWidth: 256, maxWidth: 300)
+            Divider().overlay(Theme.stroke)
+            changesColumn
+                .frame(minWidth: 260, idealWidth: 340, maxWidth: 380)
+            Divider().overlay(Theme.stroke)
+            diffColumn
+                .frame(maxWidth: .infinity)
+                .layoutPriority(1)
+            Divider().overlay(Theme.stroke)
+            CommitComposerView(store: store)
+                .frame(minWidth: 280, idealWidth: 320, maxWidth: 340)
+        }
+    }
+
+    /// Compact: one pane at a time, selected by a segmented control, each filling
+    /// the full width so nothing clips at narrow window sizes.
+    private var compactLayout: some View {
+        VStack(spacing: 0) {
+            Picker("Git pane", selection: $compactPane) {
+                ForEach(CompactPane.allCases) { pane in
+                    Text(pane.rawValue).tag(pane)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(8)
+            .accessibilityIdentifier("git.studio.compact.tabs")
+            Divider().overlay(Theme.stroke)
+            switch compactPane {
+            case .changes: changesColumn
+            case .diff: diffColumn
+            case .commit: CommitComposerView(store: store)
+            case .branches: branchColumn
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     // MARK: - Branch column
