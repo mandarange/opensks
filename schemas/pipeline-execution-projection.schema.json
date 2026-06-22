@@ -1,0 +1,158 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PipelineExecutionProjection",
+  "description": "A node-level read model of a single run's execution.",
+  "type": "object",
+  "required": [
+    "metrics",
+    "projection_version",
+    "run_id",
+    "schema",
+    "state"
+  ],
+  "properties": {
+    "conversation_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "metrics": {
+      "$ref": "#/definitions/RunMetrics"
+    },
+    "nodes": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/NodeExecutionProjection"
+      }
+    },
+    "pipeline_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "projection_version": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/definitions/RunProjectionState"
+    }
+  },
+  "definitions": {
+    "NodeExecutionProjection": {
+      "description": "Projected execution state of a single node.",
+      "type": "object",
+      "required": [
+        "attempt",
+        "node_id",
+        "state"
+      ],
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "last_public_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "provider_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/NodeProjectionState"
+        },
+        "touched_paths": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "NodeProjectionState": {
+      "description": "Lifecycle state of a single node (work item) within a run.",
+      "type": "string",
+      "enum": [
+        "queued",
+        "dispatching",
+        "running",
+        "waiting_for_approval",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "skipped"
+      ]
+    },
+    "RunMetrics": {
+      "description": "Aggregate counts over the run's nodes, recomputed after each fold.",
+      "type": "object",
+      "required": [
+        "active",
+        "completed",
+        "failed",
+        "queued"
+      ],
+      "properties": {
+        "active": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "completed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "failed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "queued": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "RunProjectionState": {
+      "description": "Coarse lifecycle state of a whole run.",
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "paused",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    }
+  }
+}

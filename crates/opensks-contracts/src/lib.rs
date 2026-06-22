@@ -1609,6 +1609,7 @@ pub struct ReleaseProof {
 
 pub mod conversation;
 pub mod project;
+pub mod projection;
 pub mod stream;
 
 pub use conversation::{
@@ -1618,6 +1619,11 @@ pub use conversation::{
     TitleSource,
 };
 pub use project::{PROJECT_SUMMARY_SCHEMA, ProjectSummary};
+pub use projection::{
+    NodeExecutionProjection, NodeProjectionState, PIPELINE_EXECUTION_PROJECTION_SCHEMA,
+    PIPELINE_EXECUTION_PROJECTION_VERSION, PipelineExecutionProjection, RunMetrics,
+    RunProjectionState,
+};
 pub use stream::{
     ENGINE_STREAM_FRAME_SCHEMA, EngineStreamFrame, PublicEngineError, STREAM_PROTOCOL_VERSION,
 };
@@ -1639,6 +1645,10 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "conversation-digest.schema.json",
             serde_json::to_string_pretty(&schema_for!(ConversationDigest))?,
+        ),
+        (
+            "pipeline-execution-projection.schema.json",
+            serde_json::to_string_pretty(&schema_for!(PipelineExecutionProjection))?,
         ),
         (
             "engine-stream-frame.schema.json",

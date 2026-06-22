@@ -13,6 +13,10 @@ use opensks_scheduler::{
 };
 use thiserror::Error;
 
+pub mod projection;
+
+pub use projection::{ProjectionReducer, project_run, project_run_from_store};
+
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error("graph has compile errors")]
