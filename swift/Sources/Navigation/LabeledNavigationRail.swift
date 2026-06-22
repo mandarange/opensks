@@ -16,7 +16,6 @@ struct LabeledNavigationRail: View {
             ForEach(WorkspaceRoute.allCases) { route in
                 RailTile(route: route, active: nav.route == route) {
                     nav.route = route
-                    state.selectedRail = route.legacySection
                 }
             }
             Spacer()

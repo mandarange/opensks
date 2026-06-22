@@ -887,7 +887,8 @@ final class AppState: ObservableObject {
     let intelligenceStore = ProjectIntelligenceStore()
     let graphEditorStore = GraphEditorStore()
 
-    @Published var selectedRail: RailSection = .home
+    // Navigation has one source of truth (NavigationStore.route); the explorer
+    // pane is derived from the route via WorkspaceRoute.legacySection (SHELL-003).
     @Published var terminalTab: TerminalTab = .output
     @Published var terminalCollapsed = false
 
@@ -1051,7 +1052,6 @@ final class AppState: ObservableObject {
             }
             self.lastExit = stream.exitCode
             self.isRunning = false
-            self.selectedRail = .runs
             self.loadData()
         }
     }
@@ -1146,7 +1146,6 @@ final class AppState: ObservableObject {
             }
             self.lastExit = stream.exitCode
             self.isRunning = false
-            self.selectedRail = .runs
         }
     }
 
@@ -1184,7 +1183,6 @@ final class AppState: ObservableObject {
             }
             self.lastExit = stream.exitCode
             self.isRunning = false
-            self.selectedRail = .runs
         }
     }
 
@@ -1220,7 +1218,6 @@ final class AppState: ObservableObject {
         }
         guard graphEditorStore.problems.isEmpty else {
             append(RunLine(text: "[graph] run blocked by compile problems", kind: .warn))
-            selectedRail = .graph
             return
         }
         do {
@@ -1273,7 +1270,6 @@ final class AppState: ObservableObject {
             }
             self.lastExit = stream.exitCode
             self.isRunning = false
-            self.selectedRail = .runs
         }
     }
 
@@ -1310,7 +1306,6 @@ final class AppState: ObservableObject {
                 self.append(RunLine(text: "[event] \(event.kind.rawValue) #\(event.sequence)", kind: .info))
             }
             self.lastExit = stream.exitCode
-            self.selectedRail = .runs
         }
     }
 
@@ -1350,7 +1345,6 @@ final class AppState: ObservableObject {
                 self.append(RunLine(text: "[event] \(event.kind.rawValue) #\(event.sequence)", kind: .info))
             }
             self.lastExit = stream.exitCode
-            self.selectedRail = .runs
         }
     }
 

@@ -35,7 +35,10 @@ struct ExplorerView: View {
             .padding(.top, 14)
             .padding(.bottom, 8)
 
-            switch state.selectedRail {
+            // Single source of truth: the pane is derived from the active route
+            // via the pure route→section mapping (no separate selectedRail
+            // state). SHELL-003 / NAV-102.
+            switch nav.route.legacySection {
             case .home: home
             case .graph: graphEditor
             case .runs: agentRuns
@@ -252,7 +255,7 @@ struct ExplorerView: View {
                     Button {
                         if let path = state.intelligenceStore.sourcePath(for: record.id) {
                             state.openFile(path)
-                            state.selectedRail = .files
+                            nav.route = .code
                         }
                     } label: {
                         HStack {

@@ -86,7 +86,7 @@ struct HomeView: View {
                 "Read the codebase",
                 "Browse the workspace and open files in the syntax-highlighted viewer.",
                 "Open files", "folder"
-            ) { state.selectedRail = .files }
+            ) { nav.route = .code }
         }
     }
 
