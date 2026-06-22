@@ -660,6 +660,7 @@ where
         "codegraph" => run_codegraph_command(&args[1..], cwd),
         "triwiki" => run_triwiki_command(&args[1..], cwd),
         "context" => run_context_command(&args[1..], cwd),
+        "conversation" => run_conversation_command(&args[1..], cwd),
         "image" => run_image_command(&args[1..], cwd),
         "reasoning" => run_reasoning_command(&args[1..], cwd),
         "git" => run_git_command(&args[1..], cwd),
@@ -1800,6 +1801,13 @@ fn run_triwiki_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSks
 
 fn run_context_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
     let output = opensks_cli::run_context_command(args, cwd).map_err(convert_cli_error)?;
+    Ok(CliOutput {
+        stdout: output.stdout,
+    })
+}
+
+fn run_conversation_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
+    let output = opensks_cli::run_conversation_command(args, cwd).map_err(convert_cli_error)?;
     Ok(CliOutput {
         stdout: output.stdout,
     })

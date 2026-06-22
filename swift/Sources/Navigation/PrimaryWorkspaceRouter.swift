@@ -8,6 +8,7 @@ import SwiftUI
 
 struct PrimaryWorkspaceRouter: View {
     @EnvironmentObject private var nav: NavigationStore
+    @EnvironmentObject private var coordinator: AppCoordinator
 
     var body: some View {
         Group {
@@ -17,11 +18,7 @@ struct PrimaryWorkspaceRouter: View {
             case .code:
                 CodeWorkspaceView()
             case .chat:
-                RoutePlaceholderView(
-                    headline: "Conversations",
-                    detail: "Project conversations and the chat thread arrive in PR-024 / PR-025.",
-                    systemImage: "bubble.left.and.bubble.right"
-                )
+                ConversationThreadView(store: coordinator.conversations)
             case .graph:
                 RoutePlaceholderView(
                     headline: "Pipeline Graph",

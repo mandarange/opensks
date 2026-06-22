@@ -1188,6 +1188,338 @@ pub fn patch_usage() -> &'static str {
     )
 }
 
+#[derive(Debug, Default)]
+struct ConversationCommandOptions {
+    workspace: Option<PathBuf>,
+    conversation: Option<String>,
+    title: Option<String>,
+    filter: Option<String>,
+    limit: Option<usize>,
+    before_sequence: Option<i64>,
+    after_sequence: Option<i64>,
+    role: Option<String>,
+    text: Option<String>,
+}
+
+pub fn run_conversation_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let Some(subcommand) = args.first() else {
+        return Ok(CliOutput {
+            stdout: conversation_usage().to_string(),
+        });
+    };
+    if subcommand == "--help" || subcommand == "-h" || subcommand == "help" {
+        return Ok(CliOutput {
+            stdout: conversation_usage().to_string(),
+        });
+    }
+    let options = parse_conversation_options(&args[1..])?;
+    let workspace = options
+        .workspace
+        .clone()
+        .unwrap_or_else(|| cwd.to_path_buf());
+    let workspace_key = canonical_workspace_key(&workspace);
+    let repo = opensks_conversation::ConversationRepository::open_workspace(&workspace)
+        .map_err(|error| CliError::Invalid(error.to_string()))?;
+    let now_ms = now_unix_millis()?;
+    let project_id = repo
+        .create_project(&workspace_key, "Workspace", now_ms)
+        .map_err(|error| CliError::Invalid(error.to_string()))?;
+
+    match subcommand.as_str() {
+        "list" => {
+            let filter = parse_conversation_filter(options.filter.as_deref())?;
+            let limit = options.limit.unwrap_or(100);
+            let conversations = repo
+                .list_conversations(&project_id, filter, limit)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            let body = serde_json::json!({
+                "schema": "opensks.conversation-list.v1",
+                "project_id": project_id,
+                "conversations": conversations,
+            });
+            conversation_output(&body)
+        }
+        "create" => {
+            let title = require_conversation_field(options.title.as_deref(), "--title")?;
+            let id = repo
+                .create_conversation(&project_id, title, now_ms)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            conversation_summary_output(&repo, &id)
+        }
+        "rename" => {
+            let conversation =
+                require_conversation_field(options.conversation.as_deref(), "--conversation")?;
+            let title = require_conversation_field(options.title.as_deref(), "--title")?;
+            repo.rename_conversation(conversation, title, now_ms)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            conversation_output(&serde_json::json!({ "ok": true }))
+        }
+        "pin" | "unpin" => {
+            let conversation =
+                require_conversation_field(options.conversation.as_deref(), "--conversation")?;
+            repo.set_pinned(conversation, subcommand == "pin", now_ms)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            conversation_output(&serde_json::json!({ "ok": true }))
+        }
+        "archive" | "unarchive" => {
+            let conversation =
+                require_conversation_field(options.conversation.as_deref(), "--conversation")?;
+            repo.set_archived(conversation, subcommand == "archive", now_ms)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            conversation_output(&serde_json::json!({ "ok": true }))
+        }
+        "delete" => {
+            let conversation =
+                require_conversation_field(options.conversation.as_deref(), "--conversation")?;
+            let counts = repo
+                .delete_conversation(conversation)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            conversation_output(&serde_json::json!({
+                "ok": true,
+                "messages": counts.messages,
+                "runs": counts.runs,
+            }))
+        }
+        "fork" => {
+            let conversation =
+                require_conversation_field(options.conversation.as_deref(), "--conversation")?;
+            let id = repo
+                .fork_conversation(conversation, options.after_sequence, now_ms)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            conversation_summary_output(&repo, &id)
+        }
+        "messages" => {
+            let conversation =
+                require_conversation_field(options.conversation.as_deref(), "--conversation")?;
+            let limit = options.limit.unwrap_or(100);
+            let messages = repo
+                .message_page(conversation, options.before_sequence, limit)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            let has_more = messages.len() == limit;
+            conversation_output(&serde_json::json!({
+                "conversation_id": conversation,
+                "messages": messages,
+                "has_more": has_more,
+            }))
+        }
+        "append" => {
+            let conversation =
+                require_conversation_field(options.conversation.as_deref(), "--conversation")?;
+            let role = parse_conversation_role(options.role.as_deref())?;
+            let text = require_conversation_field(options.text.as_deref(), "--text")?;
+            let turn_id = format!("manual-{}", ClockStamp::now()?.compact_id());
+            let message_id = repo
+                .append_message(
+                    &project_id,
+                    conversation,
+                    &turn_id,
+                    role,
+                    opensks_contracts::MessageState::Complete,
+                    text,
+                    now_ms,
+                )
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            let message = repo
+                .message_page(conversation, None, usize::MAX)
+                .map_err(|error| CliError::Invalid(error.to_string()))?
+                .into_iter()
+                .find(|message| message.id == message_id)
+                .ok_or_else(|| {
+                    CliError::Invalid("appended message could not be reloaded".to_string())
+                })?;
+            conversation_output(&serde_json::to_value(&message).map_err(|error| {
+                CliError::Invalid(format!("serialize conversation message: {error}"))
+            })?)
+        }
+        other => Err(CliError::Usage(format!(
+            "unknown conversation subcommand `{other}`\n\n{}",
+            conversation_usage()
+        ))),
+    }
+}
+
+pub fn conversation_usage() -> &'static str {
+    concat!(
+        "usage: opensks conversation list --workspace <path> [--filter all|running|pinned|archived] [--limit N]\n",
+        "       opensks conversation create --workspace <path> --title \"<title>\"\n",
+        "       opensks conversation rename --workspace <path> --conversation <id> --title \"<title>\"\n",
+        "       opensks conversation pin|unpin|archive|unarchive --workspace <path> --conversation <id>\n",
+        "       opensks conversation delete --workspace <path> --conversation <id>\n",
+        "       opensks conversation fork --workspace <path> --conversation <id> [--after-sequence S]\n",
+        "       opensks conversation messages --workspace <path> --conversation <id> [--before-sequence S] [--limit N]\n",
+        "       opensks conversation append --workspace <path> --conversation <id> --role user|assistant|system --text \"<text>\"\n"
+    )
+}
+
+fn parse_conversation_options(args: &[String]) -> Result<ConversationCommandOptions, CliError> {
+    let mut options = ConversationCommandOptions::default();
+    let mut idx = 0;
+    while idx < args.len() {
+        let flag = args[idx].as_str();
+        match flag {
+            "--workspace" => {
+                options.workspace = Some(PathBuf::from(conversation_flag_value(args, idx, flag)?));
+                idx += 2;
+            }
+            "--conversation" => {
+                options.conversation = Some(conversation_flag_value(args, idx, flag)?.to_string());
+                idx += 2;
+            }
+            "--title" => {
+                options.title = Some(conversation_flag_value(args, idx, flag)?.to_string());
+                idx += 2;
+            }
+            "--filter" => {
+                options.filter = Some(conversation_flag_value(args, idx, flag)?.to_string());
+                idx += 2;
+            }
+            "--limit" => {
+                options.limit = Some(conversation_parse_usize(args, idx, flag)?);
+                idx += 2;
+            }
+            "--before-sequence" => {
+                options.before_sequence = Some(conversation_parse_i64(args, idx, flag)?);
+                idx += 2;
+            }
+            "--after-sequence" => {
+                options.after_sequence = Some(conversation_parse_i64(args, idx, flag)?);
+                idx += 2;
+            }
+            "--role" => {
+                options.role = Some(conversation_flag_value(args, idx, flag)?.to_string());
+                idx += 2;
+            }
+            "--text" => {
+                options.text = Some(conversation_flag_value(args, idx, flag)?.to_string());
+                idx += 2;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown conversation argument `{other}`\n\n{}",
+                    conversation_usage()
+                )));
+            }
+        }
+    }
+    Ok(options)
+}
+
+fn conversation_flag_value<'a>(
+    args: &'a [String],
+    idx: usize,
+    flag: &str,
+) -> Result<&'a str, CliError> {
+    args.get(idx + 1).map(String::as_str).ok_or_else(|| {
+        CliError::Usage(format!(
+            "conversation flag `{flag}` requires a value\n\n{}",
+            conversation_usage()
+        ))
+    })
+}
+
+fn conversation_parse_usize(args: &[String], idx: usize, flag: &str) -> Result<usize, CliError> {
+    conversation_flag_value(args, idx, flag)?
+        .parse::<usize>()
+        .map_err(|_| {
+            CliError::Usage(format!(
+                "conversation flag `{flag}` expects a non-negative integer\n\n{}",
+                conversation_usage()
+            ))
+        })
+}
+
+fn conversation_parse_i64(args: &[String], idx: usize, flag: &str) -> Result<i64, CliError> {
+    conversation_flag_value(args, idx, flag)?
+        .parse::<i64>()
+        .map_err(|_| {
+            CliError::Usage(format!(
+                "conversation flag `{flag}` expects an integer\n\n{}",
+                conversation_usage()
+            ))
+        })
+}
+
+fn require_conversation_field<'a>(value: Option<&'a str>, flag: &str) -> Result<&'a str, CliError> {
+    value.ok_or_else(|| {
+        CliError::Usage(format!(
+            "conversation command requires `{flag}`\n\n{}",
+            conversation_usage()
+        ))
+    })
+}
+
+fn parse_conversation_filter(
+    value: Option<&str>,
+) -> Result<opensks_contracts::ConversationFilter, CliError> {
+    match value.unwrap_or("all") {
+        "all" => Ok(opensks_contracts::ConversationFilter::All),
+        "running" => Ok(opensks_contracts::ConversationFilter::Running),
+        "pinned" => Ok(opensks_contracts::ConversationFilter::Pinned),
+        "archived" => Ok(opensks_contracts::ConversationFilter::Archived),
+        other => Err(CliError::Usage(format!(
+            "unknown conversation filter `{other}`\n\n{}",
+            conversation_usage()
+        ))),
+    }
+}
+
+fn parse_conversation_role(
+    value: Option<&str>,
+) -> Result<opensks_contracts::MessageRole, CliError> {
+    match require_conversation_field(value, "--role")? {
+        "system" => Ok(opensks_contracts::MessageRole::System),
+        "user" => Ok(opensks_contracts::MessageRole::User),
+        "assistant" => Ok(opensks_contracts::MessageRole::Assistant),
+        "tool" => Ok(opensks_contracts::MessageRole::Tool),
+        "event" => Ok(opensks_contracts::MessageRole::Event),
+        other => Err(CliError::Usage(format!(
+            "unknown conversation role `{other}`\n\n{}",
+            conversation_usage()
+        ))),
+    }
+}
+
+/// Resolve the per-workspace project key. Canonicalize when the path resolves on
+/// disk so the same workspace always maps to one project; otherwise fall back to
+/// the lexical path string so the key is still stable for a given input.
+fn canonical_workspace_key(workspace: &Path) -> String {
+    fs::canonicalize(workspace)
+        .unwrap_or_else(|_| workspace.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn now_unix_millis() -> Result<u64, CliError> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| CliError::Invalid("system clock is before UNIX_EPOCH".to_string()))?
+        .as_millis();
+    u64::try_from(millis)
+        .map_err(|_| CliError::Invalid("system clock millis exceed u64 range".to_string()))
+}
+
+fn conversation_summary_output(
+    repo: &opensks_conversation::ConversationRepository,
+    id: &str,
+) -> Result<CliOutput, CliError> {
+    let summary = repo
+        .get_conversation(id)
+        .map_err(|error| CliError::Invalid(error.to_string()))?
+        .ok_or_else(|| CliError::Invalid(format!("conversation not found: {id}")))?;
+    conversation_output(
+        &serde_json::to_value(&summary).map_err(|error| {
+            CliError::Invalid(format!("serialize conversation summary: {error}"))
+        })?,
+    )
+}
+
+fn conversation_output(value: &serde_json::Value) -> Result<CliOutput, CliError> {
+    let stdout = serde_json::to_string_pretty(value)
+        .map_err(|error| CliError::Invalid(format!("serialize conversation output: {error}")))?
+        + "\n";
+    Ok(CliOutput { stdout })
+}
+
 fn parse_daemon_options(args: &[String], cwd: &Path) -> Result<DaemonCommandOptions, CliError> {
     let mut stdio = false;
     let mut workspace = cwd.to_path_buf();
@@ -2925,6 +3257,178 @@ mod tests {
         assert_eq!(release_proof["status"], "not_verified");
         assert_eq!(release_proof["signed_app"], false);
         assert_eq!(release_proof["upgrade_checked"], false);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    fn conversation_args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    #[test]
+    fn conversation_create_then_list_returns_the_conversation() {
+        let root = temp_workspace("opensks-cli-conv-create-list");
+        let created = run_conversation_command(
+            &conversation_args(&["create", "--title", "First conversation"]),
+            &root,
+        )
+        .expect("create conversation");
+        let created_json: serde_json::Value =
+            serde_json::from_str(&created.stdout).expect("create json");
+        assert_eq!(created_json["schema"], "opensks.conversation-summary.v1");
+        assert_eq!(created_json["title"], "First conversation");
+        let conversation_id = created_json["id"].as_str().expect("id").to_string();
+
+        let listed = run_conversation_command(&conversation_args(&["list"]), &root).expect("list");
+        let listed_json: serde_json::Value =
+            serde_json::from_str(&listed.stdout).expect("list json");
+        assert_eq!(listed_json["schema"], "opensks.conversation-list.v1");
+        let conversations = listed_json["conversations"]
+            .as_array()
+            .expect("conversations array");
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0]["id"], conversation_id);
+        assert_eq!(conversations[0]["title"], "First conversation");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn conversation_workspaces_are_project_isolated() {
+        let root_a = temp_workspace("opensks-cli-conv-iso-a");
+        let root_b = temp_workspace("opensks-cli-conv-iso-b");
+
+        run_conversation_command(
+            &conversation_args(&[
+                "create",
+                "--workspace",
+                root_a.to_str().expect("path a"),
+                "--title",
+                "Alpha",
+            ]),
+            Path::new("."),
+        )
+        .expect("create in workspace a");
+
+        let listed_b = run_conversation_command(
+            &conversation_args(&["list", "--workspace", root_b.to_str().expect("path b")]),
+            Path::new("."),
+        )
+        .expect("list workspace b");
+        let listed_b_json: serde_json::Value =
+            serde_json::from_str(&listed_b.stdout).expect("list b json");
+        assert!(
+            listed_b_json["conversations"]
+                .as_array()
+                .expect("array")
+                .is_empty(),
+            "workspace b must not see workspace a conversations"
+        );
+
+        let listed_a = run_conversation_command(
+            &conversation_args(&["list", "--workspace", root_a.to_str().expect("path a")]),
+            Path::new("."),
+        )
+        .expect("list workspace a");
+        let listed_a_json: serde_json::Value =
+            serde_json::from_str(&listed_a.stdout).expect("list a json");
+        assert_eq!(
+            listed_a_json["conversations"]
+                .as_array()
+                .expect("array")
+                .len(),
+            1
+        );
+
+        fs::remove_dir_all(root_a).ok();
+        fs::remove_dir_all(root_b).ok();
+    }
+
+    #[test]
+    fn conversation_append_then_messages_returns_them_in_order() {
+        let root = temp_workspace("opensks-cli-conv-messages");
+        let created = run_conversation_command(
+            &conversation_args(&["create", "--title", "Threaded"]),
+            &root,
+        )
+        .expect("create conversation");
+        let conversation_id = serde_json::from_str::<serde_json::Value>(&created.stdout)
+            .expect("create json")["id"]
+            .as_str()
+            .expect("id")
+            .to_string();
+
+        run_conversation_command(
+            &conversation_args(&[
+                "append",
+                "--conversation",
+                &conversation_id,
+                "--role",
+                "user",
+                "--text",
+                "first message",
+            ]),
+            &root,
+        )
+        .expect("append first");
+        run_conversation_command(
+            &conversation_args(&[
+                "append",
+                "--conversation",
+                &conversation_id,
+                "--role",
+                "assistant",
+                "--text",
+                "second message",
+            ]),
+            &root,
+        )
+        .expect("append second");
+
+        let messages = run_conversation_command(
+            &conversation_args(&["messages", "--conversation", &conversation_id]),
+            &root,
+        )
+        .expect("messages");
+        let messages_json: serde_json::Value =
+            serde_json::from_str(&messages.stdout).expect("messages json");
+        assert_eq!(messages_json["conversation_id"], conversation_id);
+        assert_eq!(messages_json["has_more"], false);
+        let list = messages_json["messages"]
+            .as_array()
+            .expect("messages array");
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0]["content_redacted"], "first message");
+        assert_eq!(list[0]["sequence"], 1);
+        assert_eq!(list[1]["content_redacted"], "second message");
+        assert_eq!(list[1]["sequence"], 2);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn conversation_persists_across_repository_reopen() {
+        let root = temp_workspace("opensks-cli-conv-persist");
+        let created =
+            run_conversation_command(&conversation_args(&["create", "--title", "Durable"]), &root)
+                .expect("create conversation");
+        let conversation_id = serde_json::from_str::<serde_json::Value>(&created.stdout)
+            .expect("create json")["id"]
+            .as_str()
+            .expect("id")
+            .to_string();
+
+        // A second, completely independent command invocation opens the same
+        // on-disk workspace and still sees the conversation.
+        let listed = run_conversation_command(&conversation_args(&["list"]), &root)
+            .expect("list after reopen");
+        let listed_json: serde_json::Value =
+            serde_json::from_str(&listed.stdout).expect("list json");
+        let conversations = listed_json["conversations"]
+            .as_array()
+            .expect("conversations array");
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0]["id"], conversation_id);
 
         fs::remove_dir_all(root).ok();
     }

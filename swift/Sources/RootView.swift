@@ -31,6 +31,9 @@ struct RootView: View {
         .onAppear {
             state.loadData()
             state.connectEngine()
+            // Bind the conversation store to the SAME bundled CLI + workspace
+            // path AppState resolved, then load this project's conversations.
+            coordinator.bindConversations(cli: state.cli, workspace: state.workspace)
         }
         .sheet(isPresented: $state.showPalette) { CommandPalette() }
     }

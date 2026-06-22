@@ -133,6 +133,7 @@ dependencies = [
  "opensks-codegraph",
  "opensks-context",
  "opensks-contracts",
+ "opensks-conversation",
  "opensks-daemon",
  "opensks-event-store",
  "opensks-git",

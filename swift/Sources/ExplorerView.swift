@@ -6,8 +6,23 @@ import SwiftUI
 struct ExplorerView: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var nav: NavigationStore
+    @EnvironmentObject private var coordinator: AppCoordinator
 
     var body: some View {
+        // The `.chat` route owns its own pane: the conversation sidebar replaces
+        // the legacy rail-section content (PR-025). All other routes keep the
+        // existing context pane below.
+        if nav.route == .chat {
+            ConversationSidebar(
+                store: coordinator.conversations,
+                projectName: state.data?.workspaceLabel ?? "Workspace"
+            )
+        } else {
+            legacyPane
+        }
+    }
+
+    private var legacyPane: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text(nav.route.label.uppercased())

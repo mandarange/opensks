@@ -9,6 +9,7 @@ license.workspace = true
 opensks-contracts = { path = "../opensks-contracts" }
 opensks-codegraph = { path = "../opensks-codegraph" }
 opensks-context = { path = "../opensks-context" }
+opensks-conversation = { path = "../opensks-conversation" }
 opensks-daemon = { path = "../opensks-daemon" }
 opensks-event-store = { path = "../opensks-event-store" }
 opensks-git = { path = "../opensks-git" }
