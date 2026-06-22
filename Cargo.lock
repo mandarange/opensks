@@ -679,6 +679,7 @@ name = "opensks-cli"
 version = "0.1.0"
 dependencies = [
  "age",
+ "opensks-adapter",
  "opensks-codegraph",
  "opensks-context",
  "opensks-contracts",

@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+opensks-adapter = { path = "../opensks-adapter" }
 opensks-contracts = { path = "../opensks-contracts" }
 opensks-design = { path = "../opensks-design" }
 opensks-codegraph = { path = "../opensks-codegraph" }

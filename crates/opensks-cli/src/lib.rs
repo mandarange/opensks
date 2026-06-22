@@ -2454,32 +2454,45 @@ fn run_conversation_turn_start(
         .map_err(|error| CliError::Invalid(error.to_string()))?;
 
     let run_id = format!("turn-{turn_id}");
-    let result = opensks_engine::run_template_with_event_stream(
-        workspace,
-        &run_id,
-        "single-model-safe",
-        text,
-    )
-    .map_err(|error| CliError::Invalid(format!("engine run failed: {error}")))?;
+    // Drive a real agent adapter instead of the deterministic engine template
+    // (recovery directive §6, Appendix C rule 2 — the product conversation path
+    // must not call run_template_with_event_stream). Today this is the
+    // deterministic LocalTestAdapter, which performs genuine file edits when the
+    // prompt carries a structured instruction and otherwise answers honestly
+    // without changing anything; a live model adapter is selected here once one
+    // is configured.
+    let adapter = opensks_adapter::LocalTestAdapter::new();
+    let sink = opensks_adapter::CollectingSink::new();
+    let request = opensks_adapter::AgentRunRequest {
+        workspace: workspace.to_path_buf(),
+        project_id: project_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        turn_id: turn_id.clone(),
+        run_id: run_id.clone(),
+        stream_id: format!("stream-{turn_id}"),
+        now_ms,
+        prompt: text.to_string(),
+    };
+    let outcome = opensks_adapter::AgentAdapter::run(&adapter, &request, &sink)
+        .map_err(|error| CliError::Invalid(format!("agent run failed: {error}")))?;
+    let _ = &sink; // events are streamed by the daemon path; one-shot CLI keeps the outcome.
 
-    let run_state = if result.dispatch_report.failed == 0 {
-        "completed"
-    } else {
-        "failed"
+    use opensks_contracts::projection::RunProjectionState;
+    let run_state = match outcome.final_state {
+        RunProjectionState::Completed => "completed",
+        RunProjectionState::Failed => "failed",
+        RunProjectionState::Cancelled => "cancelled",
+        RunProjectionState::Paused => "paused",
+        RunProjectionState::Queued | RunProjectionState::Running => "running",
     };
-    let assistant_state = if run_state == "completed" {
-        opensks_contracts::MessageState::Complete
-    } else {
-        opensks_contracts::MessageState::Failed
+    let assistant_state = match outcome.final_state {
+        RunProjectionState::Completed => opensks_contracts::MessageState::Complete,
+        RunProjectionState::Failed | RunProjectionState::Cancelled => {
+            opensks_contracts::MessageState::Failed
+        }
+        _ => opensks_contracts::MessageState::Streaming,
     };
-    let assistant_content = format!(
-        "run {} {} ({} work items, {} completed, {} failed)",
-        result.run_id,
-        run_state,
-        result.snapshot.work_items.len(),
-        result.dispatch_report.completed,
-        result.dispatch_report.failed,
-    );
+    let assistant_content = outcome.assistant_text.clone();
 
     repo.set_message_content(
         &assistant_message_id,
@@ -2493,7 +2506,7 @@ fn run_conversation_turn_start(
         conversation_id,
         &assistant_message_id,
         &turn_id,
-        &result.run_id,
+        &run_id,
         "primary",
         now_ms,
     )
@@ -2502,7 +2515,7 @@ fn run_conversation_turn_start(
     // Record the run's real terminal state so the runs list and idempotent
     // replay read it back instead of fabricating `completed` (directive §6.7).
     repo.upsert_run_projection(
-        &result.run_id,
+        &run_id,
         project_id,
         conversation_id,
         &turn_id,
@@ -2519,7 +2532,7 @@ fn run_conversation_turn_start(
                 turn_id: turn_id.clone(),
                 user_message_id: user_message_id.clone(),
                 assistant_message_id: assistant_message_id.clone(),
-                run_id: result.run_id.clone(),
+                run_id: run_id.clone(),
             },
             now_ms,
         )
@@ -2531,7 +2544,7 @@ fn run_conversation_turn_start(
         "turn_id": turn_id,
         "user_message_id": user_message_id,
         "assistant_message_id": assistant_message_id,
-        "run_id": result.run_id,
+        "run_id": run_id,
         "run_state": run_state,
         "reused": false,
     }))
@@ -5705,11 +5718,16 @@ mod tests {
         assert_eq!(listed[0]["role"], "user");
         assert_eq!(listed[1]["role"], "assistant");
         assert_eq!(listed[1]["state"], "complete");
+        // The assistant message is the agent's real output, not the removed
+        // "N work items completed" fake summary. A plain-text prompt with no
+        // structured instruction yields an honest no-change reply.
+        let assistant_content = listed[1]["content_redacted"]
+            .as_str()
+            .expect("assistant content");
+        assert!(!assistant_content.is_empty());
         assert!(
-            listed[1]["content_redacted"]
-                .as_str()
-                .expect("assistant content")
-                .contains("completed")
+            !assistant_content.contains("work items"),
+            "leftover fake summary: {assistant_content}"
         );
 
         fs::remove_dir_all(root).ok();
@@ -5809,6 +5827,43 @@ mod tests {
         assert_eq!(listed[0]["message_id"], turn["assistant_message_id"]);
         assert_eq!(listed[0]["relation"], "primary");
         assert_eq!(listed[0]["run_state"], "completed");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn turn_start_with_local_test_instruction_really_edits_the_workspace() {
+        // The conversation path drives a real adapter (not the deterministic
+        // engine template). A structured instruction must produce an actual
+        // on-disk change — the Chat → code-edit vertical, provable without a
+        // model.
+        let root = temp_workspace("opensks-cli-agent-edit");
+        let cid = create_conversation_id(&root);
+        let instruction = r#"{"local_test": {"op": "create_file", "path": "AGENT_NOTE.md", "value": "written by the agent"}}"#;
+        let turn = conversation_json(
+            &["turn-start", "--conversation", &cid, "--text", instruction],
+            &root,
+        );
+        assert_eq!(turn["run_state"], "completed");
+
+        // Real side effect: the file exists with the agent's content.
+        let written = fs::read_to_string(root.join("AGENT_NOTE.md")).expect("agent-written file");
+        assert_eq!(written, "written by the agent");
+
+        // The assistant message is the agent's real summary, not a fixed
+        // "N work items completed" template.
+        let messages = conversation_json(&["messages", "--conversation", &cid], &root);
+        let list = messages["messages"].as_array().expect("messages");
+        let assistant = list
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant message");
+        let content = assistant["content_redacted"].as_str().unwrap_or_default();
+        assert!(content.contains("AGENT_NOTE.md"), "got: {content}");
+        assert!(
+            !content.contains("work items"),
+            "leftover fake summary: {content}"
+        );
 
         fs::remove_dir_all(root).ok();
     }
