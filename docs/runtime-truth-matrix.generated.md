@@ -1,0 +1,24 @@
+# Runtime Truth Matrix (generated)
+
+<!-- GENERATED FILE — do not edit by hand.
+     Regenerate with: cargo run -p xtask -- capability-matrix
+     Source of truth: opensks_contracts::baseline_capability_report() -->
+
+Each coding-agent capability declares how real it is at runtime. The app must never
+present a `Foundation`/`Simulation` surface as if it were `Live` (recovery directive §18).
+
+| Capability | Surface | Maturity | User label | Available | Reason | Evidence |
+|---|---|---|---|:--:|---|---|
+| `chat.answer` | Chat assistant answer | Simulation | Simulation | no | `no_live_model_adapter` | — |
+| `agent.code_edit` | Chat code edit | Simulation | Simulation | no | `deterministic_worker_no_real_edits` | — |
+| `agent.parallel_build` | Parallel subcontract build | Foundation | Needs setup | no | `scheduler_present_but_sync_deterministic_worker` | — |
+| `model.dispatch` | Model provider dispatch | Unavailable | Unavailable | no | `no_provider_execution_adapter` | — |
+| `image.generate` | Image generation | Foundation | Needs setup | no | `fake_image_model_no_adapter` | — |
+| `web.research` | Web research tool | Unavailable | Unavailable | no | `no_web_tool_implementation` | — |
+| `conversation.persistence` | Conversation persistence | Live | Available | yes | `durable_sqlite_repository` | crate:opensks-conversation, table:conversations |
+| `file.edit_manual` | Manual file editing | Live | Available | yes | `safe_file_service_with_optimistic_concurrency` | crate:opensks-file-service, schema:save-text-result |
+| `git.commit` | Git commit | Live | Available | yes | `reviewed_index_hash_commit_path` | crate:opensks-git-service, schema:git-commit |
+| `git.push` | Git push | Live | Available | yes | `protected_push_approval_outbox` | crate:opensks-git-service, schema:git-isolation |
+| `stream.protocol` | Engine stream protocol | Degraded | Limited | yes | `swift_quiet_window_still_in_product_path` | crate:opensks-stream, schema:engine-stream-frame |
+| `pipeline.graph` | Live pipeline graph | Foundation | Needs setup | no | `projection_present_no_ingest_or_edges` | — |
+| `design.generation` | Design system generation | Foundation | Needs setup | no | `studio_scaffold_without_persist_compile_apply` | — |

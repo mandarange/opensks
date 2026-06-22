@@ -15,7 +15,7 @@ use opensks_contracts::{
 };
 use rusqlite::{Connection, Row, params};
 
-const MIGRATION_VERSION: i32 = 1;
+const MIGRATION_VERSION: i32 = 2;
 const CONVERSATION_DB_RELATIVE_PATH: &str = ".opensks/runtime/conversations.sqlite3";
 
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +37,10 @@ pub struct ConversationRunRef {
     pub run_id: String,
     pub message_id: String,
     pub relation: String,
+    /// Real run state from `run_projections`, or `None` when no projection has
+    /// been recorded. Callers MUST surface `None` as `unknown` — never as a
+    /// fabricated `completed` (recovery directive §6.7).
+    pub run_state: Option<String>,
 }
 
 /// The persisted identifiers for a previously executed turn, keyed by
@@ -211,6 +215,50 @@ impl ConversationRepository {
                 message_id UNINDEXED,
                 content_redacted,
                 tokenize='unicode61'
+            );
+            -- Recovery release §20: durable thread settings, typed timeline items,
+            -- run projection (the real source of run state), and stream cursors.
+            CREATE TABLE IF NOT EXISTS conversation_settings (
+                conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+                settings_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS timeline_items (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                turn_id TEXT NULL,
+                run_id TEXT NULL,
+                sequence INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                payload_redacted_json TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                UNIQUE(conversation_id, sequence)
+            );
+            CREATE INDEX IF NOT EXISTS idx_timeline_conversation_sequence
+                ON timeline_items(conversation_id, sequence);
+            CREATE TABLE IF NOT EXISTS run_projections (
+                run_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                state TEXT NOT NULL,
+                pipeline_id TEXT NULL,
+                graph_revision TEXT NULL,
+                last_sequence INTEGER NOT NULL,
+                projection_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_run_projections_conversation
+                ON run_projections(conversation_id);
+            CREATE TABLE IF NOT EXISTS stream_cursors (
+                stream_id TEXT PRIMARY KEY,
+                run_id TEXT NULL,
+                last_sequence INTEGER NOT NULL,
+                terminal_kind TEXT NULL,
+                updated_at_ms INTEGER NOT NULL
             );
             ",
         )?;
@@ -498,11 +546,16 @@ impl ConversationRepository {
         Ok(())
     }
 
-    /// List the runs linked to a conversation, oldest first.
+    /// List the runs linked to a conversation, oldest first. The run state is
+    /// joined from `run_projections`; a run with no projection yields
+    /// `run_state = None` (surfaced as `unknown`), never a fabricated state.
     pub fn runs_for_conversation(&self, conversation_id: &str) -> Result<Vec<ConversationRunRef>> {
         let mut stmt = self.conn.prepare(
-            "SELECT turn_id, run_id, message_id, relation FROM conversation_runs
-             WHERE conversation_id = ?1 ORDER BY created_at_ms ASC, run_id ASC",
+            "SELECT cr.turn_id, cr.run_id, cr.message_id, cr.relation, rp.state
+             FROM conversation_runs cr
+             LEFT JOIN run_projections rp ON rp.run_id = cr.run_id
+             WHERE cr.conversation_id = ?1
+             ORDER BY cr.created_at_ms ASC, cr.run_id ASC",
         )?;
         let rows = stmt.query_map(params![conversation_id], |row| {
             Ok(ConversationRunRef {
@@ -510,6 +563,7 @@ impl ConversationRepository {
                 run_id: row.get(1)?,
                 message_id: row.get(2)?,
                 relation: row.get(3)?,
+                run_state: row.get(4)?,
             })
         })?;
         let mut out = Vec::new();
@@ -517,6 +571,48 @@ impl ConversationRepository {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// Record (or update) the real lifecycle state of a run. This is the single
+    /// source of truth the runs list and idempotent replay read from; nothing
+    /// may report a run's state without a projection row behind it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_run_projection(
+        &self,
+        run_id: &str,
+        project_id: &str,
+        conversation_id: &str,
+        turn_id: &str,
+        state: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO run_projections(
+                 run_id, project_id, conversation_id, turn_id, state,
+                 pipeline_id, graph_revision, last_sequence, projection_json, updated_at_ms)
+             VALUES(?1, ?2, ?3, ?4, ?5, NULL, NULL, 0, '{}', ?6)
+             ON CONFLICT(run_id) DO UPDATE SET
+                 state = excluded.state,
+                 updated_at_ms = excluded.updated_at_ms",
+            params![
+                run_id,
+                project_id,
+                conversation_id,
+                turn_id,
+                state,
+                now_ms as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Real state of a single run, or `None` when no projection exists.
+    pub fn run_projection_state(&self, run_id: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT state FROM run_projections WHERE run_id = ?1")?;
+        let mut rows = stmt.query(params![run_id])?;
+        Ok(rows.next()?.map(|r| r.get::<_, String>(0)).transpose()?)
     }
 
     /// Record the identifiers produced for a turn under an idempotency key so a
@@ -738,6 +834,48 @@ mod tests {
         assert_eq!(repo2.project_id_for_workspace("/ws/x").unwrap(), Some(pid));
         repo2.migrate().unwrap(); // explicit second migrate is a no-op
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn linked_run_without_projection_reads_unknown_not_completed() {
+        // §6.7: a run with no projection must surface as `unknown`, never as a
+        // fabricated `completed`. Recording the real state then reflects it.
+        let repo = ConversationRepository::open_memory().unwrap();
+        let (pid, cid) = project_and_conversation(&repo);
+        let msg = repo
+            .append_message(
+                &pid,
+                &cid,
+                "t1",
+                MessageRole::Assistant,
+                MessageState::Streaming,
+                "...",
+                2_000,
+            )
+            .unwrap();
+        repo.link_run(&cid, &msg, "t1", "run-1", "primary", 2_000)
+            .unwrap();
+
+        let runs = repo.runs_for_conversation(&cid).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0].run_state, None,
+            "no projection ⇒ unknown, not completed"
+        );
+        assert_eq!(repo.run_projection_state("run-1").unwrap(), None);
+
+        repo.upsert_run_projection("run-1", &pid, &cid, "t1", "failed", 2_100)
+            .unwrap();
+        let runs = repo.runs_for_conversation(&cid).unwrap();
+        assert_eq!(runs[0].run_state.as_deref(), Some("failed"));
+
+        // Upsert is idempotent and updates state in place.
+        repo.upsert_run_projection("run-1", &pid, &cid, "t1", "completed", 2_200)
+            .unwrap();
+        assert_eq!(
+            repo.run_projection_state("run-1").unwrap().as_deref(),
+            Some("completed")
+        );
     }
 
     #[test]

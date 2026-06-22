@@ -26,5 +26,9 @@ jobs:
         run: cargo run -p xtask -- schemas
       - name: Schema drift
         run: git diff --exit-code -- schemas
+      - name: Generate capability matrix
+        run: cargo run -p xtask -- capability-matrix
+      - name: Capability truth drift
+        run: git diff --exit-code -- docs/runtime-truth-matrix.generated.md
       - name: Dependency audit placeholder
         run: cargo tree --workspace --locked >/tmp/opensks-cargo-tree.txt

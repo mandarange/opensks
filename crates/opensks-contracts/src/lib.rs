@@ -1643,6 +1643,7 @@ pub struct ReleaseProof {
     pub status: TrustStatus,
 }
 
+pub mod capability;
 pub mod conversation;
 pub mod design;
 pub mod file;
@@ -1657,6 +1658,10 @@ pub mod stream;
 pub mod text_diff;
 pub mod vault;
 
+pub use capability::{
+    CapabilityMaturity, RUNTIME_CAPABILITY_REPORT_SCHEMA, RUNTIME_CAPABILITY_SCHEMA,
+    RuntimeCapability, RuntimeCapabilityReport, baseline_capability_report,
+};
 pub use conversation::{
     CONVERSATION_DIGEST_SCHEMA, CONVERSATION_MESSAGE_SCHEMA, CONVERSATION_SUMMARY_SCHEMA,
     ConversationDeleteCounts, ConversationDigest, ConversationFilter, ConversationMessage,
@@ -1724,6 +1729,14 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "project-summary.schema.json",
             serde_json::to_string_pretty(&schema_for!(ProjectSummary))?,
+        ),
+        (
+            "runtime-capability.schema.json",
+            serde_json::to_string_pretty(&schema_for!(RuntimeCapability))?,
+        ),
+        (
+            "runtime-capability-report.schema.json",
+            serde_json::to_string_pretty(&schema_for!(RuntimeCapabilityReport))?,
         ),
         (
             "conversation-summary.schema.json",

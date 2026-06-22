@@ -1,0 +1,96 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RuntimeCapability",
+  "description": "A single declared runtime capability.",
+  "type": "object",
+  "required": [
+    "actions",
+    "available",
+    "evidence_refs",
+    "id",
+    "maturity",
+    "reason_code",
+    "schema",
+    "title"
+  ],
+  "properties": {
+    "actions": {
+      "description": "Actions the UI may offer when the capability is not dependable.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "available": {
+      "description": "Whether the capability can be relied on right now. Mirrors `maturity.is_dependable()` for the baseline but is carried explicitly so a live report can mark a dependable capability temporarily unavailable (e.g. unhealthy provider) without changing its maturity.",
+      "type": "boolean"
+    },
+    "evidence_refs": {
+      "description": "Evidence backing the maturity claim (provider/adapter/contract refs).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "id": {
+      "description": "Stable dotted id, e.g. `agent.code_edit`.",
+      "type": "string"
+    },
+    "maturity": {
+      "$ref": "#/definitions/CapabilityMaturity"
+    },
+    "reason_code": {
+      "description": "Stable machine reason for the current maturity/availability.",
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "title": {
+      "description": "Short human-facing surface name, e.g. `Chat code edit`.",
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "CapabilityMaturity": {
+      "description": "How real a capability is at runtime. Ordered from most to least dependable.",
+      "oneOf": [
+        {
+          "description": "A real, end-to-end implementation whose user-visible action performs the real side effect. Requires non-empty `evidence_refs`.",
+          "type": "string",
+          "enum": [
+            "live"
+          ]
+        },
+        {
+          "description": "Live but operating with a known limitation (e.g. reduced concurrency, a legacy transport still in the path). Requires non-empty `evidence_refs`.",
+          "type": "string",
+          "enum": [
+            "degraded"
+          ]
+        },
+        {
+          "description": "Code/types/persistence exist but the vertical path is not yet wired to a real side effect. Must not be shown as live.",
+          "type": "string",
+          "enum": [
+            "foundation"
+          ]
+        },
+        {
+          "description": "Deterministic stand-in that mimics success without doing the real work. Must be visually distinct from live in the UI.",
+          "type": "string",
+          "enum": [
+            "simulation"
+          ]
+        },
+        {
+          "description": "Not implemented or not currently usable (missing setup/credentials).",
+          "type": "string",
+          "enum": [
+            "unavailable"
+          ]
+        }
+      ]
+    }
+  }
+}

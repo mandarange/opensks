@@ -2371,7 +2371,9 @@ pub fn run_conversation_command(args: &[String], cwd: &Path) -> Result<CliOutput
                         "run_id": run.run_id,
                         "message_id": run.message_id,
                         "relation": run.relation,
-                        "run_state": "completed",
+                        // Real state from the run projection; never a fabricated
+                        // `completed` (recovery directive §6.7).
+                        "run_state": run.run_state.unwrap_or_else(|| "unknown".to_string()),
                     })
                 })
                 .collect();
@@ -2407,13 +2409,17 @@ fn run_conversation_turn_start(
             .lookup_turn_idempotency(key, conversation_id)
             .map_err(|error| CliError::Invalid(error.to_string()))?
         {
+            let run_state = repo
+                .run_projection_state(&existing.run_id)
+                .map_err(|error| CliError::Invalid(error.to_string()))?
+                .unwrap_or_else(|| "unknown".to_string());
             return conversation_output(&serde_json::json!({
                 "schema": "opensks.conversation-turn.v1",
                 "turn_id": existing.turn_id,
                 "user_message_id": existing.user_message_id,
                 "assistant_message_id": existing.assistant_message_id,
                 "run_id": existing.run_id,
-                "run_state": "completed",
+                "run_state": run_state,
                 "reused": true,
             }));
         }
@@ -2489,6 +2495,18 @@ fn run_conversation_turn_start(
         &turn_id,
         &result.run_id,
         "primary",
+        now_ms,
+    )
+    .map_err(|error| CliError::Invalid(error.to_string()))?;
+
+    // Record the run's real terminal state so the runs list and idempotent
+    // replay read it back instead of fabricating `completed` (directive §6.7).
+    repo.upsert_run_projection(
+        &result.run_id,
+        project_id,
+        conversation_id,
+        &turn_id,
+        run_state,
         now_ms,
     )
     .map_err(|error| CliError::Invalid(error.to_string()))?;
