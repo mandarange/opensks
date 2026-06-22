@@ -50,7 +50,7 @@ struct TitleBarView: View {
             Image(systemName: "dot.radiowaves.left.and.right")
                 .font(.system(size: 11))
                 .foregroundStyle(count > 0 ? Theme.accent : Theme.muted)
-            Text("\(count) provider")
+            Text(Pluralize.count(count, "provider"))
                 .font(Theme.ui(11, .medium))
                 .foregroundStyle(Theme.textSoft)
         }
