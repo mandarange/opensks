@@ -324,13 +324,18 @@ struct PipelineProjectionReducer: Sendable {
         if let candidate { raiseRunState(to: candidate) }
     }
 
-    /// Monotonic raise: advance only to a strictly higher information rank.
-    /// Among equal-rank terminals, keep the first one observed (a later
-    /// snapshot reasserting a different terminal does not flip it).
+    /// Apply a run-state transition (events arrive in sequence order). Terminal
+    /// states are sticky (the first terminal observed wins; a later snapshot
+    /// cannot flip it), the run never regresses to `queued`, and pause/resume is
+    /// honoured (`running ⇄ paused`). The old rank-only rule silently dropped
+    /// `running → paused` because paused ranks below running — PIPE-002. Mirrors
+    /// opensks-contracts RunProjectionState::merge.
     private mutating func raiseRunState(to next: RunProjectionState) {
-        if next.rank > projection.state.rank {
-            projection.state = next
-        }
+        let current = projection.state
+        if current.isTerminal { return }
+        if next.isTerminal { projection.state = next; return }
+        if next == .queued { return }
+        projection.state = next
     }
 
     // MARK: Node-level fold

@@ -147,6 +147,30 @@ final class PipelineProjectionTests: XCTestCase {
         XCTAssertEqual(projection?.state, .running)
     }
 
+    func testRunPauseAndResumeAreReflected() {
+        // PIPE-002: a RunPaused after RunStarted must surface as paused (the old
+        // rank model dropped it because paused ranks below running); RunResumed
+        // returns to running.
+        let store = PipelineProjectionStore()
+        store.ingest(event(id: "e1", sequence: 1, kind: "run_started",
+                           payload: ["message": .string("go")]))
+        store.ingest(event(id: "e2", sequence: 2, kind: "run_paused",
+                           payload: ["message": .string("hold")]))
+        XCTAssertEqual(store.projection(for: "run-1")?.state, .paused)
+        store.ingest(event(id: "e3", sequence: 3, kind: "run_resumed",
+                           payload: ["message": .string("go")]))
+        XCTAssertEqual(store.projection(for: "run-1")?.state, .running)
+    }
+
+    func testTerminalRunIsStickyAgainstLaterPause() {
+        let store = PipelineProjectionStore()
+        store.ingest(event(id: "e1", sequence: 1, kind: "run_started"))
+        store.ingest(event(id: "e2", sequence: 2, kind: "run_cancelled",
+                           payload: ["reason_code": .string("cancelled_by_user")]))
+        store.ingest(event(id: "e3", sequence: 3, kind: "run_paused"))
+        XCTAssertEqual(store.projection(for: "run-1")?.state, .cancelled)
+    }
+
     func testSnapshotWithLowerStateCannotDowngradeFailedNode() {
         let store = PipelineProjectionStore()
         store.ingest(event(id: "e1", sequence: 1, kind: "verification_failed",
