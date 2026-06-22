@@ -1,6 +1,8 @@
 // RootView.swift — top-level composition: titlebar band, the resizable body
-// (rail | explorer | center(editor / terminal) | composer), and the persistent
-// honest status bar. Owns AppState and loads domain data on appear.
+// (rail | explorer | chat-first center), and the persistent honest status bar.
+// Owns AppState and loads domain data on appear. There is no permanent
+// right-hand composer: the conversation composer in Chat is the primary
+// execution control (recovery directive §0.3 / §3.2).
 
 import SwiftUI
 import AppKit
@@ -9,7 +11,6 @@ struct RootView: View {
     @StateObject private var state = AppState()
     @StateObject private var coordinator = AppCoordinator()
     @State private var explorerWidth: CGFloat = 240
-    @State private var composerWidth: CGFloat = 352
 
     var body: some View {
         ZStack {
@@ -69,7 +70,7 @@ struct RootView: View {
                 .keyboardShortcut("/", modifiers: .command)
             Button("") { state.runAcceptance() }
                 .keyboardShortcut("r", modifiers: .command)
-            Button("") { state.focusObjective = true }
+            Button("") { coordinator.navigation.route = .chat }
                 .keyboardShortcut("l", modifiers: .command)
         }
         .buttonStyle(.plain)
@@ -87,16 +88,12 @@ struct RootView: View {
                 .frame(width: explorerWidth)
             DragDivider(width: $explorerWidth, range: 200...340)
 
-            // The central workspace is route-driven (PR-022): selecting a rail
-            // tile re-renders this region. No fixed max width — it fills the
-            // available space so the shell never letterboxes the center.
+            // The central workspace is route-driven and chat-first: it fills the
+            // available space (highest layout priority) so the shell never
+            // letterboxes the center and Chat stays readable down to 1040pt.
             PrimaryWorkspaceRouter()
-                .frame(maxWidth: .infinity)
+                .frame(minWidth: 520, maxWidth: .infinity)
                 .layoutPriority(1)
-
-            DragDivider(width: $composerWidth, range: 320...440, invert: true)
-            ComposerView()
-                .frame(width: composerWidth)
         }
     }
 }

@@ -5,6 +5,7 @@ import SwiftUI
 
 struct HomeView: View {
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var nav: NavigationStore
 
     var body: some View {
         ScrollView {
@@ -72,10 +73,10 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: Theme.s8) {
             SectionHeader(title: "Start here")
             actionCard(
-                "Describe an autonomous run",
-                "Describe the change you want, then choose Quick Edit, Plan & Execute, or Parallel Build.",
-                "Focus composer", "sparkles"
-            ) { state.focusObjective = true }
+                "Start a coding task",
+                "Describe the change you want in Chat, then choose Quick Edit, Plan & Execute, or Parallel Build.",
+                "Open Chat", "bubble.left.and.text.bubble.right"
+            ) { nav.route = .chat }
             actionCard(
                 "Verify proof state",
                 "Run the acceptance audit and watch results stream in the Output drawer.",

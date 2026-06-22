@@ -18,9 +18,10 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(ids.count, WorkspaceRoute.allCases.count)
     }
 
-    func testNavigationStoreDefaultsToHomeAndUpdates() {
+    func testNavigationStoreDefaultsToChatAndUpdates() {
+        // Chat is the default first-launch surface (recovery directive §0.3/§3.3).
         let nav = NavigationStore()
-        XCTAssertEqual(nav.route, .home)
+        XCTAssertEqual(nav.route, .chat)
         nav.route = .git
         XCTAssertEqual(nav.route, .git)
         XCTAssertEqual(nav.route.centralAccessibilityIdentifier, "workspace.central.git")

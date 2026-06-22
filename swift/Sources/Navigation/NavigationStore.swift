@@ -6,5 +6,8 @@ import SwiftUI
 
 @MainActor
 final class NavigationStore: ObservableObject {
-    @Published var route: WorkspaceRoute = .home
+    // Chat is the main workspace and the default first-launch surface
+    // (recovery directive §0.3 / §3.3): a conversation turn is the primary
+    // entry point for agent-driven work.
+    @Published var route: WorkspaceRoute = .chat
 }
