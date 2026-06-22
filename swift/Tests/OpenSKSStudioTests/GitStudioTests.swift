@@ -247,12 +247,13 @@ final class GitStudioTests: XCTestCase {
         XCTAssertFalse(file.displayLines.isEmpty)
     }
 
-    // MARK: - Read-only protocol surface (compile-time guarantee)
+    // MARK: - Read surface still works (PR-034 reads unchanged by PR-035)
 
-    /// This compiles ONLY because `GitService` exposes exactly status / branches
-    /// / diff. There is no stage/commit/switch/push to call — adding one to the
-    /// witness here would not satisfy the protocol, and the protocol has none.
-    func testGitServiceProtocolIsReadOnly() async throws {
+    /// The PR-034 reads — status / branches / diff — still behave exactly as
+    /// before after PR-035 added the LOCAL mutation surface alongside them. (The
+    /// read-only-PLUS-local surface, and the absence of any push method, are
+    /// asserted by `GitCommitTests`.)
+    func testGitServiceReadsStillWork() async throws {
         let service: GitService = MockGitService(
             status: try decodeStatus(),
             branches: try decodeBranches(),
@@ -263,9 +264,6 @@ final class GitStudioTests: XCTestCase {
         _ = try await service.diff(path: nil, staged: false)
         _ = try await service.diff() // convenience default
 
-        // The entire callable surface, enumerated via Mirror over a value that
-        // records every call. After exercising all three reads, exactly the three
-        // read counters moved — there is no fourth (mutating) entry point.
         let mock = service as! MockGitService
         XCTAssertEqual(mock.statusCallCount, 1)
         XCTAssertEqual(mock.branchesCallCount, 1)

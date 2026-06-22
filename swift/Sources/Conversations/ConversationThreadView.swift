@@ -110,6 +110,12 @@ struct ConversationThreadView: View {
                         }
                     }
                 }
+                // LOCAL commit cards posted into this thread (PR-035): each lists
+                // the commit sha + the EXACT paths committed.
+                ForEach(store.commitCards(for: store.selectedConversationID ?? "")) { card in
+                    CommitReceiptCard(card: card)
+                        .id("commit-\(card.id)")
+                }
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 16)

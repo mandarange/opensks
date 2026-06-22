@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GitUnstageResult",
+  "description": "The result of unstaging one or more paths.",
+  "type": "object",
+  "required": [
+    "schema"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "unstaged": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

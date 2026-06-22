@@ -29,6 +29,13 @@ final class ConversationStore: ObservableObject {
     // RunCard renders one of these under the assistant turn it belongs to.
     @Published private(set) var runsByConversation: [String: [ConversationRunRef]] = [:]
 
+    // Per-conversation LOCAL commit cards (PR-035). After a successful local
+    // commit the Git studio posts one of these into the active thread; the
+    // thread renders a `CommitReceiptCard` listing the commit sha + the exact
+    // paths committed. These are UI affordances attached to the thread, not
+    // persisted messages, so they never round-trip through the service.
+    @Published private(set) var commitCardsByConversation: [String: [GitCommitCard]] = [:]
+
     // True while a send is in flight for the selected conversation (the
     // composer disables its Send button so one Send starts exactly one run).
     @Published private(set) var isSending = false
@@ -76,6 +83,27 @@ final class ConversationStore: ObservableObject {
 
     /// Runs linked to a conversation (most recent last), for the run card.
     func runs(for id: String) -> [ConversationRunRef] { runsByConversation[id] ?? [] }
+
+    /// Commit cards posted into a conversation (most recent last).
+    func commitCards(for id: String) -> [GitCommitCard] { commitCardsByConversation[id] ?? [] }
+
+    /// Post a LOCAL commit card into a conversation thread (PR-035). Records the
+    /// commit sha + the EXACT paths committed so the thread renders an honest
+    /// receipt. Returns the card. Posting to the currently-selected conversation
+    /// surfaces it immediately under the thread's messages.
+    @discardableResult
+    func postCommitCard(_ result: GitCommitResult, message: String, conversationID: String? = nil) -> GitCommitCard? {
+        guard let id = conversationID ?? selectedConversationID else { return nil }
+        let card = GitCommitCard(
+            id: UUID().uuidString,
+            commit: result.commit,
+            paths: result.paths,
+            message: message,
+            committedAtMs: Int64(Date().timeIntervalSince1970 * 1000)
+        )
+        commitCardsByConversation[id, default: []].append(card)
+        return card
+    }
 
     /// The run linked to a specific assistant message, if any — lets the thread
     /// render a `RunCard` directly under the turn that produced it.
@@ -263,6 +291,7 @@ final class ConversationStore: ObservableObject {
             try await service.delete(id: id)
             drafts[id] = nil
             runsByConversation[id] = nil
+            commitCardsByConversation[id] = nil
             if selectedConversationID == id {
                 selectedConversationID = nil
                 messages = []

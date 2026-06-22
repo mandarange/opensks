@@ -55,6 +55,17 @@ final class AppCoordinator: ObservableObject {
         git.rebind(service: LiveGitService(cli: cli, workspace: workspace))
     }
 
+    /// Wire the Git studio (PR-035) to the rest of the app: the editor store so a
+    /// dirty-buffer switch preflight can see unsaved work, and a commit-card sink
+    /// so a successful LOCAL commit posts a receipt into the active conversation
+    /// thread. Idempotent — safe to call again after a rebind.
+    func wireGit(editorStore: EditorWorkspaceStore) {
+        git.editorStore = editorStore
+        git.onCommitted = { [weak self] result, message in
+            self?.conversations.postCommitCard(result, message: message)
+        }
+    }
+
     /// Focus the `.graph` route on a specific run and navigate there. Used by a
     /// `PipelineRunCard`'s "Open live graph" control. Selecting a different run
     /// id swaps the projection the graph renders without disturbing other runs'

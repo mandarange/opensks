@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GitCommitPreview",
+  "description": "A preview of the current index: the stable `index_hash` over the staged path list and their staged blob oids, plus the staged paths themselves. Callers pass `index_hash` back to `commit` as `--expected-index-hash`; a mismatch means the index changed since the preview and the commit is refused.",
+  "type": "object",
+  "required": [
+    "has_staged",
+    "index_hash",
+    "schema"
+  ],
+  "properties": {
+    "has_staged": {
+      "type": "boolean"
+    },
+    "index_hash": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "staged_paths": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 opensks-contracts = { path = "../opensks-contracts" }
+opensks-policy = { path = "../opensks-policy" }
 thiserror = { workspace = true }
 
 [lints]

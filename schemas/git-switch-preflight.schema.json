@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GitSwitchPreflight",
+  "description": "The result of a read-only switch preflight check.",
+  "type": "object",
+  "required": [
+    "can_switch",
+    "schema"
+  ],
+  "properties": {
+    "blockers": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/GitSwitchBlocker"
+      }
+    },
+    "can_switch": {
+      "description": "True when a switch can proceed without `--force` (no blockers).",
+      "type": "boolean"
+    },
+    "schema": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "GitSwitchBlocker": {
+      "description": "One reason a branch switch is blocked, with the workspace-relative paths that triggered it.",
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/GitSwitchBlockerKind"
+        },
+        "paths": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "GitSwitchBlockerKind": {
+      "description": "Why a switch cannot proceed: the worktree is dirty, or there is an unresolved merge conflict.",
+      "oneOf": [
+        {
+          "description": "The worktree has uncommitted tracked changes (staged or unstaged) that a switch would overwrite.",
+          "type": "string",
+          "enum": [
+            "dirty_worktree"
+          ]
+        },
+        {
+          "description": "There is at least one unresolved merge conflict.",
+          "type": "string",
+          "enum": [
+            "conflict"
+          ]
+        }
+      ]
+    }
+  }
+}

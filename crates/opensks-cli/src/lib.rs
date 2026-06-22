@@ -727,6 +727,13 @@ pub fn run_git_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliErro
         Some("status") => return run_git_status(&args[1..], cwd),
         Some("branches") => return run_git_branches(&args[1..], cwd),
         Some("diff") => return run_git_diff(&args[1..], cwd),
+        Some("switch-preflight") => return run_git_switch_preflight(&args[1..], cwd),
+        Some("create-branch") => return run_git_create_branch(&args[1..], cwd),
+        Some("switch") => return run_git_switch(&args[1..], cwd),
+        Some("stage") => return run_git_stage(&args[1..], cwd),
+        Some("unstage") => return run_git_unstage(&args[1..], cwd),
+        Some("commit-preview") => return run_git_commit_preview(&args[1..], cwd),
+        Some("commit") => return run_git_commit(&args[1..], cwd),
         _ => {}
     }
     require_exact_subcommand_cli(args, "outbox", git_usage())?;
@@ -813,7 +820,14 @@ pub fn git_usage() -> &'static str {
         "       opensks git working-change --workspace <path> --path <relative> --baseline-hash <hash>\n",
         "       opensks git status --workspace <path>\n",
         "       opensks git branches --workspace <path>\n",
-        "       opensks git diff --workspace <path> [--path <relative>] [--staged]\n"
+        "       opensks git diff --workspace <path> [--path <relative>] [--staged]\n",
+        "       opensks git switch-preflight --workspace <path> --target <branch>\n",
+        "       opensks git create-branch --workspace <path> --name <branch> [--from <ref>]\n",
+        "       opensks git switch --workspace <path> --target <branch> [--force]\n",
+        "       opensks git stage --workspace <path> --path <relative> [--path <relative> ...]\n",
+        "       opensks git unstage --workspace <path> --path <relative> [--path <relative> ...]\n",
+        "       opensks git commit-preview --workspace <path>\n",
+        "       opensks git commit --workspace <path> --message <m> --expected-index-hash <hash>\n"
     )
 }
 
@@ -910,6 +924,236 @@ fn run_git_diff(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
     let body = serde_json::to_value(&diff)
         .map_err(|error| CliError::Invalid(format!("serialize git diff: {error}")))?;
     file_output(&body)
+}
+
+/// Flags for the PR-035 local Git mutation subcommands. `workspace` defaults to
+/// the process `cwd`. `paths` collects repeated `--path` flags.
+#[derive(Debug, Default)]
+struct GitMutationOptions {
+    workspace: Option<PathBuf>,
+    paths: Vec<String>,
+    target: Option<String>,
+    name: Option<String>,
+    from: Option<String>,
+    message: Option<String>,
+    expected_index_hash: Option<String>,
+    force: bool,
+}
+
+/// Parse the flags shared by the local Git mutation subcommands:
+/// `--workspace <p>`, repeated `--path <rel>`, `--target <b>`, `--name <b>`,
+/// `--from <ref>`, `--message <m>`, `--expected-index-hash <h>`, and `--force`.
+fn parse_git_mutation_options(args: &[String]) -> Result<GitMutationOptions, CliError> {
+    let usage = git_usage();
+    let mut options = GitMutationOptions::default();
+    let mut idx = 0;
+    while idx < args.len() {
+        let flag = args[idx].as_str();
+        let value = || -> Result<&str, CliError> {
+            args.get(idx + 1).map(String::as_str).ok_or_else(|| {
+                CliError::Usage(format!("flag `{flag}` requires a value\n\n{usage}"))
+            })
+        };
+        match flag {
+            "--workspace" => {
+                options.workspace = Some(PathBuf::from(value()?));
+                idx += 2;
+            }
+            "--path" => {
+                options.paths.push(value()?.to_string());
+                idx += 2;
+            }
+            "--target" => {
+                options.target = Some(value()?.to_string());
+                idx += 2;
+            }
+            "--name" => {
+                options.name = Some(value()?.to_string());
+                idx += 2;
+            }
+            "--from" => {
+                options.from = Some(value()?.to_string());
+                idx += 2;
+            }
+            "--message" => {
+                options.message = Some(value()?.to_string());
+                idx += 2;
+            }
+            "--expected-index-hash" => {
+                options.expected_index_hash = Some(value()?.to_string());
+                idx += 2;
+            }
+            "--force" => {
+                options.force = true;
+                idx += 1;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown argument `{other}`\n\n{usage}"
+                )));
+            }
+        }
+    }
+    Ok(options)
+}
+
+/// Map a typed [`opensks_contracts::GitMutationError`] to a nonzero-exit CLI
+/// error whose message is the `opensks.git-error.v1` JSON. Upstream this becomes
+/// `OpenSksError::Invalid` → exit code 1, with the error contract emitted so the
+/// editor can parse the refusal (blocked switch, stale index, or secret path).
+fn git_mutation_error(error: &opensks_contracts::GitMutationError) -> CliError {
+    match serde_json::to_string(error) {
+        Ok(json) => CliError::Invalid(json),
+        Err(serialize_error) => {
+            CliError::Invalid(format!("serialize git mutation error: {serialize_error}"))
+        }
+    }
+}
+
+/// Resolve the `--workspace` for a mutation subcommand, defaulting to `cwd`.
+fn mutation_workspace(options: &GitMutationOptions, cwd: &Path) -> PathBuf {
+    options
+        .workspace
+        .clone()
+        .unwrap_or_else(|| cwd.to_path_buf())
+}
+
+/// `opensks git switch-preflight --workspace <p> --target <b>` — read-only check
+/// of whether switching to `target` is blocked by a dirty worktree or conflict.
+fn run_git_switch_preflight(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let options = parse_git_mutation_options(args)?;
+    let workspace = mutation_workspace(&options, cwd);
+    // `--target` is required for the editor's call shape even though the
+    // preflight is target-independent (a dirty worktree blocks any switch).
+    if options.target.is_none() {
+        return Err(CliError::Usage(format!(
+            "git switch-preflight requires `--target`\n\n{}",
+            git_usage()
+        )));
+    }
+    let preflight = opensks_git_service::switch_preflight(&workspace)
+        .map_err(|error| CliError::Invalid(format!("git switch-preflight: {error}")))?;
+    let body = serde_json::to_value(&preflight)
+        .map_err(|error| CliError::Invalid(format!("serialize switch preflight: {error}")))?;
+    file_output(&body)
+}
+
+/// `opensks git create-branch --workspace <p> --name <b> [--from <ref>]` —
+/// create a local branch without checking it out.
+fn run_git_create_branch(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let options = parse_git_mutation_options(args)?;
+    let workspace = mutation_workspace(&options, cwd);
+    let name = options.name.as_deref().ok_or_else(|| {
+        CliError::Usage(format!(
+            "git create-branch requires `--name`\n\n{}",
+            git_usage()
+        ))
+    })?;
+    let created = opensks_git_service::create_branch(&workspace, name, options.from.as_deref())
+        .map_err(|error| CliError::Invalid(format!("git create-branch: {error}")))?;
+    let body = serde_json::to_value(&created)
+        .map_err(|error| CliError::Invalid(format!("serialize create branch: {error}")))?;
+    file_output(&body)
+}
+
+/// `opensks git switch --workspace <p> --target <b> [--force]` — switch to a
+/// local branch. A dirty/conflicted worktree without `--force` is refused with
+/// the `switch_blocked` error contract and a nonzero exit.
+fn run_git_switch(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let options = parse_git_mutation_options(args)?;
+    let workspace = mutation_workspace(&options, cwd);
+    let target = options.target.as_deref().ok_or_else(|| {
+        CliError::Usage(format!("git switch requires `--target`\n\n{}", git_usage()))
+    })?;
+    match opensks_git_service::switch(&workspace, target, options.force)
+        .map_err(|error| CliError::Invalid(format!("git switch: {error}")))?
+    {
+        Ok(switched) => {
+            let body = serde_json::to_value(&switched)
+                .map_err(|error| CliError::Invalid(format!("serialize switch: {error}")))?;
+            file_output(&body)
+        }
+        Err(error) => Err(git_mutation_error(&error)),
+    }
+}
+
+/// `opensks git stage --workspace <p> --path <rel> [--path <rel> ...]` — stage
+/// paths, rejecting secret/data-plane paths (never staged) into `rejected`.
+fn run_git_stage(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let options = parse_git_mutation_options(args)?;
+    let workspace = mutation_workspace(&options, cwd);
+    if options.paths.is_empty() {
+        return Err(CliError::Usage(format!(
+            "git stage requires at least one `--path`\n\n{}",
+            git_usage()
+        )));
+    }
+    let result = opensks_git_service::stage(&workspace, &options.paths)
+        .map_err(|error| CliError::Invalid(format!("git stage: {error}")))?;
+    let body = serde_json::to_value(&result)
+        .map_err(|error| CliError::Invalid(format!("serialize stage: {error}")))?;
+    file_output(&body)
+}
+
+/// `opensks git unstage --workspace <p> --path <rel> [--path <rel> ...]` —
+/// remove paths from the index without touching the worktree.
+fn run_git_unstage(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let options = parse_git_mutation_options(args)?;
+    let workspace = mutation_workspace(&options, cwd);
+    if options.paths.is_empty() {
+        return Err(CliError::Usage(format!(
+            "git unstage requires at least one `--path`\n\n{}",
+            git_usage()
+        )));
+    }
+    let result = opensks_git_service::unstage(&workspace, &options.paths)
+        .map_err(|error| CliError::Invalid(format!("git unstage: {error}")))?;
+    let body = serde_json::to_value(&result)
+        .map_err(|error| CliError::Invalid(format!("serialize unstage: {error}")))?;
+    file_output(&body)
+}
+
+/// `opensks git commit-preview --workspace <p>` — the staged path list and a
+/// stable `index_hash` to pass back to `commit` as `--expected-index-hash`.
+fn run_git_commit_preview(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let options = parse_git_mutation_options(args)?;
+    let workspace = mutation_workspace(&options, cwd);
+    let preview = opensks_git_service::commit_preview(&workspace)
+        .map_err(|error| CliError::Invalid(format!("git commit-preview: {error}")))?;
+    let body = serde_json::to_value(&preview)
+        .map_err(|error| CliError::Invalid(format!("serialize commit preview: {error}")))?;
+    file_output(&body)
+}
+
+/// `opensks git commit --workspace <p> --message <m> --expected-index-hash <h>`
+/// — commit the current index. A stale `index_hash`, a secret/data-plane staged
+/// path, or an empty index is refused with the `opensks.git-error.v1` contract
+/// and a nonzero exit.
+fn run_git_commit(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let options = parse_git_mutation_options(args)?;
+    let workspace = mutation_workspace(&options, cwd);
+    let message = options.message.as_deref().ok_or_else(|| {
+        CliError::Usage(format!(
+            "git commit requires `--message`\n\n{}",
+            git_usage()
+        ))
+    })?;
+    let expected = options.expected_index_hash.as_deref().ok_or_else(|| {
+        CliError::Usage(format!(
+            "git commit requires `--expected-index-hash`\n\n{}",
+            git_usage()
+        ))
+    })?;
+    match opensks_git_service::commit(&workspace, message, expected)
+        .map_err(|error| CliError::Invalid(format!("git commit: {error}")))?
+    {
+        Ok(committed) => {
+            let body = serde_json::to_value(&committed)
+                .map_err(|error| CliError::Invalid(format!("serialize commit: {error}")))?;
+            file_output(&body)
+        }
+        Err(error) => Err(git_mutation_error(&error)),
+    }
 }
 
 pub fn run_gc_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
@@ -5016,6 +5260,287 @@ mod tests {
             !doc["hunks"].as_array().expect("hunks").is_empty(),
             "diff carries at least one hunk"
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    // --- PR-035: local git mutations (switch / stage / commit) -------------
+    //
+    // EXTREME SAFETY: every mutation test below creates its OWN throwaway repo
+    // under std::env::temp_dir() (git init + local user.email/name, branch
+    // pinned to `main`) and operates ONLY there via an explicit `--workspace`.
+    // No test ever mutates the opensks repo or any ancestor.
+
+    /// A fresh throwaway repo with a stable `main` branch and one initial
+    /// commit. Used by every mutation test so branch names are deterministic.
+    fn init_mutation_repo(label: &str) -> PathBuf {
+        let root = temp_workspace(label).canonicalize().expect("canonicalize");
+        run_repo_git(&root, &["init"]);
+        run_repo_git(&root, &["config", "user.email", "opensks@example.test"]);
+        run_repo_git(&root, &["config", "user.name", "OpenSKS Test"]);
+        run_repo_git(&root, &["config", "commit.gpgsign", "false"]);
+        run_repo_git(&root, &["checkout", "-B", "main"]);
+        fs::write(root.join("doc.txt"), "baseline\n").expect("write doc");
+        run_repo_git(&root, &["add", "doc.txt"]);
+        run_repo_git(&root, &["commit", "-m", "initial"]);
+        root
+    }
+
+    /// Run a git mutation subcommand expecting success; parse the stdout JSON.
+    fn git_mutation_ok(root: &Path, args: &[&str]) -> serde_json::Value {
+        let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let output = run_git_command(&owned, root).expect("git mutation ok");
+        serde_json::from_str(&output.stdout).expect("valid git mutation json")
+    }
+
+    /// Run a git mutation subcommand expecting a refusal; parse the
+    /// `opensks.git-error.v1` JSON carried by the nonzero-exit `CliError`.
+    fn git_mutation_err(root: &Path, args: &[&str]) -> serde_json::Value {
+        let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        match run_git_command(&owned, root) {
+            Err(CliError::Invalid(message)) => {
+                serde_json::from_str(&message).expect("error message is git-error JSON")
+            }
+            other => panic!("expected a refusal CliError::Invalid, got {other:?}"),
+        }
+    }
+
+    fn staged_index_paths(root: &Path) -> Vec<String> {
+        let output = process::Command::new("git")
+            .args(["diff", "--cached", "--name-only", "-z"])
+            .current_dir(root)
+            .output()
+            .expect("git diff --cached");
+        String::from_utf8_lossy(&output.stdout)
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn git_switch_preflight_and_switch_respect_dirty_worktree() {
+        let root = init_mutation_repo("opensks-cli-git-switch");
+        run_repo_git(&root, &["branch", "feature"]);
+        let ws = root.to_string_lossy().into_owned();
+
+        // Dirty the worktree.
+        fs::write(root.join("doc.txt"), "dirty\n").expect("dirty");
+
+        // Preflight reports a dirty_worktree blocker.
+        let preflight = git_mutation_ok(
+            &root,
+            &[
+                "switch-preflight",
+                "--workspace",
+                &ws,
+                "--target",
+                "feature",
+            ],
+        );
+        assert_eq!(preflight["schema"], "opensks.git-switch-preflight.v1");
+        assert_eq!(preflight["can_switch"], false);
+        let blockers = preflight["blockers"].as_array().expect("blockers");
+        assert!(
+            blockers.iter().any(|b| b["kind"] == "dirty_worktree"),
+            "dirty_worktree blocker present: {blockers:?}"
+        );
+
+        // Switch without --force is refused with switch_blocked + nonzero exit.
+        let error = git_mutation_err(
+            &root,
+            &["switch", "--workspace", &ws, "--target", "feature"],
+        );
+        assert_eq!(error["schema"], "opensks.git-error.v1");
+        assert_eq!(error["error"]["code"], "switch_blocked");
+        assert!(
+            error["error"]["blockers"]
+                .as_array()
+                .is_some_and(|b| !b.is_empty())
+        );
+
+        // Discard the dirty change; a clean --force switch succeeds.
+        run_repo_git(&root, &["checkout", "--", "doc.txt"]);
+        let clean = git_mutation_ok(
+            &root,
+            &[
+                "switch-preflight",
+                "--workspace",
+                &ws,
+                "--target",
+                "feature",
+            ],
+        );
+        assert_eq!(clean["can_switch"], true);
+        let switched = git_mutation_ok(
+            &root,
+            &[
+                "switch",
+                "--workspace",
+                &ws,
+                "--target",
+                "feature",
+                "--force",
+            ],
+        );
+        assert_eq!(switched["schema"], "opensks.git-switch.v1");
+        assert_eq!(switched["switched"], true);
+        assert_eq!(switched["branch"], "feature");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn git_stage_rejects_secret_and_data_plane_paths() {
+        let root = init_mutation_repo("opensks-cli-git-stage");
+        let ws = root.to_string_lossy().into_owned();
+        fs::write(root.join("id_rsa"), "PRIVATE\n").expect("secret");
+        fs::create_dir_all(root.join(".opensks/cache")).expect("cache dir");
+        fs::write(root.join(".opensks/cache/blob.bin"), "cached\n").expect("data plane");
+        fs::write(root.join("normal.rs"), "fn main() {}\n").expect("normal");
+
+        let result = git_mutation_ok(
+            &root,
+            &[
+                "stage",
+                "--workspace",
+                &ws,
+                "--path",
+                "id_rsa",
+                "--path",
+                ".opensks/cache/blob.bin",
+                "--path",
+                "normal.rs",
+            ],
+        );
+        assert_eq!(result["schema"], "opensks.git-stage.v1");
+        let staged = result["staged"].as_array().expect("staged");
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0], "normal.rs");
+        let rejected = result["rejected"].as_array().expect("rejected");
+        assert!(
+            rejected
+                .iter()
+                .any(|r| r["path"] == "id_rsa" && r["reason"] == "secret_restricted")
+        );
+        assert!(
+            rejected
+                .iter()
+                .any(|r| r["path"] == ".opensks/cache/blob.bin" && r["reason"] == "data_plane")
+        );
+
+        // The index contains ONLY the normal path.
+        let index = staged_index_paths(&root);
+        assert_eq!(index, vec!["normal.rs".to_string()]);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn git_commit_preview_staleness_blocks_commit_then_fresh_hash_commits() {
+        let root = init_mutation_repo("opensks-cli-git-commit");
+        let ws = root.to_string_lossy().into_owned();
+
+        // Stage one file; take a preview returning an index_hash.
+        fs::write(root.join("a.rs"), "fn a() {}\n").expect("a");
+        git_mutation_ok(&root, &["stage", "--workspace", &ws, "--path", "a.rs"]);
+        let preview = git_mutation_ok(&root, &["commit-preview", "--workspace", &ws]);
+        assert_eq!(preview["schema"], "opensks.git-commit-preview.v1");
+        assert_eq!(preview["has_staged"], true);
+        let old_hash = preview["index_hash"].as_str().expect("hash").to_string();
+
+        // Staging another file changes the index_hash.
+        fs::write(root.join("b.rs"), "fn b() {}\n").expect("b");
+        git_mutation_ok(&root, &["stage", "--workspace", &ws, "--path", "b.rs"]);
+        let preview2 = git_mutation_ok(&root, &["commit-preview", "--workspace", &ws]);
+        let new_hash = preview2["index_hash"].as_str().expect("hash2").to_string();
+        assert_ne!(
+            new_hash, old_hash,
+            "index_hash changes when the index changes"
+        );
+
+        // Commit with the OLD (stale) hash is refused with index_changed.
+        let error = git_mutation_err(
+            &root,
+            &[
+                "commit",
+                "--workspace",
+                &ws,
+                "--message",
+                "stale",
+                "--expected-index-hash",
+                &old_hash,
+            ],
+        );
+        assert_eq!(error["schema"], "opensks.git-error.v1");
+        assert_eq!(error["error"]["code"], "index_changed");
+
+        // Commit with the CURRENT hash succeeds and returns a real sha.
+        let committed = git_mutation_ok(
+            &root,
+            &[
+                "commit",
+                "--workspace",
+                &ws,
+                "--message",
+                "good commit",
+                "--expected-index-hash",
+                &new_hash,
+            ],
+        );
+        assert_eq!(committed["schema"], "opensks.git-commit.v1");
+        assert_eq!(committed["committed"], true);
+        let sha = committed["commit"].as_str().expect("sha");
+        assert_eq!(sha.len(), 40);
+        assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // The commit contains ONLY the reviewed paths (assert via git show).
+        let output = process::Command::new("git")
+            .args(["show", "--name-only", "--pretty=format:", "HEAD"])
+            .current_dir(&root)
+            .output()
+            .expect("git show");
+        let mut names: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["a.rs".to_string(), "b.rs".to_string()]);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn git_create_branch_is_visible_and_unstage_clears_index() {
+        let root = init_mutation_repo("opensks-cli-git-create-branch");
+        let ws = root.to_string_lossy().into_owned();
+        let created = git_mutation_ok(
+            &root,
+            &["create-branch", "--workspace", &ws, "--name", "feature"],
+        );
+        assert_eq!(created["schema"], "opensks.git-create-branch.v1");
+        assert_eq!(created["created"], true);
+        assert_eq!(created["branch"], "feature");
+        assert_eq!(created["head"].as_str().expect("head").len(), 40);
+
+        // The branch is visible to git.
+        let output = process::Command::new("git")
+            .args(["branch", "--list", "--format=%(refname:short)"])
+            .current_dir(&root)
+            .output()
+            .expect("git branch");
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|l| l.trim() == "feature")
+        );
+
+        // Stage then unstage clears the index.
+        fs::write(root.join("c.rs"), "fn c() {}\n").expect("c");
+        git_mutation_ok(&root, &["stage", "--workspace", &ws, "--path", "c.rs"]);
+        assert_eq!(staged_index_paths(&root), vec!["c.rs".to_string()]);
+        let unstaged = git_mutation_ok(&root, &["unstage", "--workspace", &ws, "--path", "c.rs"]);
+        assert_eq!(unstaged["schema"], "opensks.git-unstage.v1");
+        assert_eq!(unstaged["unstaged"][0], "c.rs");
+        assert!(staged_index_paths(&root).is_empty());
         fs::remove_dir_all(root).ok();
     }
 }

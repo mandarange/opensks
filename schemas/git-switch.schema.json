@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GitSwitch",
+  "description": "The result of switching to a local branch.",
+  "type": "object",
+  "required": [
+    "branch",
+    "schema",
+    "switched"
+  ],
+  "properties": {
+    "branch": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "switched": {
+      "type": "boolean"
+    }
+  }
+}

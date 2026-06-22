@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GitStageResult",
+  "description": "The result of staging one or more paths. Secret/data-plane paths are never added to the index; they appear in `rejected` with the matching reason.",
+  "type": "object",
+  "required": [
+    "schema"
+  ],
+  "properties": {
+    "rejected": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/GitStageRejection"
+      }
+    },
+    "schema": {
+      "type": "string"
+    },
+    "staged": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "definitions": {
+    "GitStageRejectReason": {
+      "description": "Why a path was refused for staging/commit.",
+      "oneOf": [
+        {
+          "description": "The path name looks like a secret (e.g. `id_rsa`, `.env`, `*.pem`).",
+          "type": "string",
+          "enum": [
+            "secret_restricted"
+          ]
+        },
+        {
+          "description": "The path falls under a local data-plane rule and must never be tracked.",
+          "type": "string",
+          "enum": [
+            "data_plane"
+          ]
+        }
+      ]
+    },
+    "GitStageRejection": {
+      "description": "One path refused for staging, with the reason it was refused.",
+      "type": "object",
+      "required": [
+        "path",
+        "reason"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/definitions/GitStageRejectReason"
+        }
+      }
+    }
+  }
+}

@@ -32,6 +32,16 @@ use opensks_contracts::{
 };
 use thiserror::Error;
 
+/// Local Git **mutation** service (PR-035). The read-only inspection functions
+/// in this module's root stay; the mutation functions live in [`mutation`] and
+/// are clearly separated. No mutation here ever writes to a remote.
+pub mod mutation;
+
+pub use mutation::{
+    MutationOutcome, commit, commit_preview, create_branch, stage, switch, switch_preflight,
+    unstage,
+};
+
 #[derive(Debug, Error)]
 pub enum GitServiceError {
     #[error("io error: {0}")]

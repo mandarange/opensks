@@ -34,8 +34,11 @@ struct RootView: View {
             // Bind the conversation store to the SAME bundled CLI + workspace
             // path AppState resolved, then load this project's conversations.
             coordinator.bindConversations(cli: state.cli, workspace: state.workspace)
-            // Bind the read-only Git studio to the same resolved CLI + workspace.
+            // Bind the Git studio to the same resolved CLI + workspace, then wire
+            // it to the editor (dirty-switch preflight) + conversations (commit
+            // card sink) for the PR-035 local mutations.
             coordinator.bindGit(cli: state.cli, workspace: state.workspace)
+            coordinator.wireGit(editorStore: state.editorStore)
         }
         .sheet(isPresented: $state.showPalette) { CommandPalette() }
     }

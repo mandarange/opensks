@@ -1610,6 +1610,7 @@ pub struct ReleaseProof {
 pub mod conversation;
 pub mod file;
 pub mod git;
+pub mod git_mutation;
 pub mod project;
 pub mod projection;
 pub mod stream;
@@ -1630,6 +1631,13 @@ pub use file::{
 pub use git::{
     GIT_BRANCHES_SCHEMA, GIT_DIFF_SCHEMA, GIT_STATUS_SCHEMA, GitBranchInfo, GitBranches, GitDiff,
     GitDiffFile, GitDiffHunk, GitStatus, GitStatusEntry, GitStatusKind,
+};
+pub use git_mutation::{
+    GIT_COMMIT_PREVIEW_SCHEMA, GIT_COMMIT_SCHEMA, GIT_CREATE_BRANCH_SCHEMA, GIT_ERROR_SCHEMA,
+    GIT_STAGE_SCHEMA, GIT_SWITCH_PREFLIGHT_SCHEMA, GIT_SWITCH_SCHEMA, GIT_UNSTAGE_SCHEMA,
+    GitCommit, GitCommitPreview, GitCreateBranch, GitMutationError, GitMutationErrorBody,
+    GitMutationErrorCode, GitStageRejectReason, GitStageRejection, GitStageResult, GitSwitch,
+    GitSwitchBlocker, GitSwitchBlockerKind, GitSwitchPreflight, GitUnstageResult,
 };
 pub use project::{PROJECT_SUMMARY_SCHEMA, ProjectSummary};
 pub use projection::{
@@ -1827,6 +1835,38 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "git-diff.schema.json",
             serde_json::to_string_pretty(&schema_for!(GitDiff))?,
+        ),
+        (
+            "git-switch-preflight.schema.json",
+            serde_json::to_string_pretty(&schema_for!(GitSwitchPreflight))?,
+        ),
+        (
+            "git-create-branch.schema.json",
+            serde_json::to_string_pretty(&schema_for!(GitCreateBranch))?,
+        ),
+        (
+            "git-switch.schema.json",
+            serde_json::to_string_pretty(&schema_for!(GitSwitch))?,
+        ),
+        (
+            "git-stage.schema.json",
+            serde_json::to_string_pretty(&schema_for!(GitStageResult))?,
+        ),
+        (
+            "git-unstage.schema.json",
+            serde_json::to_string_pretty(&schema_for!(GitUnstageResult))?,
+        ),
+        (
+            "git-commit-preview.schema.json",
+            serde_json::to_string_pretty(&schema_for!(GitCommitPreview))?,
+        ),
+        (
+            "git-commit.schema.json",
+            serde_json::to_string_pretty(&schema_for!(GitCommit))?,
+        ),
+        (
+            "git-mutation-error.schema.json",
+            serde_json::to_string_pretty(&schema_for!(GitMutationError))?,
         ),
     ])
 }

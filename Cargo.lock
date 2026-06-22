@@ -258,6 +258,7 @@ name = "opensks-git-service"
 version = "0.1.0"
 dependencies = [
  "opensks-contracts",
+ "opensks-policy",
  "thiserror",
 ]
 
