@@ -19,8 +19,11 @@ struct PrimaryWorkspaceRouter: View {
             case .code:
                 CodeWorkspaceView()
             case .chat:
-                ConversationThreadView(
-                    store: coordinator.conversations,
+                // UX-101: the chat thread carries a compact top context bar with the
+                // project's REAL git context, so the wrapper observes the git store.
+                ChatWorkspaceView(
+                    conversations: coordinator.conversations,
+                    git: coordinator.git,
                     pipelines: coordinator.pipelines,
                     onOpenGraph: { coordinator.openGraph(runId: $0) }
                 )

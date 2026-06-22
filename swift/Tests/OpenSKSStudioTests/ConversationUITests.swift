@@ -294,4 +294,49 @@ final class ConversationUITests: XCTestCase {
             .frame(width: 720, height: 600)
         XCTAssertNotNil(ImageRenderer(content: thread).nsImage)
     }
+
+    // MARK: - UX-101: compact top context bar
+
+    /// The git context bar label is honest: a real branch name, an explicit
+    /// "detached HEAD", or "no branch" — never a fabricated value.
+    func testChatGitContextBranchLabelIsHonest() {
+        XCTAssertEqual(
+            ChatGitContext(inRepo: true, branch: "main", detached: false, changedCount: 3, branchNames: ["main"]).branchLabel,
+            "main"
+        )
+        XCTAssertEqual(
+            ChatGitContext(inRepo: true, branch: nil, detached: true, changedCount: 0, branchNames: []).branchLabel,
+            "detached HEAD"
+        )
+        XCTAssertEqual(
+            ChatGitContext(inRepo: true, branch: nil, detached: false, changedCount: 0, branchNames: []).branchLabel,
+            "no branch"
+        )
+        XCTAssertEqual(ChatGitContext.none.inRepo, false)
+    }
+
+    /// The thread renders its compact context bar with real git context (the bar is
+    /// shown only inside a repo) without a letterbox at a supported width.
+    func testThreadRendersWithGitContextBar() throws {
+        let store = makeStore(
+            summaries: [summary(id: "a", title: "Alpha", status: .running, messageCount: 1)],
+            messages: ["a": [message(id: "m1", conversation: "a", role: .user, text: "hi", sequence: 1)]]
+        )
+        store.selectedConversationID = "a"
+        let thread = ConversationThreadView(
+            store: store,
+            gitContext: ChatGitContext(
+                inRepo: true,
+                branch: "main",
+                detached: false,
+                changedCount: 3,
+                branchNames: ["main", "feature/x"]
+            )
+        )
+        .frame(width: 900, height: 600)
+        let renderer = ImageRenderer(content: thread)
+        renderer.scale = 1
+        let image = try XCTUnwrap(renderer.nsImage, "thread with a git context bar must render")
+        XCTAssertEqual(image.size.width, 900, accuracy: 1.0, "no letterbox")
+    }
 }

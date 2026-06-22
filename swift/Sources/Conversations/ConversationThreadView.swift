@@ -17,6 +17,10 @@ struct ConversationThreadView: View {
     var pipelines: PipelineProjectionStore?
     /// Invoked when a run card's "Open live graph" is pressed.
     var onOpenGraph: (String) -> Void = { _ in }
+    /// Real project git context (branch + uncommitted-change count) for the compact
+    /// top context bar (UX-101 / §15.3). Defaults to "no repo" so the thread still
+    /// renders in contexts without a git store.
+    var gitContext: ChatGitContext = .none
 
     var body: some View {
         Group {
@@ -53,22 +57,81 @@ struct ConversationThreadView: View {
         }
     }
 
+    /// UX-101 / §15.3: ONE compact context bar — title + status + the project's real
+    /// git context (branch · N changed) + relative time — instead of scattered,
+    /// duplicated title/status/proof surfaces.
     private func threadHeader(_ summary: ConversationSummary) -> some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(summary.title)
-                    .font(Theme.ui(15, .semibold))
-                    .foregroundStyle(Theme.text)
-                    .lineLimit(1)
-                Text(RelativeTime.string(from: summary.lastActivityDate))
-                    .font(Theme.ui(11))
-                    .foregroundStyle(Theme.muted)
-            }
-            Spacer(minLength: 0)
+        HStack(spacing: Theme.s8) {
+            Text(summary.title)
+                .font(Theme.ui(15, .semibold))
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+                .layoutPriority(1)
             StatusPill(kind: summary.status.pillKind, label: summary.status.displayLabel)
+            Spacer(minLength: Theme.s8)
+            if gitContext.inRepo {
+                gitContextChip
+            }
+            Text(RelativeTime.string(from: summary.lastActivityDate))
+                .font(Theme.ui(11))
+                .foregroundStyle(Theme.muted)
+                .lineLimit(1)
         }
         .padding(.horizontal, 18)
-        .padding(.vertical, 14)
+        .padding(.vertical, 12)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("conversation.context-bar")
+    }
+
+    /// The compact git chip: real branch + uncommitted-change count, with a menu
+    /// listing local branches (current marked). Switching branches lives in the
+    /// Changes tab (it has the dirty-buffer preflight), so this is informational.
+    private var gitContextChip: some View {
+        Menu {
+            if gitContext.branchNames.isEmpty {
+                Text("No local branches")
+            } else {
+                ForEach(gitContext.branchNames, id: \.self) { name in
+                    Label(
+                        name,
+                        systemImage: name == gitContext.branch
+                            ? "checkmark.circle" : "arrow.triangle.branch"
+                    )
+                }
+            }
+            Divider()
+            Text("Switch branches in the Changes tab")
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 10, weight: .semibold))
+                Text(gitContext.branchLabel)
+                    .font(Theme.mono(11))
+                    .lineLimit(1)
+                Text("·")
+                    .foregroundStyle(Theme.faint)
+                Text("\(gitContext.changedCount) changed")
+                    .font(Theme.ui(10.5))
+                    .foregroundStyle(Theme.muted)
+            }
+            .foregroundStyle(Theme.textSoft)
+            .padding(.horizontal, Theme.s8)
+            .frame(height: 24)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                    .fill(Theme.panel)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                    .strokeBorder(Theme.stroke, lineWidth: 1)
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Branch and uncommitted-change count for this project.")
+        .accessibilityIdentifier("conversation.git-context")
+        .accessibilityLabel("Branch \(gitContext.branchLabel), \(gitContext.changedCount) changed files")
     }
 
     private var messageList: some View {
