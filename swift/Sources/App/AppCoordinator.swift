@@ -116,9 +116,12 @@ final class AppCoordinator: ObservableObject {
         Task { await conversations.load() }
     }
 
-    /// Rebind the Git studio to the resolved workspace + bundled CLI and refresh.
+    /// Rebind the Git studio to the resolved workspace + bundled CLI, refresh, and
+    /// install a worktree watcher so external file changes poke the coalesced
+    /// refresh (GIT-102) instead of relying on view re-appearance alone.
     func bindGit(cli: URL, workspace: URL) {
         git.rebind(service: LiveGitService(cli: cli, workspace: workspace))
+        git.startWatching(FSEventsWorktreeWatcher(workspace: workspace))
     }
 
     /// Rebind the LOCAL design-import store to the resolved workspace + bundled CLI

@@ -90,6 +90,9 @@ final class GitStudioStore: ObservableObject {
     /// The pending debounced trigger; replaced (and the old one cancelled) on
     /// each rapid poke so a burst collapses to a single trailing refresh.
     private var debounceTask: Task<Void, Never>?
+    /// The optional worktree watcher feeding `debouncedRefresh()` (GIT-102). Held so
+    /// it is stopped/released on rebind; nil until the workspace is known.
+    private var worktreeWatcher: GitWorktreeWatcher?
 
     init(service: GitService, debounce: Duration = .milliseconds(120)) {
         self.service = service
@@ -103,9 +106,31 @@ final class GitStudioStore: ObservableObject {
     func rebind(service: GitService) {
         refreshTask?.cancel()
         debounceTask?.cancel()
+        // The old watcher pointed at the previous workspace; drop it. A fresh one is
+        // installed by the caller (bindGit) via `startWatching` for the new workspace.
+        stopWatching()
         self.service = service
         clearSelection()
         refresh()
+    }
+
+    // MARK: - Worktree watching (GIT-102)
+
+    /// Install a worktree watcher whose file-system events poke the COALESCED
+    /// refresh. The watcher's callback may arrive off the main actor, so it hops
+    /// back before touching store state. Replaces (and stops) any prior watcher.
+    func startWatching(_ watcher: GitWorktreeWatcher) {
+        stopWatching()
+        worktreeWatcher = watcher
+        watcher.start { [weak self] in
+            Task { @MainActor in self?.debouncedRefresh() }
+        }
+    }
+
+    /// Stop and release the worktree watcher (idempotent).
+    func stopWatching() {
+        worktreeWatcher?.stop()
+        worktreeWatcher = nil
     }
 
     // MARK: - Stale flag
@@ -150,8 +175,8 @@ final class GitStudioStore: ObservableObject {
     }
 
     /// Coalesced refresh: rapid calls within the debounce window collapse to a
-    /// SINGLE trailing `refresh()`. This is what the watcher pokes so a burst of
-    /// file-system events does not spawn one service round-trip per event.
+    /// SINGLE trailing `refresh()`. The worktree watcher (GIT-102) pokes this on
+    /// file-system events, so a burst does not spawn one service round-trip per event.
     func debouncedRefresh() {
         // Mark stale right away so the UI reacts to the burst, but defer the
         // actual service work to the trailing edge of the window.

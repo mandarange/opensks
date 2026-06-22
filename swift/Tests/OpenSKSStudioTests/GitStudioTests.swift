@@ -210,6 +210,36 @@ final class GitStudioTests: XCTestCase {
         XCTAssertFalse(store.stale, "the stale flag clears once fresh data lands")
     }
 
+    // MARK: - GIT-102: worktree watcher pokes the coalesced refresh
+
+    func testWorktreeWatcherPokesCoalescedRefreshAndStopsOnRebind() async throws {
+        let (store, service) = try makeStore()
+        await refreshAndSettle(store)
+        let baseline = service.statusCallCount
+
+        let watcher = FakeWorktreeWatcher()
+        store.startWatching(watcher)
+        XCTAssertEqual(watcher.startCount, 1, "startWatching starts the watcher")
+
+        // A burst of file-system events pokes the COALESCED refresh, not one read
+        // per event.
+        for _ in 0..<10 { watcher.fireChange() }
+        try await Task.sleep(nanoseconds: 220_000_000)
+
+        XCTAssertGreaterThan(
+            service.statusCallCount, baseline,
+            "a worktree change triggers a refresh (GIT-102)"
+        )
+        XCTAssertLessThanOrEqual(
+            service.statusCallCount - baseline, 2,
+            "a burst of events coalesces into a bounded number of reads"
+        )
+
+        // Rebinding releases the old watcher (it pointed at the old workspace).
+        store.rebind(service: service)
+        XCTAssertEqual(watcher.stopCount, 1, "rebind stops the previous watcher")
+    }
+
     func testRefreshSetsThenClearsStale() async throws {
         let (store, service) = try makeStore()
         service.setStatusDelay(millis: 40)
@@ -336,5 +366,29 @@ final class GitStudioTests: XCTestCase {
         let renderer = ImageRenderer(content: view)
         renderer.scale = 1
         XCTAssertNotNil(renderer.nsImage, "a 1,000-entry status fixture renders at a fixed size")
+    }
+}
+
+/// A test double for `GitWorktreeWatcher`: it records start/stop and lets the test
+/// fire a simulated file-system change, so the store wiring + coalescing are
+/// verified without real FSEvents.
+private final class FakeWorktreeWatcher: GitWorktreeWatcher {
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+    private var onChange: (() -> Void)?
+
+    func start(onChange: @escaping () -> Void) {
+        startCount += 1
+        self.onChange = onChange
+    }
+
+    func stop() {
+        stopCount += 1
+        onChange = nil
+    }
+
+    /// Simulate one coalesced batch of file-system events.
+    func fireChange() {
+        onChange?()
     }
 }
