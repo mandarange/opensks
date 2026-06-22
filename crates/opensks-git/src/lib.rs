@@ -209,6 +209,34 @@ pub fn content_hash(path: &Path) -> Result<String, GitError> {
     Ok(stable_hash(&fs::read(path)?))
 }
 
+/// The git blob object id of `relative` at HEAD, or `None` when the path is not
+/// tracked at HEAD (newly added, ignored, or deleted there). Used to label a
+/// branch-switch working-tree conflict in the editor UI.
+///
+/// `relative` is workspace-relative; it is passed to git via `HEAD:<path>` which
+/// git resolves against the repository root, so callers do not need to rebase
+/// the path themselves.
+pub fn head_blob_hash(workspace: &Path, relative: &str) -> Result<Option<String>, GitError> {
+    if discover_repository(workspace).is_none() {
+        return Ok(None);
+    }
+    let spec = format!("HEAD:{relative}");
+    match git(workspace, ["rev-parse", "--verify", "--quiet", &spec]) {
+        Ok(output) => {
+            let trimmed = output.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        // `rev-parse --verify --quiet` exits nonzero (empty stderr) when the
+        // object does not exist at HEAD; treat that as "not tracked", not error.
+        Err(GitError::GitCommand(message)) if message.is_empty() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Outbox {
     items: Vec<OutboxItem>,
@@ -658,6 +686,25 @@ index 3b18e51..a5df3c0 100644
             fs::read_to_string(repo.join("file.txt")).expect("file"),
             "before\n"
         );
+    }
+
+    #[test]
+    fn head_blob_hash_resolves_for_tracked_file_and_none_otherwise() {
+        let repo = init_repo("head-blob");
+        let tracked = head_blob_hash(&repo, "file.txt").expect("head blob");
+        assert!(
+            tracked.is_some(),
+            "committed file resolves a blob id at HEAD"
+        );
+        let missing = head_blob_hash(&repo, "never-committed.txt").expect("head blob missing");
+        assert!(missing.is_none(), "untracked path has no HEAD blob");
+    }
+
+    #[test]
+    fn head_blob_hash_returns_none_outside_repo() {
+        let root = temp_dir("no-repo");
+        fs::write(root.join("plain.txt"), "hi").expect("write");
+        assert!(head_blob_hash(&root, "plain.txt").expect("none").is_none());
     }
 
     #[test]

@@ -1612,6 +1612,7 @@ pub mod file;
 pub mod project;
 pub mod projection;
 pub mod stream;
+pub mod text_diff;
 
 pub use conversation::{
     CONVERSATION_DIGEST_SCHEMA, CONVERSATION_MESSAGE_SCHEMA, CONVERSATION_SUMMARY_SCHEMA,
@@ -1634,6 +1635,7 @@ pub use projection::{
 pub use stream::{
     ENGINE_STREAM_FRAME_SCHEMA, EngineStreamFrame, PublicEngineError, STREAM_PROTOCOL_VERSION,
 };
+pub use text_diff::{DiffHunk, DiffHunkKind, TEXT_DIFF_SCHEMA, TextDiff};
 
 pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> {
     Ok(vec![
@@ -1804,6 +1806,10 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "release-proof.schema.json",
             serde_json::to_string_pretty(&schema_for!(ReleaseProof))?,
+        ),
+        (
+            "text-diff.schema.json",
+            serde_json::to_string_pretty(&schema_for!(TextDiff))?,
         ),
     ])
 }

@@ -20,7 +20,11 @@ final class EditorWorkspaceStore: ObservableObject {
     /// A non-fatal banner for the last failed open (e.g. binary/secret/missing).
     @Published var openError: String?
 
-    private let service: EditorFileService
+    /// Per-document diff hunks (added/removed gutter markers), keyed by document
+    /// identity. Recomputed on demand from the editor buffer vs the on-disk file.
+    @Published private(set) var diffByDocument: [EditorDocumentID: TextDiffResponse] = [:]
+
+    let service: EditorFileService
     private let maxTabs: Int
     /// Maps a canonical workspace-relative path → its stable document identity so
     /// re-opening focuses instead of duplicating.
@@ -95,8 +99,30 @@ final class EditorWorkspaceStore: ObservableObject {
 
     @discardableResult
     func save(_ doc: EditorDocumentState) async -> Bool {
+        await save(doc, force: false)
+    }
+
+    /// Save `doc`. With `force`, the save re-baselines to the current on-disk
+    /// state first (Keep Mine resolution) so the editor's buffer deliberately
+    /// overwrites the external change. A normal (`force: false`) save NEVER
+    /// silently overwrites: a divergent on-disk file routes to a conflict.
+    @discardableResult
+    func save(_ doc: EditorDocumentState, force: Bool) async -> Bool {
         guard doc.isEditable else { return false }
-        guard doc.isDirty else { return true }
+        if force {
+            // Re-baseline to the current on-disk hash so the optimistic-concurrency
+            // check passes and the deliberate overwrite goes through.
+            if let stat = try? await service.stat(path: doc.workspaceRelativePath) {
+                doc.adoptForcedBaseline(
+                    newHash: stat.contentHash ?? doc.baselineContentHash,
+                    newMtimeMs: stat.modificationMs
+                )
+            }
+        }
+        guard doc.isDirty else {
+            doc.conflictState = nil
+            return true
+        }
         let path = doc.workspaceRelativePath
         let content = doc.text
         let expectedHash = doc.baselineContentHash
@@ -110,6 +136,11 @@ final class EditorWorkspaceStore: ObservableObject {
                 expectedMtime: expectedMtime
             )
             doc.adoptSavedBaseline(newHash: result.newHash, newMtimeMs: result.newMtimeMs)
+            // Incremental, single-file re-index — NOT a workspace re-scan. Failure
+            // here is non-fatal: the save already succeeded.
+            _ = try? await service.codegraphUpdate(path: path)
+            // A clean save clears any stale diff markers.
+            diffByDocument[doc.id] = nil
             return true
         } catch let error as EditorFileServiceError {
             switch error {
@@ -146,32 +177,78 @@ final class EditorWorkspaceStore: ObservableObject {
         return close(id, dirtyProtection: dirtyProtection)
     }
 
-    // MARK: - Conflict handling
+    // MARK: - Conflict handling (PR-033: never a silent overwrite)
 
-    /// Keep the editor's version: re-baseline to the current text so the next
-    /// save force-overwrites is NOT performed silently here — instead we clear
-    /// the conflict and let the user re-save explicitly against a fresh stat.
-    func resolveConflictKeepingMine(_ doc: EditorDocumentState) async {
-        // Re-stat to learn the new on-disk baseline, then keep the user's text as
-        // dirty against it so an explicit save overwrites with full intent.
-        if let stat = try? await service.stat(path: doc.workspaceRelativePath) {
-            doc.adoptSavedBaseline(
-                newHash: stat.contentHash ?? doc.baselineContentHash,
-                newMtimeMs: stat.modificationMs
-            )
-            // adoptSavedBaseline recomputes dirtiness: divergent text stays dirty.
-        }
-        doc.conflictState = nil
-        doc.saveState = doc.isDirty ? .editing : .clean
+    /// KEEP MINE: keep the editor buffer and force a save that deliberately
+    /// overwrites the external change. Re-baselines to the current disk hash,
+    /// then saves so the optimistic-concurrency check passes with full intent.
+    @discardableResult
+    func resolveConflictKeepingMine(_ doc: EditorDocumentState) async -> Bool {
+        await save(doc, force: true)
     }
 
-    /// Discard the editor's edits and reload the on-disk version.
+    /// RELOAD (take disk): discard the editor's edits and adopt the on-disk
+    /// version, re-baselining so the doc is clean.
     func resolveConflictTakingDisk(_ doc: EditorDocumentState) async {
         if let response = try? await service.open(path: doc.workspaceRelativePath) {
             doc.text = response.content
             doc.adoptSavedBaseline(newHash: response.contentHash, newMtimeMs: response.onDiskModificationMs)
             doc.conflictState = nil
             doc.saveState = .clean
+            diffByDocument[doc.id] = nil
+        }
+    }
+
+    // MARK: - Diff gutter
+
+    /// Recompute the on-disk-vs-buffer diff for `doc` and publish its hunks so
+    /// the gutter can render added/removed markers. Returns the response.
+    @discardableResult
+    func refreshDiff(_ doc: EditorDocumentState) async -> TextDiffResponse? {
+        guard doc.isEditable else { return nil }
+        guard let response = try? await service.diff(
+            path: doc.workspaceRelativePath,
+            currentBuffer: doc.text
+        ) else { return nil }
+        diffByDocument[doc.id] = response.changed ? response : nil
+        return response
+    }
+
+    func diff(for id: EditorDocumentID) -> TextDiffResponse? {
+        diffByDocument[id]
+    }
+
+    // MARK: - External-change watcher (branch switch / external edit)
+
+    /// Poll the on-disk state of every open, editable, non-conflicted document.
+    /// A doc whose on-disk hash diverged from its baseline (an external edit or a
+    /// branch switch) is flagged as a conflict so the divergence is made visible
+    /// BEFORE the user tries to save over it. Best-effort: a stat/working-change
+    /// failure leaves the doc untouched.
+    func pollExternalChanges() async {
+        for doc in documents where doc.isEditable {
+            // A doc already in conflict, or with no save target, is skipped.
+            if doc.conflictState != nil { continue }
+            await checkExternalChange(doc)
+        }
+    }
+
+    /// Check a single document for an external/working-tree divergence.
+    func checkExternalChange(_ doc: EditorDocumentState) async {
+        let baseline = doc.baselineContentHash
+        // Prefer the git working-change signal (catches branch switches); fall
+        // back to a plain stat hash comparison when not in a repo.
+        if let wc = try? await service.workingChange(
+            path: doc.workspaceRelativePath, baselineHash: baseline
+        ), wc.inRepo {
+            if wc.changed, let current = wc.currentHash, current != baseline {
+                doc.markConflict("This file changed on disk since you opened it.")
+            }
+            return
+        }
+        if let stat = try? await service.stat(path: doc.workspaceRelativePath),
+           let onDisk = stat.contentHash, onDisk != baseline {
+            doc.markConflict("This file changed on disk since you opened it.")
         }
     }
 
@@ -180,6 +257,7 @@ final class EditorWorkspaceStore: ObservableObject {
     private func removeDocument(at idx: Int) {
         let doc = documents[idx]
         idByPath[doc.workspaceRelativePath] = nil
+        diffByDocument[doc.id] = nil
         let wasActive = activeDocumentID == doc.id
         documents.remove(at: idx)
         if wasActive {

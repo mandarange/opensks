@@ -77,6 +77,20 @@ protocol EditorFileService: Sendable {
         expectedMtime: UInt64?
     ) async throws -> EditorSaveResponse
     func stat(path: String) async throws -> EditorStatResponse
+
+    // MARK: PR-033 — diff / incremental-index / working-change
+
+    /// Compute the diff between the editor's CURRENT buffer (piped on STDIN) and
+    /// the on-disk file. Shells `opensks file diff --stdin`.
+    func diff(path: String, currentBuffer: String) async throws -> TextDiffResponse
+
+    /// Incrementally re-index a SINGLE file after a save. Shells
+    /// `opensks codegraph update --path` — never a workspace re-index.
+    func codegraphUpdate(path: String) async throws -> CodegraphUpdateResponse
+
+    /// Ask whether the working-tree file has diverged from the editor baseline
+    /// (e.g. a branch switch). Shells `opensks git working-change`.
+    func workingChange(path: String, baselineHash: String) async throws -> WorkingChangeResponse
 }
 
 // MARK: - Live (CLI-backed) implementation
@@ -118,6 +132,39 @@ struct LiveEditorFileService: EditorFileService {
             stdin: nil
         )
         return try Self.decodeOrThrow(result, as: EditorStatResponse.self)
+    }
+
+    // MARK: PR-033 — diff / incremental-index / working-change
+
+    func diff(path: String, currentBuffer: String) async throws -> TextDiffResponse {
+        // SUBCOMMAND of the existing `file` verb. The buffer is piped on STDIN
+        // and compared against the on-disk file.
+        let result = try await run(
+            args: ["file", "diff", "--workspace", workspace.path, "--path", path, "--stdin"],
+            stdin: Data(currentBuffer.utf8)
+        )
+        return try Self.decodeOrThrow(result, as: TextDiffResponse.self)
+    }
+
+    func codegraphUpdate(path: String) async throws -> CodegraphUpdateResponse {
+        // SUBCOMMAND of the existing `codegraph` verb — single-file incremental
+        // re-index (CodeGraph::update_file), NEVER index_workspace.
+        let result = try await run(
+            args: ["codegraph", "update", "--workspace", workspace.path, "--path", path],
+            stdin: nil
+        )
+        return try Self.decodeOrThrow(result, as: CodegraphUpdateResponse.self)
+    }
+
+    func workingChange(path: String, baselineHash: String) async throws -> WorkingChangeResponse {
+        // SUBCOMMAND of the existing `git` verb — did the working-tree file move
+        // away from the editor baseline (e.g. after a branch switch)?
+        let result = try await run(
+            args: ["git", "working-change", "--workspace", workspace.path,
+                   "--path", path, "--baseline-hash", baselineHash],
+            stdin: nil
+        )
+        return try Self.decodeOrThrow(result, as: WorkingChangeResponse.self)
     }
 
     // MARK: Process plumbing
@@ -218,11 +265,23 @@ final class MockEditorFileService: EditorFileService, @unchecked Sendable {
     private let lock = NSLock()
     private var files: [String: Entry] = [:]
     private var conflictArmedPaths: Set<String> = []
+    /// Paths whose next `stat` should report a divergent on-disk hash (an
+    /// external/branch-switch change the watcher must surface as a conflict).
+    private var externalHashByPath: [String: String] = [:]
+    /// Canned diff responses keyed by path, set up by a test.
+    private var diffByPath: [String: TextDiffResponse] = [:]
 
     /// The content most recently persisted by `save`, keyed by path.
     private(set) var savedContent: [String: String] = [:]
     /// The number of save calls observed, keyed by path.
     private(set) var saveCount: [String: Int] = [:]
+    /// Ordered record of every `codegraphUpdate(path:)` call (one entry per
+    /// call). A save must produce EXACTLY one single-file update for its path.
+    private(set) var codegraphUpdateCalls: [String] = []
+    /// Ordered record of every `diff` call's path.
+    private(set) var diffCalls: [String] = []
+    /// Ordered record of every `workingChange` call's path.
+    private(set) var workingChangeCalls: [String] = []
 
     init() {}
 
@@ -251,6 +310,29 @@ final class MockEditorFileService: EditorFileService, @unchecked Sendable {
         conflictArmedPaths.insert(path)
     }
 
+    /// Simulate an EXTERNAL edit (another process / a branch switch): the on-disk
+    /// content + hash diverge from what the editor holds, WITHOUT going through
+    /// the editor's own save. The next `stat` / `workingChange` reports the new
+    /// hash so a watcher can flag the open doc as conflicted.
+    func simulateExternalChange(path: String, newContent: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard var entry = files[path] else { return }
+        let newHash = EditorContentHash.compute(newContent)
+        entry.content = newContent
+        entry.hash = newHash
+        entry.mtimeMs += 1
+        entry.byteSize = newContent.utf8.count
+        files[path] = entry
+        externalHashByPath[path] = newHash
+    }
+
+    /// Seed a canned diff response a test wants `diff(path:currentBuffer:)` to
+    /// return, regardless of buffer contents.
+    func setDiff(path: String, response: TextDiffResponse) {
+        lock.lock(); defer { lock.unlock() }
+        diffByPath[path] = response
+    }
+
     func currentContent(path: String) -> String? {
         lock.lock(); defer { lock.unlock() }
         return files[path]?.content
@@ -271,6 +353,18 @@ final class MockEditorFileService: EditorFileService, @unchecked Sendable {
 
     func stat(path: String) async throws -> EditorStatResponse {
         try statSync(path: path)
+    }
+
+    func diff(path: String, currentBuffer: String) async throws -> TextDiffResponse {
+        try diffSync(path: path, currentBuffer: currentBuffer)
+    }
+
+    func codegraphUpdate(path: String) async throws -> CodegraphUpdateResponse {
+        try codegraphUpdateSync(path: path)
+    }
+
+    func workingChange(path: String, baselineHash: String) async throws -> WorkingChangeResponse {
+        try workingChangeSync(path: path, baselineHash: baselineHash)
     }
 
     // MARK: Synchronous critical sections (lock fully scoped, no async suspension)
@@ -342,6 +436,63 @@ final class MockEditorFileService: EditorFileService, @unchecked Sendable {
             modificationMs: entry.mtimeMs,
             contentHash: entry.hash,
             isSecretRestricted: entry.isSecretRestricted
+        )
+    }
+
+    private func diffSync(path: String, currentBuffer: String) throws -> TextDiffResponse {
+        lock.lock(); defer { lock.unlock() }
+        diffCalls.append(path)
+        if let canned = diffByPath[path] {
+            return canned
+        }
+        // Default: a trivial whole-file line diff between on-disk and buffer.
+        let onDisk = files[path]?.content ?? ""
+        let oldLines = onDisk.isEmpty ? [] : onDisk.components(separatedBy: "\n")
+        let newLines = currentBuffer.isEmpty ? [] : currentBuffer.components(separatedBy: "\n")
+        let changed = onDisk != currentBuffer
+        var hunkLines: [String] = []
+        if changed {
+            hunkLines.append(contentsOf: oldLines.map { "-\($0)" })
+            hunkLines.append(contentsOf: newLines.map { "+\($0)" })
+        }
+        let hunks: [TextDiffHunk] = changed
+            ? [TextDiffHunk(kind: .changed, oldStart: 1, oldLines: oldLines.count,
+                            newStart: 1, newLines: newLines.count, lines: hunkLines)]
+            : []
+        return TextDiffResponse(
+            schema: "opensks.text-diff.v1",
+            path: path,
+            changed: changed,
+            hunks: hunks,
+            addedLines: changed ? newLines.count : 0,
+            removedLines: changed ? oldLines.count : 0
+        )
+    }
+
+    private func codegraphUpdateSync(path: String) throws -> CodegraphUpdateResponse {
+        lock.lock(); defer { lock.unlock() }
+        codegraphUpdateCalls.append(path)
+        return CodegraphUpdateResponse(
+            schema: "opensks.codegraph-update.v1",
+            path: path,
+            symbolCount: 0,
+            // The invariant under test: a save NEVER triggers a full workspace scan.
+            fullScan: false
+        )
+    }
+
+    private func workingChangeSync(path: String, baselineHash: String) throws -> WorkingChangeResponse {
+        lock.lock(); defer { lock.unlock() }
+        workingChangeCalls.append(path)
+        let currentHash = files[path]?.hash
+        let changed = (currentHash != nil) && currentHash != baselineHash
+        return WorkingChangeResponse(
+            schema: "opensks.working-change.v1",
+            path: path,
+            inRepo: true,
+            changed: changed,
+            currentHash: currentHash,
+            headHash: externalHashByPath[path] ?? currentHash
         )
     }
 }

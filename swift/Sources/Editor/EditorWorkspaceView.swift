@@ -153,16 +153,29 @@ private struct EditorDocumentPane: View {
     @ObservedObject var store: EditorWorkspaceStore
     @ObservedObject var document: EditorDocumentState
 
+    private var gutterMarkers: [Int: DiffGutterMarker] {
+        guard let response = store.diff(for: document.id) else { return [:] }
+        return DiffGutter.markers(from: response)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if let banner = readOnlyBanner {
                 bannerView(banner.text, systemImage: banner.symbol, tint: banner.tint)
             }
-            if let conflict = document.conflictState {
-                conflictBanner(conflict.message)
+            if document.conflictState != nil {
+                // An external edit is NEVER silently overwritten: the full
+                // resolution surface replaces the editor until the user decides.
+                ConflictResolutionView(store: store, document: document)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                CodeEditorRepresentable(document: document, diffMarkers: gutterMarkers)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .task(id: document.currentContentHash) {
+                        // Recompute gutter markers whenever the buffer changes.
+                        await store.refreshDiff(document)
+                    }
             }
-            CodeEditorRepresentable(document: document)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.editor)
@@ -193,37 +206,6 @@ private struct EditorDocumentPane: View {
         .background(tint.opacity(0.12))
     }
 
-    private func conflictBanner(_ message: String) -> some View {
-        HStack(spacing: Theme.s8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.coral)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("This file changed on disk since you opened it.")
-                    .font(Theme.ui(11, .semibold))
-                    .foregroundStyle(Theme.text)
-                Text("Your edits are preserved. Choose how to resolve.")
-                    .font(Theme.ui(10.5))
-                    .foregroundStyle(Theme.muted)
-            }
-            Spacer(minLength: 0)
-            Button("Keep mine") {
-                Task { await store.resolveConflictKeepingMine(document) }
-            }
-            .buttonStyle(.quietAction)
-            .fixedSize()
-            Button("Use disk") {
-                Task { await store.resolveConflictTakingDisk(document) }
-            }
-            .buttonStyle(.quietAction)
-            .fixedSize()
-        }
-        .padding(.horizontal, Theme.s12)
-        .padding(.vertical, Theme.s8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.coral.opacity(0.12))
-        .accessibilityIdentifier("editor.conflict.banner")
-    }
 }
 
 // MARK: - Status bar for the active document

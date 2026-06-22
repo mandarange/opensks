@@ -15,6 +15,9 @@ import AppKit
 
 struct CodeEditorRepresentable: NSViewRepresentable {
     @ObservedObject var document: EditorDocumentState
+    /// Per-buffer-line diff markers (added/removed/changed) for the gutter. Empty
+    /// when there is no on-disk-vs-buffer difference to surface.
+    var diffMarkers: [Int: DiffGutterMarker] = [:]
 
     func makeCoordinator() -> Coordinator {
         Coordinator(document: document)
@@ -69,6 +72,7 @@ struct CodeEditorRepresentable: NSViewRepresentable {
 
         // Line-number gutter ruler.
         let ruler = LineNumberRulerView(textView: textView)
+        ruler.diffMarkers = diffMarkers
         scrollView.verticalRulerView = ruler
         scrollView.hasVerticalRuler = true
         scrollView.rulersVisible = true
@@ -92,6 +96,12 @@ struct CodeEditorRepresentable: NSViewRepresentable {
         // normal typing because typing already updated the buffer.
         if textView.string != document.text {
             context.coordinator.applyExternalText(document.text)
+        }
+
+        // Refresh gutter diff markers (added/removed) when they change.
+        if let ruler = context.coordinator.rulerView, ruler.diffMarkers != diffMarkers {
+            ruler.diffMarkers = diffMarkers
+            ruler.needsDisplay = true
         }
     }
 
@@ -178,9 +188,13 @@ struct CodeEditorRepresentable: NSViewRepresentable {
 
 // MARK: - Line number ruler
 
-/// A gutter ruler that draws 1-based line numbers aligned to each laid-out line.
+/// A gutter ruler that draws 1-based line numbers aligned to each laid-out line,
+/// plus per-line diff markers (added/removed/changed) using semantic tints AND a
+/// distinct glyph so the marker never relies on colour alone.
 final class LineNumberRulerView: NSRulerView {
     private weak var editor: NSTextView?
+    /// 1-based buffer line → change marker, refreshed by the representable.
+    var diffMarkers: [Int: DiffGutterMarker] = [:]
 
     init(textView: NSTextView) {
         self.editor = textView
@@ -228,6 +242,13 @@ final class LineNumberRulerView: NSRulerView {
             // Only label the first fragment of a logical line.
             if charIndex == charRange.location {
                 let y = lineFragmentRect.minY + inset - textView.visibleRect.minY
+
+                // Diff marker (added/removed/changed): a tinted bar on the gutter
+                // edge plus a sign glyph so it reads without colour.
+                if let marker = diffMarkers[lineNumber] {
+                    drawMarker(marker, atY: y, height: lineFragmentRect.height)
+                }
+
                 let label = "\(lineNumber)" as NSString
                 let size = label.size(withAttributes: attrs)
                 label.draw(
@@ -238,5 +259,28 @@ final class LineNumberRulerView: NSRulerView {
             }
             index = NSMaxRange(lineRange)
         }
+    }
+
+    /// Draw one diff marker: a tinted vertical bar at the gutter's inner edge and
+    /// a small sign glyph (`+`/`-`/`~`) so the change kind is legible without
+    /// depending on colour.
+    private func drawMarker(_ marker: DiffGutterMarker, atY y: CGFloat, height: CGFloat) {
+        let tint = NSColor(marker.tint)
+        let barWidth: CGFloat = 3
+        let barRect = NSRect(x: ruleThickness - barWidth, y: y, width: barWidth, height: max(height, 12))
+        tint.setFill()
+        barRect.fill()
+
+        let sign: String
+        switch marker {
+        case .added: sign = "+"
+        case .removed: sign = "−"
+        case .changed: sign = "~"
+        }
+        let glyphAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 9, weight: .bold),
+            .foregroundColor: tint
+        ]
+        (sign as NSString).draw(at: NSPoint(x: 3, y: y + 1), withAttributes: glyphAttrs)
     }
 }

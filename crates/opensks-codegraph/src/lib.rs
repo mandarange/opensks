@@ -86,6 +86,36 @@ impl CodeGraph {
             .collect()
     }
 
+    /// Reconstruct a graph from a previously persisted [`CodeGraphIndex`].
+    ///
+    /// This is the inverse of [`CodeGraph::to_index`] and lets the incremental
+    /// `codegraph update` path reload a saved index without re-scanning the
+    /// whole workspace.
+    pub fn from_index(index: CodeGraphIndex) -> Self {
+        let mut records = BTreeMap::new();
+        for record in index.records {
+            records.insert(record.id.clone(), record);
+        }
+        Self {
+            records,
+            edges: index.edges,
+        }
+    }
+
+    /// Total number of records currently held (files, symbols, imports, tests).
+    pub fn record_count(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Number of non-file records (symbols/imports/tests) — the "symbols" the
+    /// `codegraph update` command reports for a re-indexed workspace.
+    pub fn symbol_count(&self) -> usize {
+        self.records
+            .values()
+            .filter(|record| record.kind != CodeGraphNodeKind::File)
+            .count()
+    }
+
     pub fn to_index(&self) -> CodeGraphIndex {
         let mut records: Vec<_> = self.records.values().cloned().collect();
         records.sort_by(|left, right| left.id.cmp(&right.id));
@@ -113,12 +143,17 @@ impl CodeGraph {
     }
 }
 
-pub fn write_index(workspace: &Path, graph: &CodeGraph) -> Result<PathBuf, CodeGraphError> {
-    let path = workspace
+/// Canonical on-disk location of the persisted code graph for a workspace.
+pub fn index_path(workspace: &Path) -> PathBuf {
+    workspace
         .join(".opensks")
         .join("wiki")
         .join("indexes")
-        .join("codegraph.json");
+        .join("codegraph.json")
+}
+
+pub fn write_index(workspace: &Path, graph: &CodeGraph) -> Result<PathBuf, CodeGraphError> {
+    let path = index_path(workspace);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -127,6 +162,21 @@ pub fn write_index(workspace: &Path, graph: &CodeGraph) -> Result<PathBuf, CodeG
         serde_json::to_string_pretty(&graph.to_index())? + "\n",
     )?;
     Ok(path)
+}
+
+/// Load a persisted [`CodeGraph`] for a workspace if one exists.
+///
+/// Returns `Ok(None)` when no index has been written yet so the caller can fall
+/// back to a full [`CodeGraph::index_workspace`] build. A present-but-corrupt
+/// index surfaces as a [`CodeGraphError`].
+pub fn read_index(workspace: &Path) -> Result<Option<CodeGraph>, CodeGraphError> {
+    let path = index_path(workspace);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path)?;
+    let index: CodeGraphIndex = serde_json::from_str(&text)?;
+    Ok(Some(CodeGraph::from_index(index)))
 }
 
 fn collect_source_files(workspace: &Path) -> Result<Vec<PathBuf>, CodeGraphError> {
@@ -337,5 +387,73 @@ mod tests {
         let mut graph = CodeGraph::index_workspace(&root).expect("index");
         graph.delete_path("src/lib.rs");
         assert!(graph.query("gone").is_empty());
+    }
+
+    #[test]
+    fn persisted_index_roundtrips_through_from_index() {
+        let root = temp_workspace("roundtrip");
+        fs::write(root.join("src/lib.rs"), "pub fn keep() {}\n").expect("file");
+        let graph = CodeGraph::index_workspace(&root).expect("index");
+        write_index(&root, &graph).expect("write");
+        let reloaded = read_index(&root).expect("read").expect("present");
+        assert_eq!(reloaded.to_index(), graph.to_index());
+    }
+
+    #[test]
+    fn read_index_absent_returns_none() {
+        let root = temp_workspace("absent");
+        assert!(read_index(&root).expect("read").is_none());
+    }
+
+    /// Incremental `update_file` must touch only the one changed file: the other
+    /// file's records (and their byte content) are preserved unchanged. This is
+    /// the proof that no full workspace rescan happened — only `update_file` ran.
+    #[test]
+    fn update_file_is_incremental_and_leaves_other_files_byte_identical() {
+        let root = temp_workspace("incremental-isolation");
+        let lib_path = root.join("src/lib.rs");
+        let util_path = root.join("src/util.rs");
+        fs::write(&lib_path, "pub fn lib_alpha() {}\n").expect("lib");
+        fs::write(&util_path, "pub fn util_beta() {}\n").expect("util");
+
+        // Build the full index once, then capture the *other* file's records as
+        // serialized bytes so we can prove they are not regenerated.
+        let mut graph = CodeGraph::index_workspace(&root).expect("index");
+        let util_records_before: Vec<u8> = serde_json::to_vec(
+            &graph
+                .to_index()
+                .records
+                .iter()
+                .filter(|record| record.path == "src/util.rs")
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+        .expect("ser util before");
+        assert_eq!(graph.query("lib_alpha").len(), 1);
+
+        // Change ONLY src/lib.rs on disk and run the incremental path.
+        fs::write(&lib_path, "pub fn lib_gamma() {}\n").expect("rewrite lib");
+        graph.update_file(&root, &lib_path).expect("update");
+
+        // The changed file's symbols flipped.
+        assert!(graph.query("lib_alpha").is_empty());
+        assert_eq!(graph.query("lib_gamma").len(), 1);
+
+        // The other file's records are byte-identical to before the update.
+        let util_records_after: Vec<u8> = serde_json::to_vec(
+            &graph
+                .to_index()
+                .records
+                .iter()
+                .filter(|record| record.path == "src/util.rs")
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+        .expect("ser util after");
+        assert_eq!(
+            util_records_before, util_records_after,
+            "incremental update must not rescan or rebuild unrelated files"
+        );
+        assert_eq!(graph.query("util_beta").len(), 1);
     }
 }

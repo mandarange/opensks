@@ -1,0 +1,115 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TextDiff",
+  "description": "The full line-level diff of a buffer against its on-disk counterpart.",
+  "type": "object",
+  "required": [
+    "added_lines",
+    "changed",
+    "path",
+    "removed_lines",
+    "schema"
+  ],
+  "properties": {
+    "added_lines": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "changed": {
+      "description": "True when the buffer differs from disk (i.e. at least one hunk).",
+      "type": "boolean"
+    },
+    "hunks": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DiffHunk"
+      }
+    },
+    "path": {
+      "description": "Workspace-relative path of the file being compared.",
+      "type": "string"
+    },
+    "removed_lines": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "schema": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "DiffHunk": {
+      "description": "One contiguous block of difference between the on-disk file and the buffer.\n\n`old_start`/`old_lines` index the on-disk file; `new_start`/`new_lines` index the buffer. Line numbers are 1-based; a zero `*_lines` count with a `*_start` pointing at the insertion/deletion site is used for pure additions/removals (matching unified-diff conventions).",
+      "type": "object",
+      "required": [
+        "kind",
+        "lines",
+        "new_lines",
+        "new_start",
+        "old_lines",
+        "old_start"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/DiffHunkKind"
+        },
+        "lines": {
+          "description": "The changed lines, each prefixed with `-` (removed from disk) or `+` (added in the buffer). Removed lines precede added lines within a hunk.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "new_lines": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "new_start": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "old_lines": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "old_start": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
+    "DiffHunkKind": {
+      "description": "The nature of a single diff hunk relative to the on-disk (old) file.",
+      "oneOf": [
+        {
+          "description": "Only new lines were introduced (no old lines removed).",
+          "type": "string",
+          "enum": [
+            "added"
+          ]
+        },
+        {
+          "description": "Only old lines were dropped (no new lines introduced).",
+          "type": "string",
+          "enum": [
+            "removed"
+          ]
+        },
+        {
+          "description": "Old lines were replaced by new lines.",
+          "type": "string",
+          "enum": [
+            "changed"
+          ]
+        }
+      ]
+    }
+  }
+}

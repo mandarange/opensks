@@ -375,6 +375,7 @@ pub fn run_codegraph_command(args: &[String], cwd: &Path) -> Result<CliOutput, C
                 ),
             })
         }
+        "update" => run_codegraph_update(&args[1..], cwd),
         other => Err(CliError::Usage(format!(
             "unknown codegraph subcommand `{other}`\n\n{}",
             codegraph_usage()
@@ -382,10 +383,56 @@ pub fn run_codegraph_command(args: &[String], cwd: &Path) -> Result<CliOutput, C
     }
 }
 
+/// `opensks codegraph update --workspace <p> --path <rel>` — incrementally
+/// re-index ONE file. Loads the persisted index (or builds it once if absent),
+/// then calls `CodeGraph::update_file` for the single path and persists. It
+/// never calls `index_workspace` when an index already exists, so `full_scan`
+/// is always reported `false` on the wire.
+fn run_codegraph_update(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let options = parse_workspace_path_options(args, codegraph_usage())?;
+    let workspace = options.workspace.unwrap_or_else(|| cwd.to_path_buf());
+    let relative = options.path.ok_or_else(|| {
+        CliError::Usage(format!(
+            "codegraph update requires `--path`\n\n{}",
+            codegraph_usage()
+        ))
+    })?;
+
+    // Load-or-build: an existing persisted index takes the incremental path; a
+    // missing index is built once (the only time a full scan is acceptable, and
+    // it is reported truthfully).
+    let (mut graph, full_scan) = match opensks_codegraph::read_index(&workspace)
+        .map_err(|error| CliError::Invalid(format!("load codegraph index: {error}")))?
+    {
+        Some(graph) => (graph, false),
+        None => (
+            opensks_codegraph::CodeGraph::index_workspace(&workspace)
+                .map_err(|error| CliError::Invalid(format!("index codegraph: {error}")))?,
+            true,
+        ),
+    };
+
+    let absolute = workspace.join(&relative);
+    graph
+        .update_file(&workspace, &absolute)
+        .map_err(|error| CliError::Invalid(format!("update codegraph file: {error}")))?;
+    opensks_codegraph::write_index(&workspace, &graph)
+        .map_err(|error| CliError::Invalid(format!("write codegraph: {error}")))?;
+
+    let body = serde_json::json!({
+        "schema": "opensks.codegraph-update.v1",
+        "path": relative,
+        "symbol_count": graph.symbol_count(),
+        "full_scan": full_scan,
+    });
+    file_output(&body)
+}
+
 pub fn codegraph_usage() -> &'static str {
     concat!(
         "usage: opensks codegraph index\n",
-        "       opensks codegraph query <text>\n"
+        "       opensks codegraph query <text>\n",
+        "       opensks codegraph update --workspace <path> --path <relative>\n"
     )
 }
 
@@ -675,6 +722,9 @@ pub fn reasoning_usage() -> &'static str {
 }
 
 pub fn run_git_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    if args.first().map(String::as_str) == Some("working-change") {
+        return run_git_working_change(&args[1..], cwd);
+    }
     require_exact_subcommand_cli(args, "outbox", git_usage())?;
     let mut outbox = opensks_git::Outbox::new();
     let commit = outbox
@@ -754,7 +804,60 @@ pub fn run_git_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliErro
 }
 
 pub fn git_usage() -> &'static str {
-    "usage: opensks git outbox\n"
+    concat!(
+        "usage: opensks git outbox\n",
+        "       opensks git working-change --workspace <path> --path <relative> --baseline-hash <hash>\n"
+    )
+}
+
+/// `opensks git working-change --workspace <p> --path <rel> --baseline-hash <h>`
+/// — report whether the working-tree file has moved away from the editor's
+/// recorded baseline hash (e.g. after a branch switch), plus the current
+/// content hash and the HEAD blob hash so the UI can label a branch-switch
+/// conflict. Returns `in_repo:false` when the path is not inside a git repo.
+fn run_git_working_change(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let options = parse_workspace_path_options(args, git_usage())?;
+    let workspace = options.workspace.unwrap_or_else(|| cwd.to_path_buf());
+    let relative = options.path.ok_or_else(|| {
+        CliError::Usage(format!(
+            "git working-change requires `--path`\n\n{}",
+            git_usage()
+        ))
+    })?;
+    let baseline_hash = options.baseline_hash.ok_or_else(|| {
+        CliError::Usage(format!(
+            "git working-change requires `--baseline-hash`\n\n{}",
+            git_usage()
+        ))
+    })?;
+
+    let in_repo = opensks_git::discover_repository(&workspace).is_some();
+    if !in_repo {
+        let body = serde_json::json!({
+            "schema": "opensks.working-change.v1",
+            "path": relative,
+            "in_repo": false,
+        });
+        return file_output(&body);
+    }
+
+    let absolute = workspace.join(&relative);
+    let current_hash = opensks_git::content_hash(&absolute)
+        .map_err(|error| CliError::Invalid(format!("hash working-tree file: {error}")))?;
+    let head_hash = opensks_git::head_blob_hash(&workspace, &relative)
+        .map_err(|error| CliError::Invalid(format!("read HEAD blob hash: {error}")))?
+        .unwrap_or_default();
+    let changed = current_hash != baseline_hash;
+
+    let body = serde_json::json!({
+        "schema": "opensks.working-change.v1",
+        "path": relative,
+        "in_repo": true,
+        "changed": changed,
+        "current_hash": current_hash,
+        "head_hash": head_hash,
+    });
+    file_output(&body)
 }
 
 pub fn run_gc_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
@@ -1787,6 +1890,25 @@ where
                 Err(error) => Err(file_error(&error)),
             }
         }
+        "diff" => {
+            if !options.stdin {
+                return Err(CliError::Usage(format!(
+                    "file diff requires `--stdin` (the editor buffer is read from stdin)\n\n{}",
+                    file_usage()
+                )));
+            }
+            // Read the on-disk file through the hardened service so the diff
+            // honors the same guards (escape/secret/binary) as open/save.
+            let document = match service.open_text(relative) {
+                Ok(document) => document,
+                Err(error) => return Err(file_error(&error)),
+            };
+            let buffer = read_input()?;
+            let diff = compute_text_diff(relative, &document.content, &buffer);
+            let value = serde_json::to_value(&diff)
+                .map_err(|error| CliError::Invalid(format!("serialize text diff: {error}")))?;
+            file_output(&value)
+        }
         other => Err(CliError::Usage(format!(
             "unknown file subcommand `{other}`\n\n{}",
             file_usage()
@@ -1798,8 +1920,188 @@ pub fn file_usage() -> &'static str {
     concat!(
         "usage: opensks file open --workspace <path> --path <relative>\n",
         "       opensks file save --workspace <path> --path <relative> --expected-hash <hash> [--expected-mtime <ms>] --stdin\n",
-        "       opensks file stat --workspace <path> --path <relative>\n"
+        "       opensks file stat --workspace <path> --path <relative>\n",
+        "       opensks file diff --workspace <path> --path <relative> --stdin\n"
     )
+}
+
+/// Line-level diff of the editor's `buffer` against the `on_disk` content.
+///
+/// A simple longest-common-subsequence (LCS) walk over lines groups runs of
+/// `-`/`+` lines into [`opensks_contracts::DiffHunk`]s. Pure deletions are
+/// `Removed`, pure insertions are `Added`, and any block touching both is
+/// `Changed`. The result never carries unchanged lines, only the changed ones.
+fn compute_text_diff(path: &str, on_disk: &str, buffer: &str) -> opensks_contracts::TextDiff {
+    let old_lines: Vec<&str> = split_diff_lines(on_disk);
+    let new_lines: Vec<&str> = split_diff_lines(buffer);
+    let ops = lcs_diff(&old_lines, &new_lines);
+    let hunks = group_diff_hunks(&ops, &old_lines, &new_lines);
+    opensks_contracts::TextDiff::new(path, hunks)
+}
+
+/// Split text into lines for diffing. A single trailing newline is treated as a
+/// terminator (not a spurious trailing empty line); empty input is zero lines.
+/// Interior blank lines are preserved.
+fn split_diff_lines(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    // `"a\n".split('\n')` yields ["a", ""]; drop that one terminator artifact.
+    if text.ends_with('\n') {
+        lines.pop();
+    }
+    lines
+}
+
+/// A single line-level edit operation produced by the LCS walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffOp {
+    /// Line present in both files (advances both cursors).
+    Equal,
+    /// Line only on disk (advances the old cursor).
+    Remove,
+    /// Line only in the buffer (advances the new cursor).
+    Add,
+}
+
+/// Classic dynamic-programming LCS over lines, emitting an ordered op list.
+fn lcs_diff(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffOp> {
+    let rows = old_lines.len();
+    let cols = new_lines.len();
+    // table[i][j] = LCS length of old_lines[i..] and new_lines[j..].
+    let mut table = vec![vec![0usize; cols + 1]; rows + 1];
+    for i in (0..rows).rev() {
+        for j in (0..cols).rev() {
+            table[i][j] = if old_lines[i] == new_lines[j] {
+                table[i + 1][j + 1] + 1
+            } else {
+                table[i + 1][j].max(table[i][j + 1])
+            };
+        }
+    }
+    let mut ops = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < rows && j < cols {
+        if old_lines[i] == new_lines[j] {
+            ops.push(DiffOp::Equal);
+            i += 1;
+            j += 1;
+        } else if table[i + 1][j] >= table[i][j + 1] {
+            ops.push(DiffOp::Remove);
+            i += 1;
+        } else {
+            ops.push(DiffOp::Add);
+            j += 1;
+        }
+    }
+    while i < rows {
+        ops.push(DiffOp::Remove);
+        i += 1;
+    }
+    while j < cols {
+        ops.push(DiffOp::Add);
+        j += 1;
+    }
+    ops
+}
+
+/// Collapse the flat op list into contiguous hunks of change, tracking 1-based
+/// line numbers in both the old and new files.
+fn group_diff_hunks(
+    ops: &[DiffOp],
+    old_lines: &[&str],
+    new_lines: &[&str],
+) -> Vec<opensks_contracts::DiffHunk> {
+    let mut hunks = Vec::new();
+    let mut old_index = 0usize; // 0-based cursor into old_lines
+    let mut new_index = 0usize; // 0-based cursor into new_lines
+    let mut pending: Vec<DiffOp> = Vec::new();
+    let mut hunk_old_start = 0usize;
+    let mut hunk_new_start = 0usize;
+
+    let flush = |pending: &mut Vec<DiffOp>,
+                 hunk_old_start: usize,
+                 hunk_new_start: usize,
+                 old_lines: &[&str],
+                 new_lines: &[&str],
+                 old_cursor: usize,
+                 new_cursor: usize,
+                 hunks: &mut Vec<opensks_contracts::DiffHunk>| {
+        if pending.is_empty() {
+            return;
+        }
+        let removed = pending.iter().filter(|op| **op == DiffOp::Remove).count();
+        let added = pending.iter().filter(|op| **op == DiffOp::Add).count();
+        let kind = match (removed > 0, added > 0) {
+            (true, true) => opensks_contracts::DiffHunkKind::Changed,
+            (true, false) => opensks_contracts::DiffHunkKind::Removed,
+            (false, true) => opensks_contracts::DiffHunkKind::Added,
+            (false, false) => return,
+        };
+        let mut lines = Vec::with_capacity(removed + added);
+        for line in &old_lines[hunk_old_start..old_cursor] {
+            lines.push(format!("-{line}"));
+        }
+        for line in &new_lines[hunk_new_start..new_cursor] {
+            lines.push(format!("+{line}"));
+        }
+        hunks.push(opensks_contracts::DiffHunk {
+            kind,
+            old_start: hunk_old_start + 1,
+            old_lines: removed,
+            new_start: hunk_new_start + 1,
+            new_lines: added,
+            lines,
+        });
+        pending.clear();
+    };
+
+    for op in ops {
+        match op {
+            DiffOp::Equal => {
+                flush(
+                    &mut pending,
+                    hunk_old_start,
+                    hunk_new_start,
+                    old_lines,
+                    new_lines,
+                    old_index,
+                    new_index,
+                    &mut hunks,
+                );
+                old_index += 1;
+                new_index += 1;
+            }
+            DiffOp::Remove => {
+                if pending.is_empty() {
+                    hunk_old_start = old_index;
+                    hunk_new_start = new_index;
+                }
+                pending.push(DiffOp::Remove);
+                old_index += 1;
+            }
+            DiffOp::Add => {
+                if pending.is_empty() {
+                    hunk_old_start = old_index;
+                    hunk_new_start = new_index;
+                }
+                pending.push(DiffOp::Add);
+                new_index += 1;
+            }
+        }
+    }
+    flush(
+        &mut pending,
+        hunk_old_start,
+        hunk_new_start,
+        old_lines,
+        new_lines,
+        old_index,
+        new_index,
+        &mut hunks,
+    );
+    hunks
 }
 
 fn parse_file_options(args: &[String]) -> Result<FileCommandOptions, CliError> {
@@ -1940,6 +2242,53 @@ fn file_output(value: &serde_json::Value) -> Result<CliOutput, CliError> {
         .map_err(|error| CliError::Invalid(format!("serialize file output: {error}")))?
         + "\n";
     Ok(CliOutput { stdout })
+}
+
+/// Flags shared by the `codegraph update` and `git working-change` subcommands.
+/// `workspace` defaults to the process `cwd` when omitted.
+#[derive(Debug, Default)]
+struct WorkspacePathOptions {
+    workspace: Option<PathBuf>,
+    path: Option<String>,
+    baseline_hash: Option<String>,
+}
+
+/// Parse `--workspace <p> --path <rel> [--baseline-hash <h>]` for the PR-033
+/// subcommands. Unknown flags are a usage error against the supplied `usage`.
+fn parse_workspace_path_options(
+    args: &[String],
+    usage: &str,
+) -> Result<WorkspacePathOptions, CliError> {
+    let mut options = WorkspacePathOptions::default();
+    let mut idx = 0;
+    while idx < args.len() {
+        let flag = args[idx].as_str();
+        let value = || -> Result<&str, CliError> {
+            args.get(idx + 1).map(String::as_str).ok_or_else(|| {
+                CliError::Usage(format!("flag `{flag}` requires a value\n\n{usage}"))
+            })
+        };
+        match flag {
+            "--workspace" => {
+                options.workspace = Some(PathBuf::from(value()?));
+                idx += 2;
+            }
+            "--path" => {
+                options.path = Some(value()?.to_string());
+                idx += 2;
+            }
+            "--baseline-hash" => {
+                options.baseline_hash = Some(value()?.to_string());
+                idx += 2;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown argument `{other}`\n\n{usage}"
+                )));
+            }
+        }
+    }
+    Ok(options)
 }
 
 fn parse_daemon_options(args: &[String], cwd: &Path) -> Result<DaemonCommandOptions, CliError> {
@@ -4290,6 +4639,242 @@ mod tests {
         let error = file_run(&root, &["frobnicate", "--path", "x"], || Ok(String::new()))
             .expect_err("unknown subcommand");
         assert!(matches!(error, CliError::Usage(_)));
+        fs::remove_dir_all(root).ok();
+    }
+
+    // --- PR-033: file diff -------------------------------------------------
+
+    /// Run `opensks file diff` with the buffer piped from `buffer`.
+    fn file_diff(root: &Path, relative: &str, buffer: &str) -> serde_json::Value {
+        let owned = buffer.to_string();
+        let output = file_run(root, &["diff", "--path", relative, "--stdin"], move || {
+            Ok(owned)
+        })
+        .expect("file diff ok");
+        serde_json::from_str(&output.stdout).expect("valid diff json")
+    }
+
+    #[test]
+    fn file_diff_identical_content_is_unchanged() {
+        let root = file_workspace("opensks-cli-diff-identical");
+        write_workspace_file(&root, "doc.txt", b"alpha\nbeta\ngamma\n");
+        let diff = file_diff(&root, "doc.txt", "alpha\nbeta\ngamma\n");
+        assert_eq!(diff["schema"], "opensks.text-diff.v1");
+        assert_eq!(diff["path"], "doc.txt");
+        assert_eq!(diff["changed"], false);
+        assert_eq!(diff["hunks"].as_array().expect("hunks").len(), 0);
+        assert_eq!(diff["added_lines"], 0);
+        assert_eq!(diff["removed_lines"], 0);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_diff_added_line_produces_added_hunk() {
+        let root = file_workspace("opensks-cli-diff-add");
+        write_workspace_file(&root, "doc.txt", b"alpha\ngamma\n");
+        // Buffer inserts a new middle line.
+        let diff = file_diff(&root, "doc.txt", "alpha\nbeta\ngamma\n");
+        assert_eq!(diff["changed"], true);
+        assert_eq!(diff["added_lines"], 1);
+        assert_eq!(diff["removed_lines"], 0);
+        let hunks = diff["hunks"].as_array().expect("hunks");
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0]["kind"], "added");
+        assert_eq!(hunks[0]["lines"][0], "+beta");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_diff_removed_line_produces_removed_hunk() {
+        let root = file_workspace("opensks-cli-diff-remove");
+        write_workspace_file(&root, "doc.txt", b"alpha\nbeta\ngamma\n");
+        // Buffer drops the middle line.
+        let diff = file_diff(&root, "doc.txt", "alpha\ngamma\n");
+        assert_eq!(diff["changed"], true);
+        assert_eq!(diff["added_lines"], 0);
+        assert_eq!(diff["removed_lines"], 1);
+        let hunks = diff["hunks"].as_array().expect("hunks");
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0]["kind"], "removed");
+        assert_eq!(hunks[0]["lines"][0], "-beta");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_diff_replaced_line_produces_changed_hunk() {
+        let root = file_workspace("opensks-cli-diff-change");
+        write_workspace_file(&root, "doc.txt", b"alpha\nbeta\ngamma\n");
+        let diff = file_diff(&root, "doc.txt", "alpha\nBETA\ngamma\n");
+        assert_eq!(diff["changed"], true);
+        assert_eq!(diff["added_lines"], 1);
+        assert_eq!(diff["removed_lines"], 1);
+        let hunks = diff["hunks"].as_array().expect("hunks");
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0]["kind"], "changed");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_diff_requires_stdin_flag() {
+        let root = file_workspace("opensks-cli-diff-no-stdin");
+        write_workspace_file(&root, "doc.txt", b"v1\n");
+        let error = file_run(&root, &["diff", "--path", "doc.txt"], || Ok(String::new()))
+            .expect_err("diff without --stdin");
+        assert!(matches!(error, CliError::Usage(_)));
+        fs::remove_dir_all(root).ok();
+    }
+
+    // --- PR-033: codegraph update -----------------------------------------
+
+    /// Run `opensks codegraph update --workspace <root> --path <rel>`.
+    fn codegraph_update(root: &Path, relative: &str) -> serde_json::Value {
+        let ws = root.to_string_lossy().into_owned();
+        let args = vec![
+            "update".to_string(),
+            "--workspace".to_string(),
+            ws,
+            "--path".to_string(),
+            relative.to_string(),
+        ];
+        let output = run_codegraph_command(&args, root).expect("codegraph update ok");
+        serde_json::from_str(&output.stdout).expect("valid update json")
+    }
+
+    #[test]
+    fn codegraph_update_is_incremental_and_does_not_rescan_other_files() {
+        let root = temp_workspace("opensks-cli-codegraph-update");
+        let root = root.canonicalize().expect("canonicalize");
+        write_workspace_file(&root, "src/lib.rs", b"pub fn lib_alpha() {}\n");
+        write_workspace_file(&root, "src/util.rs", b"pub fn util_beta() {}\n");
+
+        // Build and persist the full index once.
+        let graph = opensks_codegraph::CodeGraph::index_workspace(&root).expect("index workspace");
+        opensks_codegraph::write_index(&root, &graph).expect("write index");
+
+        // Capture the other file's persisted records as bytes before the update.
+        let util_before = util_records_bytes(&root);
+
+        // Change ONLY src/lib.rs and run the incremental update path.
+        write_workspace_file(&root, "src/lib.rs", b"pub fn lib_gamma() {}\n");
+        let result = codegraph_update(&root, "src/lib.rs");
+
+        assert_eq!(result["schema"], "opensks.codegraph-update.v1");
+        assert_eq!(result["path"], "src/lib.rs");
+        assert_eq!(
+            result["full_scan"], false,
+            "an existing index must take the incremental path"
+        );
+        assert!(result["symbol_count"].as_u64().expect("count") >= 2);
+
+        // The OTHER file's persisted records are byte-identical: not rescanned.
+        let util_after = util_records_bytes(&root);
+        assert_eq!(
+            util_before, util_after,
+            "incremental update must leave unrelated file records byte-identical"
+        );
+
+        // The changed file's symbols flipped in the persisted index.
+        let reloaded = opensks_codegraph::read_index(&root)
+            .expect("read index")
+            .expect("present index");
+        assert!(reloaded.query("lib_alpha").is_empty());
+        assert_eq!(reloaded.query("lib_gamma").len(), 1);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Serialize just the `src/util.rs` records from the persisted index so the
+    /// incremental-update test can assert they are untouched.
+    fn util_records_bytes(root: &Path) -> Vec<u8> {
+        let index: opensks_contracts::CodeGraphIndex = serde_json::from_str(
+            &fs::read_to_string(opensks_codegraph::index_path(root)).expect("read index file"),
+        )
+        .expect("parse index");
+        let util: Vec<_> = index
+            .records
+            .into_iter()
+            .filter(|record| record.path == "src/util.rs")
+            .collect();
+        serde_json::to_vec(&util).expect("serialize util records")
+    }
+
+    // --- PR-033: git working-change ---------------------------------------
+
+    fn init_cli_repo(label: &str) -> PathBuf {
+        let root = temp_workspace(label).canonicalize().expect("canonicalize");
+        run_repo_git(&root, &["init"]);
+        run_repo_git(&root, &["config", "user.email", "opensks@example.test"]);
+        run_repo_git(&root, &["config", "user.name", "OpenSKS Test"]);
+        fs::write(root.join("doc.txt"), "baseline\n").expect("write doc");
+        run_repo_git(&root, &["add", "doc.txt"]);
+        run_repo_git(&root, &["commit", "-m", "initial"]);
+        root
+    }
+
+    fn run_repo_git(root: &Path, args: &[&str]) {
+        let status = process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .stdout(process::Stdio::null())
+            .stderr(process::Stdio::null())
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn git_working_change(root: &Path, relative: &str, baseline: &str) -> serde_json::Value {
+        let ws = root.to_string_lossy().into_owned();
+        let args = vec![
+            "working-change".to_string(),
+            "--workspace".to_string(),
+            ws,
+            "--path".to_string(),
+            relative.to_string(),
+            "--baseline-hash".to_string(),
+            baseline.to_string(),
+        ];
+        let output = run_git_command(&args, root).expect("working-change ok");
+        serde_json::from_str(&output.stdout).expect("valid working-change json")
+    }
+
+    #[test]
+    fn git_working_change_equal_baseline_is_unchanged() {
+        let root = init_cli_repo("opensks-cli-working-change-equal");
+        let baseline = opensks_git::content_hash(&root.join("doc.txt")).expect("baseline hash");
+        let result = git_working_change(&root, "doc.txt", &baseline);
+        assert_eq!(result["schema"], "opensks.working-change.v1");
+        assert_eq!(result["in_repo"], true);
+        assert_eq!(result["changed"], false);
+        assert_eq!(result["current_hash"], baseline);
+        assert!(
+            result["head_hash"].as_str().expect("head hash").len() >= 7,
+            "tracked file resolves a HEAD blob id"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn git_working_change_after_rewrite_is_changed() {
+        let root = init_cli_repo("opensks-cli-working-change-rewrite");
+        let baseline = opensks_git::content_hash(&root.join("doc.txt")).expect("baseline hash");
+        fs::write(root.join("doc.txt"), "branch switched away\n").expect("rewrite");
+        let result = git_working_change(&root, "doc.txt", &baseline);
+        assert_eq!(result["in_repo"], true);
+        assert_eq!(result["changed"], true);
+        assert_ne!(result["current_hash"], baseline);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn git_working_change_outside_repo_reports_not_in_repo() {
+        let root = temp_workspace("opensks-cli-working-change-no-repo")
+            .canonicalize()
+            .expect("canonicalize");
+        fs::write(root.join("doc.txt"), "plain\n").expect("write");
+        let result = git_working_change(&root, "doc.txt", "fnv1a64:0000000000000000");
+        assert_eq!(result["schema"], "opensks.working-change.v1");
+        assert_eq!(result["in_repo"], false);
+        assert!(result.get("changed").is_none());
         fs::remove_dir_all(root).ok();
     }
 }

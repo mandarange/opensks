@@ -163,6 +163,18 @@ final class EditorDocumentState: ObservableObject, Identifiable {
         saveState = isDirty ? .editing : .saved
     }
 
+    /// Adopt a fresh on-disk baseline while KEEPING the editor buffer (Keep Mine
+    /// / forced-save resolution). Unlike `adoptSavedBaseline` this never declares
+    /// `.saved`: divergent text stays dirty so the deliberate overwrite proceeds,
+    /// matching text becomes clean. The conflict is cleared either way.
+    func adoptForcedBaseline(newHash: String, newMtimeMs: UInt64) {
+        baselineContentHash = newHash
+        onDiskModificationMs = newMtimeMs
+        currentContentHash = EditorContentHash.compute(text)
+        conflictState = nil
+        saveState = isDirty ? .editing : .clean
+    }
+
     func markSaveFailed(_ message: String) {
         saveState = .saveFailed(message)
     }
@@ -233,6 +245,97 @@ struct EditorStatResponse: Decodable, Sendable {
         case modificationMs = "modification_ms"
         case contentHash = "content_hash"
         case isSecretRestricted = "is_secret_restricted"
+    }
+}
+
+// MARK: - PR-033 diff / index / working-change contract (snake_case)
+
+/// One hunk of `opensks.text-diff.v1`. `kind` is the dominant change for the
+/// hunk; `lines` carry the unified `+`/`-` prefixed text. Line numbers are
+/// 1-based against the on-disk file (`old_*`) and the editor buffer (`new_*`).
+struct TextDiffHunk: Decodable, Sendable, Equatable {
+    enum Kind: String, Decodable, Sendable, Equatable {
+        case added
+        case removed
+        case changed
+        case unknown
+
+        init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = Kind(rawValue: raw) ?? .unknown
+        }
+    }
+
+    let kind: Kind
+    let oldStart: Int
+    let oldLines: Int
+    let newStart: Int
+    let newLines: Int
+    let lines: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case oldStart = "old_start"
+        case oldLines = "old_lines"
+        case newStart = "new_start"
+        case newLines = "new_lines"
+        case lines
+    }
+}
+
+/// `opensks.text-diff.v1` — the editor buffer compared against the on-disk file.
+struct TextDiffResponse: Decodable, Sendable, Equatable {
+    let schema: String
+    let path: String
+    let changed: Bool
+    let hunks: [TextDiffHunk]
+    let addedLines: Int
+    let removedLines: Int
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case path
+        case changed
+        case hunks
+        case addedLines = "added_lines"
+        case removedLines = "removed_lines"
+    }
+}
+
+/// `opensks.codegraph-update.v1` — the result of a single-file incremental
+/// re-index. `fullScan == false` is the invariant: a save NEVER triggers a
+/// workspace-wide re-index.
+struct CodegraphUpdateResponse: Decodable, Sendable, Equatable {
+    let schema: String
+    let path: String
+    let symbolCount: Int
+    let fullScan: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case path
+        case symbolCount = "symbol_count"
+        case fullScan = "full_scan"
+    }
+}
+
+/// `opensks.working-change.v1` — did the working-tree file diverge from the
+/// editor baseline (e.g. after a branch switch)?
+struct WorkingChangeResponse: Decodable, Sendable, Equatable {
+    let schema: String
+    let path: String
+    let inRepo: Bool
+    let changed: Bool
+    let currentHash: String?
+    let headHash: String?
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case path
+        case inRepo = "in_repo"
+        case changed
+        case currentHash = "current_hash"
+        case headHash = "head_hash"
     }
 }
 
