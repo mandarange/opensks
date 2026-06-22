@@ -36,11 +36,10 @@ struct PrimaryWorkspaceRouter: View {
                     systemImage: "sparkles"
                 )
             case .git:
-                RoutePlaceholderView(
-                    headline: "Git Studio",
-                    detail: "Branch, status, commit and approval-gated push arrive in PR-034 → PR-036.",
-                    systemImage: "arrow.triangle.branch"
-                )
+                // PR-034: the READ-ONLY status / branches / diff studio. Commit
+                // and approval-gated push arrive in PR-035 → PR-036.
+                GitStatusView(store: coordinator.git)
+                    .onAppear { coordinator.git.refresh() }
             case .design:
                 RoutePlaceholderView(
                     headline: "Design Systems",

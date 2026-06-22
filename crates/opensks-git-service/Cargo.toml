@@ -1,0 +1,13 @@
+[package]
+name = "opensks-git-service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+opensks-contracts = { path = "../opensks-contracts" }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

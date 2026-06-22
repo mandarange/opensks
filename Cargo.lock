@@ -139,6 +139,7 @@ dependencies = [
  "opensks-event-store",
  "opensks-file-service",
  "opensks-git",
+ "opensks-git-service",
  "opensks-graph",
  "opensks-hooks",
  "opensks-image",
@@ -249,6 +250,14 @@ version = "0.1.0"
 dependencies = [
  "opensks-contracts",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "opensks-git-service"
+version = "0.1.0"
+dependencies = [
+ "opensks-contracts",
  "thiserror",
 ]
 

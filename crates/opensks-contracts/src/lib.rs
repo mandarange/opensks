@@ -1609,6 +1609,7 @@ pub struct ReleaseProof {
 
 pub mod conversation;
 pub mod file;
+pub mod git;
 pub mod project;
 pub mod projection;
 pub mod stream;
@@ -1625,6 +1626,10 @@ pub use file::{
     SAVE_TEXT_REQUEST_SCHEMA, SAVE_TEXT_RESULT_SCHEMA, STAT_REQUEST_SCHEMA, SaveTextRequest,
     SaveTextResult, StatRequest, TEXT_DOCUMENT_SCHEMA, TextDocument, TextEncoding,
     WORKSPACE_ENTRY_SCHEMA, WorkspaceEntry,
+};
+pub use git::{
+    GIT_BRANCHES_SCHEMA, GIT_DIFF_SCHEMA, GIT_STATUS_SCHEMA, GitBranchInfo, GitBranches, GitDiff,
+    GitDiffFile, GitDiffHunk, GitStatus, GitStatusEntry, GitStatusKind,
 };
 pub use project::{PROJECT_SUMMARY_SCHEMA, ProjectSummary};
 pub use projection::{
@@ -1810,6 +1815,18 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "text-diff.schema.json",
             serde_json::to_string_pretty(&schema_for!(TextDiff))?,
+        ),
+        (
+            "git-status.schema.json",
+            serde_json::to_string_pretty(&schema_for!(GitStatus))?,
+        ),
+        (
+            "git-branches.schema.json",
+            serde_json::to_string_pretty(&schema_for!(GitBranches))?,
+        ),
+        (
+            "git-diff.schema.json",
+            serde_json::to_string_pretty(&schema_for!(GitDiff))?,
         ),
     ])
 }

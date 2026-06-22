@@ -15,6 +15,7 @@ opensks-engine = { path = "../opensks-engine" }
 opensks-event-store = { path = "../opensks-event-store" }
 opensks-file-service = { path = "../opensks-file-service" }
 opensks-git = { path = "../opensks-git" }
+opensks-git-service = { path = "../opensks-git-service" }
 opensks-graph = { path = "../opensks-graph" }
 opensks-hooks = { path = "../opensks-hooks" }
 opensks-image = { path = "../opensks-image" }

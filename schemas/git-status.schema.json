@@ -1,0 +1,166 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GitStatus",
+  "description": "The result of a read-only `git status` inspection.\n\nWhen the workspace is not inside a Git repository, only `schema` and `in_repo: false` are meaningful; the remaining fields carry their defaults.",
+  "type": "object",
+  "required": [
+    "in_repo",
+    "schema"
+  ],
+  "properties": {
+    "ahead": {
+      "description": "Commits ahead of upstream.",
+      "default": 0,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "behind": {
+      "description": "Commits behind upstream.",
+      "default": 0,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "branch": {
+      "description": "Current branch name, or `None` when detached/unborn or not in a repo.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "detached": {
+      "description": "True when HEAD is detached.",
+      "default": false,
+      "type": "boolean"
+    },
+    "entries": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/GitStatusEntry"
+      }
+    },
+    "in_repo": {
+      "description": "True when the workspace resolves to a Git repository.",
+      "type": "boolean"
+    },
+    "is_dirty": {
+      "description": "True when any tracked file differs from HEAD or any untracked file is present (i.e. there is at least one status entry).",
+      "default": false,
+      "type": "boolean"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "upstream": {
+      "description": "Configured upstream (e.g. `origin/main`), credentials redacted.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "GitStatusEntry": {
+      "description": "One entry from `git status`. `index_status` / `worktree_status` hold the raw porcelain XY characters (a single character each; `\" \"` means unmodified in that column). `orig_path` is populated only for renames and copies.",
+      "type": "object",
+      "required": [
+        "index_status",
+        "kind",
+        "path",
+        "worktree_status"
+      ],
+      "properties": {
+        "index_status": {
+          "description": "Raw porcelain index (staged) status character.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "The editor-facing classification of this entry.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/GitStatusKind"
+            }
+          ]
+        },
+        "orig_path": {
+          "description": "The source path for a rename/copy; `None` otherwise.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Workspace-relative path (the destination path for a rename/copy).",
+          "type": "string"
+        },
+        "worktree_status": {
+          "description": "Raw porcelain worktree (unstaged) status character.",
+          "type": "string"
+        }
+      }
+    },
+    "GitStatusKind": {
+      "description": "The classification of a single status entry, derived from the porcelain XY code pair. This is the editor-facing label; the raw `index_status` / `worktree_status` characters are also preserved for callers that need them.",
+      "oneOf": [
+        {
+          "description": "Tracked content changed (in the index, the worktree, or both).",
+          "type": "string",
+          "enum": [
+            "modified"
+          ]
+        },
+        {
+          "description": "A new path was added to the index.",
+          "type": "string",
+          "enum": [
+            "added"
+          ]
+        },
+        {
+          "description": "A tracked path was deleted.",
+          "type": "string",
+          "enum": [
+            "deleted"
+          ]
+        },
+        {
+          "description": "A tracked path was renamed (carries `orig_path`).",
+          "type": "string",
+          "enum": [
+            "renamed"
+          ]
+        },
+        {
+          "description": "A tracked path was copied from another (carries `orig_path`).",
+          "type": "string",
+          "enum": [
+            "copied"
+          ]
+        },
+        {
+          "description": "An untracked path present in the worktree.",
+          "type": "string",
+          "enum": [
+            "untracked"
+          ]
+        },
+        {
+          "description": "A path with an unresolved merge conflict.",
+          "type": "string",
+          "enum": [
+            "conflicted"
+          ]
+        },
+        {
+          "description": "An ignored path surfaced by status.",
+          "type": "string",
+          "enum": [
+            "ignored"
+          ]
+        }
+      ]
+    }
+  }
+}

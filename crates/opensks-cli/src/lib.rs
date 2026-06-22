@@ -722,8 +722,12 @@ pub fn reasoning_usage() -> &'static str {
 }
 
 pub fn run_git_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
-    if args.first().map(String::as_str) == Some("working-change") {
-        return run_git_working_change(&args[1..], cwd);
+    match args.first().map(String::as_str) {
+        Some("working-change") => return run_git_working_change(&args[1..], cwd),
+        Some("status") => return run_git_status(&args[1..], cwd),
+        Some("branches") => return run_git_branches(&args[1..], cwd),
+        Some("diff") => return run_git_diff(&args[1..], cwd),
+        _ => {}
     }
     require_exact_subcommand_cli(args, "outbox", git_usage())?;
     let mut outbox = opensks_git::Outbox::new();
@@ -806,7 +810,10 @@ pub fn run_git_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliErro
 pub fn git_usage() -> &'static str {
     concat!(
         "usage: opensks git outbox\n",
-        "       opensks git working-change --workspace <path> --path <relative> --baseline-hash <hash>\n"
+        "       opensks git working-change --workspace <path> --path <relative> --baseline-hash <hash>\n",
+        "       opensks git status --workspace <path>\n",
+        "       opensks git branches --workspace <path>\n",
+        "       opensks git diff --workspace <path> [--path <relative>] [--staged]\n"
     )
 }
 
@@ -857,6 +864,51 @@ fn run_git_working_change(args: &[String], cwd: &Path) -> Result<CliOutput, CliE
         "current_hash": current_hash,
         "head_hash": head_hash,
     });
+    file_output(&body)
+}
+
+/// `opensks git status --workspace <p>` — read-only working-tree status. Prints
+/// the `opensks.git-status.v1` contract as JSON. Returns a minimal
+/// `in_repo:false` object when the workspace is not a Git repository. Remote and
+/// upstream strings are credential-redacted by the service.
+fn run_git_status(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let options = parse_workspace_path_options(args, git_usage())?;
+    let workspace = options.workspace.unwrap_or_else(|| cwd.to_path_buf());
+    let status = opensks_git_service::status(&workspace)
+        .map_err(|error| CliError::Invalid(format!("git status: {error}")))?;
+    let body = serde_json::to_value(&status)
+        .map_err(|error| CliError::Invalid(format!("serialize git status: {error}")))?;
+    file_output(&body)
+}
+
+/// `opensks git branches --workspace <p>` — read-only local branch list with
+/// worktree-occupancy flags. Prints the `opensks.git-branches.v1` contract as
+/// JSON. Returns an empty listing when the workspace is not a Git repository.
+fn run_git_branches(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let options = parse_workspace_path_options(args, git_usage())?;
+    let workspace = options.workspace.unwrap_or_else(|| cwd.to_path_buf());
+    let branches = opensks_git_service::branches(&workspace)
+        .map_err(|error| CliError::Invalid(format!("git branches: {error}")))?;
+    let body = serde_json::to_value(&branches)
+        .map_err(|error| CliError::Invalid(format!("serialize git branches: {error}")))?;
+    file_output(&body)
+}
+
+/// `opensks git diff --workspace <p> [--path <rel>] [--staged]` — read-only
+/// unified diff parsed into per-file hunks. Prints the `opensks.git-diff.v1`
+/// contract as JSON. `--staged` diffs the index against HEAD; otherwise the
+/// worktree against the index. Returns an empty file list outside a repository.
+fn run_git_diff(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let options = parse_workspace_path_options(args, git_usage())?;
+    let workspace = options.workspace.unwrap_or_else(|| cwd.to_path_buf());
+    let diff_options = opensks_git_service::DiffOptions {
+        path: options.path,
+        staged: options.staged,
+    };
+    let diff = opensks_git_service::diff(&workspace, &diff_options)
+        .map_err(|error| CliError::Invalid(format!("git diff: {error}")))?;
+    let body = serde_json::to_value(&diff)
+        .map_err(|error| CliError::Invalid(format!("serialize git diff: {error}")))?;
     file_output(&body)
 }
 
@@ -2244,17 +2296,20 @@ fn file_output(value: &serde_json::Value) -> Result<CliOutput, CliError> {
     Ok(CliOutput { stdout })
 }
 
-/// Flags shared by the `codegraph update` and `git working-change` subcommands.
+/// Flags shared by the `codegraph update`, `git working-change`, and the
+/// read-only `git status` / `git branches` / `git diff` subcommands.
 /// `workspace` defaults to the process `cwd` when omitted.
 #[derive(Debug, Default)]
 struct WorkspacePathOptions {
     workspace: Option<PathBuf>,
     path: Option<String>,
     baseline_hash: Option<String>,
+    staged: bool,
 }
 
-/// Parse `--workspace <p> --path <rel> [--baseline-hash <h>]` for the PR-033
-/// subcommands. Unknown flags are a usage error against the supplied `usage`.
+/// Parse `--workspace <p> [--path <rel>] [--baseline-hash <h>] [--staged]` for
+/// the PR-033/PR-034 subcommands. Unknown flags are a usage error against the
+/// supplied `usage`.
 fn parse_workspace_path_options(
     args: &[String],
     usage: &str,
@@ -2280,6 +2335,10 @@ fn parse_workspace_path_options(
             "--baseline-hash" => {
                 options.baseline_hash = Some(value()?.to_string());
                 idx += 2;
+            }
+            "--staged" => {
+                options.staged = true;
+                idx += 1;
             }
             other => {
                 return Err(CliError::Usage(format!(
@@ -4875,6 +4934,88 @@ mod tests {
         assert_eq!(result["schema"], "opensks.working-change.v1");
         assert_eq!(result["in_repo"], false);
         assert!(result.get("changed").is_none());
+        fs::remove_dir_all(root).ok();
+    }
+
+    // --- PR-034: read-only git status / branches / diff -------------------
+
+    fn git_subcommand(root: &Path, args: &[&str]) -> serde_json::Value {
+        let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let output = run_git_command(&owned, root).expect("git subcommand ok");
+        serde_json::from_str(&output.stdout).expect("valid git subcommand json")
+    }
+
+    #[test]
+    fn git_status_reports_dirty_entries() {
+        let root = init_cli_repo("opensks-cli-git-status");
+        fs::write(root.join("doc.txt"), "changed\n").expect("modify");
+        let ws = root.to_string_lossy().into_owned();
+        let result = git_subcommand(&root, &["status", "--workspace", &ws]);
+        assert_eq!(result["schema"], "opensks.git-status.v1");
+        assert_eq!(result["in_repo"], true);
+        assert_eq!(result["is_dirty"], true);
+        let entries = result["entries"].as_array().expect("entries array");
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["path"] == "doc.txt" && e["kind"] == "modified"),
+            "modified file appears in status: {entries:?}"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn git_status_outside_repo_is_minimal() {
+        let root = temp_workspace("opensks-cli-git-status-no-repo")
+            .canonicalize()
+            .expect("canonicalize");
+        fs::write(root.join("plain.txt"), "hi\n").expect("write");
+        let ws = root.to_string_lossy().into_owned();
+        let result = git_subcommand(&root, &["status", "--workspace", &ws]);
+        assert_eq!(result["schema"], "opensks.git-status.v1");
+        assert_eq!(result["in_repo"], false);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn git_branches_lists_current_branch() {
+        let root = init_cli_repo("opensks-cli-git-branches");
+        run_repo_git(&root, &["branch", "feature"]);
+        let ws = root.to_string_lossy().into_owned();
+        let result = git_subcommand(&root, &["branches", "--workspace", &ws]);
+        assert_eq!(result["schema"], "opensks.git-branches.v1");
+        let branches = result["branches"].as_array().expect("branches array");
+        assert!(
+            branches.iter().any(|b| b["name"] == "feature"),
+            "feature branch listed: {branches:?}"
+        );
+        let current = result["current"].as_str().expect("current branch");
+        assert!(
+            branches
+                .iter()
+                .any(|b| b["name"] == current && b["is_current"] == true),
+            "current branch is flagged"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn git_diff_reports_file_hunks() {
+        let root = init_cli_repo("opensks-cli-git-diff");
+        fs::write(root.join("doc.txt"), "baseline\nadded\n").expect("modify");
+        let ws = root.to_string_lossy().into_owned();
+        let result = git_subcommand(&root, &["diff", "--workspace", &ws]);
+        assert_eq!(result["schema"], "opensks.git-diff.v1");
+        let files = result["files"].as_array().expect("files array");
+        let doc = files
+            .iter()
+            .find(|f| f["path"] == "doc.txt")
+            .expect("doc.txt in diff");
+        assert_eq!(doc["is_binary"], false);
+        assert!(
+            !doc["hunks"].as_array().expect("hunks").is_empty(),
+            "diff carries at least one hunk"
+        );
         fs::remove_dir_all(root).ok();
     }
 }

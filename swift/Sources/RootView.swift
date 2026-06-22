@@ -34,6 +34,8 @@ struct RootView: View {
             // Bind the conversation store to the SAME bundled CLI + workspace
             // path AppState resolved, then load this project's conversations.
             coordinator.bindConversations(cli: state.cli, workspace: state.workspace)
+            // Bind the read-only Git studio to the same resolved CLI + workspace.
+            coordinator.bindGit(cli: state.cli, workspace: state.workspace)
         }
         .sheet(isPresented: $state.showPalette) { CommandPalette() }
     }

@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GitDiff",
+  "description": "The result of a read-only `git diff` inspection.",
+  "type": "object",
+  "required": [
+    "schema"
+  ],
+  "properties": {
+    "files": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/GitDiffFile"
+      }
+    },
+    "schema": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "GitDiffFile": {
+      "description": "The per-file portion of a diff result.",
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "hunks": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GitDiffHunk"
+          }
+        },
+        "is_binary": {
+          "description": "True when git reported this file as binary; `hunks` is then empty.",
+          "default": false,
+          "type": "boolean"
+        },
+        "orig_path": {
+          "description": "The source path for a rename; `None` otherwise.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Workspace-relative path (the destination path for a rename).",
+          "type": "string"
+        }
+      }
+    },
+    "GitDiffHunk": {
+      "description": "One contiguous hunk of a unified diff for a single file.\n\n`old_start`/`old_lines` index the pre-image; `new_start`/`new_lines` index the post-image. Line numbers are 1-based, matching unified-diff conventions.",
+      "type": "object",
+      "required": [
+        "lines",
+        "new_lines",
+        "new_start",
+        "old_lines",
+        "old_start"
+      ],
+      "properties": {
+        "lines": {
+          "description": "The hunk body lines, each prefixed with ` ` (context), `+` (added), or `-` (removed). Context lines are retained so the hunk can be rendered.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "new_lines": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "new_start": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "old_lines": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "old_start": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

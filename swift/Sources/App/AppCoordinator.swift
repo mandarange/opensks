@@ -25,11 +25,19 @@ final class AppCoordinator: ObservableObject {
     /// opens a run's graph (e.g. from a `PipelineRunCard`'s "Open live graph").
     @Published var activeGraphRunId: String?
 
+    /// The READ-ONLY Git studio store (PR-034). Starts with a live service rooted
+    /// at the process working directory; rebound to the resolved workspace +
+    /// bundled CLI via `bindGit(cli:workspace:)` once `AppState` resolves them.
+    let git: GitStudioStore
+
     init() {
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
         let cli = cwd.appendingPathComponent("target/debug/opensks")
         conversations = ConversationStore(
             service: LiveConversationService(cli: cli, workspace: cwd)
+        )
+        git = GitStudioStore(
+            service: LiveGitService(cli: cli, workspace: cwd)
         )
     }
 
@@ -40,6 +48,11 @@ final class AppCoordinator: ObservableObject {
             LiveConversationService(cli: cli, workspace: workspace)
         )
         Task { await conversations.load() }
+    }
+
+    /// Rebind the Git studio to the resolved workspace + bundled CLI and refresh.
+    func bindGit(cli: URL, workspace: URL) {
+        git.rebind(service: LiveGitService(cli: cli, workspace: workspace))
     }
 
     /// Focus the `.graph` route on a specific run and navigate there. Used by a
