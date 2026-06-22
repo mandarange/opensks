@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DesignPackageTokens",
+  "description": "A package token document (`tokens.json`). Bound to a manifest by `design_system_id`.",
+  "type": "object",
+  "required": [
+    "design_system_id",
+    "revision",
+    "schema"
+  ],
+  "properties": {
+    "design_system_id": {
+      "type": "string"
+    },
+    "revision": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "schema": {
+      "description": "Must equal [`DESIGN_PACKAGE_TOKENS_SCHEMA`].",
+      "type": "string"
+    },
+    "tokens": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DesignPackageToken"
+      }
+    }
+  },
+  "definitions": {
+    "DesignPackageToken": {
+      "description": "A single semantic token in a package token document. Mirrors the platform- neutral IR that `opensks-design` compiles into platform adapters: `value` is a JSON scalar so colors (hex string) and dimensions (number) share one type.",
+      "type": "object",
+      "required": [
+        "path",
+        "type",
+        "value"
+      ],
+      "properties": {
+        "confidence": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contrast_constraints": {
+          "default": [],
+          "type": "array",
+          "items": true
+        },
+        "path": {
+          "type": "string"
+        },
+        "semantic_role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "type": {
+          "type": "string"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": true
+      }
+    }
+  }
+}

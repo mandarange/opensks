@@ -17,6 +17,7 @@ swift/.build/
 # >>> OpenSKS managed local state
 .opensks/runtime/
 .opensks/cache/
+.opensks/design-cache/
 .opensks/tmp/
 .opensks/logs/
 .opensks/secrets/
@@ -29,7 +30,16 @@ swift/.build/
 .opensks/wiki/context-packs/generated/
 .opensks/history/raw/
 .opensks/assets/candidates/
+# Design-system import scratch is transient; the tracked packages under
+# .opensks/design-systems/** are explicitly NOT ignored (see below).
+*.import-tmp
 # <<< OpenSKS managed local state
+
+# Shared, tracked design-system packages must remain in version control so the
+# design registry can discover them. Never ignore them; re-assert in case a
+# broader rule above would otherwise shadow the directory.
+!.opensks/design-systems/
+!.opensks/design-systems/**
 
 # OpenSKS compatibility artifact planes remain local until promoted by a
 # later store/history migration.

@@ -115,6 +115,11 @@ pub fn default_data_plane_manifest() -> DataPlaneManifest {
                 "Machine-readable tracked/local path policy for first-sprint bootstrap.",
             ),
             shared_rule(
+                ".opensks/design-systems/",
+                "keep_until_superseded",
+                "Portable, tracked design-system packages (manifest + tokens + DESIGN + components). Discovered by the design registry; must stay trackable.",
+            ),
+            shared_rule(
                 ".opensks/wiki/records/",
                 "keep_until_superseded",
                 "Merge-friendly shared project memory shards.",
@@ -168,6 +173,15 @@ pub fn default_data_plane_manifest() -> DataPlaneManifest {
                 false,
                 false,
                 "Local caches and generated context shards.",
+            ),
+            local_rule(
+                ".opensks/design-cache/",
+                DataPlane::EphemeralLocal,
+                "rebuildable",
+                false,
+                false,
+                false,
+                "Compiled design adapters and import temp scratch; rebuildable from tracked design-system packages.",
             ),
             local_rule(
                 ".opensks/tmp/",

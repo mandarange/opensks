@@ -1608,6 +1608,7 @@ pub struct ReleaseProof {
 }
 
 pub mod conversation;
+pub mod design;
 pub mod file;
 pub mod git;
 pub mod git_mutation;
@@ -1622,6 +1623,12 @@ pub use conversation::{
     ConversationDeleteCounts, ConversationDigest, ConversationFilter, ConversationMessage,
     ConversationRunRelation, ConversationStatus, ConversationSummary, MessageRole, MessageState,
     TitleSource,
+};
+pub use design::{
+    DESIGN_PACKAGE_COMPONENTS_SCHEMA, DESIGN_PACKAGE_MANIFEST_SCHEMA, DESIGN_PACKAGE_TOKENS_SCHEMA,
+    DesignContentHash, DesignPackageComponent, DesignPackageComponents, DesignPackageFiles,
+    DesignPackageManifest, DesignPackageSecurity, DesignPackageSource, DesignPackageToken,
+    DesignPackageTokens,
 };
 pub use file::{
     ConflictResolution, FileServiceError, LineEnding, OPEN_TEXT_REQUEST_SCHEMA, OpenTextRequest,
@@ -1673,6 +1680,18 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "conversation-digest.schema.json",
             serde_json::to_string_pretty(&schema_for!(ConversationDigest))?,
+        ),
+        (
+            "design-package-manifest.schema.json",
+            serde_json::to_string_pretty(&schema_for!(DesignPackageManifest))?,
+        ),
+        (
+            "design-package-tokens.schema.json",
+            serde_json::to_string_pretty(&schema_for!(DesignPackageTokens))?,
+        ),
+        (
+            "design-package-components.schema.json",
+            serde_json::to_string_pretty(&schema_for!(DesignPackageComponents))?,
         ),
         (
             "open-text-request.schema.json",

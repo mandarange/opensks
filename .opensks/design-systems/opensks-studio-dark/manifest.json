@@ -1,23 +1,27 @@
 {
-  "schema": "opensks.design-project.v1",
+  "schema": "opensks.design-package.v1",
   "id": "opensks-studio-dark",
   "name": "OpenSKS Studio Dark",
   "version": "1.0.0",
-  "category": "application-shell",
+  "license": "MIT",
   "description": "Dark-only design system for the OpenSKS native Studio app.",
-  "source": {
-    "kind": "project",
-    "origin": "mandarange/opensks",
-    "revision": "ad18654935d351df6cff103f763eaa9b8983ff11",
-    "imported_at": null
-  },
+  "package_schema_version": 1,
   "files": {
     "design": "DESIGN.md",
     "tokens": "tokens.json",
-    "components": "components.json",
-    "usage": null
+    "components": "components.json"
   },
+  "content_hashes": [
+    { "path": "DESIGN.md", "hash": "fnv1a64:a9e04008d48bae75" },
+    { "path": "tokens.json", "hash": "fnv1a64:f716959ac1588e74" },
+    { "path": "components.json", "hash": "fnv1a64:30c1aee39eb939e6" }
+  ],
   "platforms": ["macos-swiftui", "web-css", "agent-prompt"],
+  "source": {
+    "kind": "project",
+    "origin": "mandarange/opensks",
+    "revision": "ad18654935d351df6cff103f763eaa9b8983ff11"
+  },
   "security": {
     "contains_executable_code": false,
     "contains_remote_urls": false,

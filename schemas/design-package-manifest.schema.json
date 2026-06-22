@@ -1,0 +1,197 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DesignPackageManifest",
+  "description": "A portable design-system package manifest (`manifest.json`).\n\nThe manifest is the discovery + trust root: the registry reads it, resolves every `files` path under the package directory, and verifies each declared `content_hashes` entry. `license` is mandatory — a package with no license cannot be trusted or redistributed, so the registry rejects an empty one.",
+  "type": "object",
+  "required": [
+    "description",
+    "files",
+    "id",
+    "license",
+    "name",
+    "package_schema_version",
+    "schema",
+    "version"
+  ],
+  "properties": {
+    "content_hashes": {
+      "description": "Declared content hashes the registry verifies against the on-disk files.",
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DesignContentHash"
+      }
+    },
+    "description": {
+      "description": "One-line description of the package's intent.",
+      "type": "string"
+    },
+    "files": {
+      "description": "Where the design / tokens / components documents live, package-relative.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/DesignPackageFiles"
+        }
+      ]
+    },
+    "id": {
+      "description": "Stable package identifier (the registry resolves packages by this id).",
+      "type": "string"
+    },
+    "license": {
+      "description": "SPDX-style license identifier. Mandatory and non-empty.",
+      "type": "string"
+    },
+    "name": {
+      "description": "Human-readable display name.",
+      "type": "string"
+    },
+    "package_schema_version": {
+      "description": "Schema/format revision of the package layout itself (monotonic).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "platforms": {
+      "description": "Target platforms this package can compile adapters for.",
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "schema": {
+      "description": "Must equal [`DESIGN_PACKAGE_MANIFEST_SCHEMA`].",
+      "type": "string"
+    },
+    "security": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DesignPackageSecurity"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DesignPackageSource"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "version": {
+      "description": "Semantic version string of the package contents.",
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "DesignContentHash": {
+      "description": "A single declared content hash binding a package-relative file to a stable digest. The registry recomputes the digest from the on-disk bytes and rejects the package on any mismatch.",
+      "type": "object",
+      "required": [
+        "hash",
+        "path"
+      ],
+      "properties": {
+        "hash": {
+          "description": "Stable digest of the file bytes (`fnv1a64:<hex>`).",
+          "type": "string"
+        },
+        "path": {
+          "description": "Package-relative path the hash covers.",
+          "type": "string"
+        }
+      }
+    },
+    "DesignPackageFiles": {
+      "description": "Where a package's tokens/components/design files are found, relative to the package directory. Absolute paths and `..` are contract violations the registry rejects; the shapes only ever hold package-relative strings.",
+      "type": "object",
+      "required": [
+        "design",
+        "tokens"
+      ],
+      "properties": {
+        "components": {
+          "description": "Package-relative path to the optional component catalog.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "design": {
+          "description": "Package-relative path to the prose `DESIGN` document (e.g. `DESIGN.md`).",
+          "type": "string"
+        },
+        "tokens": {
+          "description": "Package-relative path to the token document (e.g. `tokens.json`).",
+          "type": "string"
+        },
+        "usage": {
+          "description": "Package-relative path to an optional usage / examples document.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "DesignPackageSecurity": {
+      "description": "Declared security posture of a package's assets. A package that claims it carries no executable code or remote URLs is held to that claim by importers.",
+      "type": "object",
+      "properties": {
+        "allowed_asset_media_types": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "contains_executable_code": {
+          "default": false,
+          "type": "boolean"
+        },
+        "contains_remote_urls": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "DesignPackageSource": {
+      "description": "Provenance of an imported package, redacted of any userinfo/secret material.",
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "imported_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "`project`, `import`, `vendor`, etc.",
+          "type": "string"
+        },
+        "origin": {
+          "description": "Redacted origin reference (never embeds credentials).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

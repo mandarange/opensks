@@ -209,6 +209,7 @@ dependencies = [
 name = "opensks-design"
 version = "0.1.0"
 dependencies = [
+ "opensks-contracts",
  "serde",
  "serde_json",
 ]

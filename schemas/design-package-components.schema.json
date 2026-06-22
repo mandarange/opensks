@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DesignPackageComponents",
+  "description": "A package component catalog (`components.json`). Bound to a manifest by `design_system_id`.",
+  "type": "object",
+  "required": [
+    "design_system_id",
+    "schema"
+  ],
+  "properties": {
+    "components": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DesignPackageComponent"
+      }
+    },
+    "design_system_id": {
+      "type": "string"
+    },
+    "schema": {
+      "description": "Must equal [`DESIGN_PACKAGE_COMPONENTS_SCHEMA`].",
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "DesignPackageComponent": {
+      "description": "A single component entry in a package component catalog.",
+      "type": "object",
+      "required": [
+        "id",
+        "name"
+      ],
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "token_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

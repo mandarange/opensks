@@ -1,16 +1,26 @@
-//! OpenSKS portable design engine — PR-021 bootstrap.
+//! OpenSKS portable design engine.
 //!
-//! This crate owns the `opensks.design-project.v1` portable package contracts
-//! and a deterministic compiler from the platform-neutral token IR to a SwiftUI
-//! adapter. It is intentionally minimal; the full registry / import / audit
-//! Design Studio arrives in PR-037+. The crate must not depend on the Swift app
-//! or the root `opensks` binary.
+//! PR-021 established the `opensks.design-project.v1` bootstrap package contracts
+//! plus a deterministic compiler from the platform-neutral token IR to a SwiftUI
+//! adapter. PR-037 adds the portable design-*package* registry: discovery in a
+//! defined search order, strict path / hash / license / symlink validation
+//! (reusing the file-service hardening order), provenance reporting, and legacy
+//! `DESIGN.md` normalization. The package wire contracts live in
+//! `opensks-contracts::design`; this crate owns the discovery + validation
+//! engine. The crate must not depend on the Swift app or the root `opensks`
+//! binary.
 
 pub mod contracts;
+pub mod registry;
 
 pub use contracts::{
     DESIGN_PROJECT_SCHEMA, DESIGN_TOKEN_SET_SCHEMA, DesignContractError, DesignProjectFiles,
     DesignProjectManifest, DesignSecurity, DesignSource, DesignToken, DesignTokenSet,
+};
+pub use registry::{
+    DesignRegistry, DesignRegistryError, MANIFEST_FILE_NAME, NormalizedDesign, PackageProvenance,
+    ResolvedPackage, content_hash, is_valid_package_id, normalize_legacy_design, validate_package,
+    validate_relative_file,
 };
 
 /// Map a token path (`color.text.primary`, `size.hit_target.primary`) to a
@@ -115,6 +125,8 @@ pub fn compile_swift_tokens(set: &DesignTokenSet) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opensks_contracts::DesignPackageManifest;
+    use std::path::Path;
 
     const MANIFEST_JSON: &str =
         include_str!("../../../.opensks/design-systems/opensks-studio-dark/manifest.json");
@@ -123,18 +135,87 @@ mod tests {
     const GENERATED_SWIFT: &str =
         include_str!("../../../swift/Sources/DesignSystem/Generated/GeneratedDesignTokens.swift");
 
+    /// Workspace root, two levels above the crate manifest dir.
+    fn workspace_root() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root is two levels above the crate manifest")
+    }
+
     #[test]
-    fn bundled_manifest_is_valid() {
-        let manifest: DesignProjectManifest =
-            serde_json::from_str(MANIFEST_JSON).expect("manifest parses");
-        manifest.validate().expect("manifest schema valid");
+    fn bundled_manifest_is_valid_package() {
+        // Parses as the portable PR-037 package manifest, and the on-disk
+        // package passes full strict validation (paths, symlinks, hashes,
+        // license) end to end.
+        let manifest: DesignPackageManifest =
+            serde_json::from_str(MANIFEST_JSON).expect("manifest parses as package");
         assert_eq!(manifest.id, "opensks-studio-dark");
+        assert_eq!(manifest.license, "MIT");
         assert!(manifest.platforms.iter().any(|p| p == "macos-swiftui"));
+
+        let package_dir = workspace_root().join(".opensks/design-systems/opensks-studio-dark");
+        let validated =
+            validate_package("opensks-studio-dark", &package_dir).expect("bundled package valid");
+        assert_eq!(validated.id, "opensks-studio-dark");
+    }
+
+    #[test]
+    fn bundled_package_resolves_local_with_provenance() {
+        let registry = DesignRegistry::with_default_order(workspace_root(), None);
+        let resolved = registry
+            .resolve("opensks-studio-dark")
+            .expect("resolve bundled package");
+        assert_eq!(resolved.provenance, PackageProvenance::Local);
+        let tokens = resolved.load_tokens().expect("load bundled tokens");
+        assert_eq!(tokens.design_system_id, "opensks-studio-dark");
+        let components = resolved.load_components().expect("load bundled components");
+        assert!(components.is_some());
+    }
+
+    #[test]
+    fn gitignore_tracks_design_systems_but_ignores_cache_and_import_temp() {
+        // The shared design-system packages must stay trackable while the design
+        // cache and import-temp scratch are ignored. `git check-ignore` exits 0
+        // when a path IS ignored and 1 when it is not.
+        let root = workspace_root();
+        let check_ignored = |path: &str| -> bool {
+            std::process::Command::new("git")
+                .current_dir(root)
+                .args(["check-ignore", "-q", path])
+                .status()
+                .map(|status| status.success())
+                .unwrap_or_else(|_| panic!("run git check-ignore for {path}"))
+        };
+
+        // Skip gracefully if git is unavailable or this is not a work tree.
+        let in_git = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        if !in_git {
+            return;
+        }
+
+        assert!(
+            !check_ignored(".opensks/design-systems/opensks-studio-dark/manifest.json"),
+            "bundled design-system package must NOT be gitignored"
+        );
+        assert!(
+            check_ignored(".opensks/design-cache/compiled-adapter.swift"),
+            "design cache must be gitignored"
+        );
+        assert!(
+            check_ignored("crates/opensks-design/theme.import-tmp"),
+            "*.import-tmp scratch must be gitignored"
+        );
     }
 
     #[test]
     fn bundled_token_set_is_valid_and_bound() {
-        let manifest: DesignProjectManifest = serde_json::from_str(MANIFEST_JSON).unwrap();
+        let manifest: DesignPackageManifest = serde_json::from_str(MANIFEST_JSON).unwrap();
         let set: DesignTokenSet = serde_json::from_str(TOKENS_JSON).expect("tokens parse");
         set.validate(&manifest.id)
             .expect("token set valid and bound to manifest");

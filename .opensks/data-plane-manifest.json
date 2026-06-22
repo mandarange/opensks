@@ -15,6 +15,16 @@
       "notes": "Machine-readable tracked/local path policy for first-sprint bootstrap."
     },
     {
+      "path": ".opensks/design-systems/",
+      "plane": "shared_durable",
+      "git_tracking": "track",
+      "retention": "keep_until_superseded",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": false,
+      "allows_raw_provider_responses": false,
+      "notes": "Portable, tracked design-system packages (manifest + tokens + DESIGN + components). Discovered by the design registry; must stay trackable."
+    },
+    {
       "path": ".opensks/wiki/records/",
       "plane": "shared_durable",
       "git_tracking": "track",
@@ -105,6 +115,16 @@
       "allows_machine_absolute_paths": false,
       "allows_raw_provider_responses": false,
       "notes": "Local caches and generated context shards."
+    },
+    {
+      "path": ".opensks/design-cache/",
+      "plane": "ephemeral_local",
+      "git_tracking": "ignore",
+      "retention": "rebuildable",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": false,
+      "allows_raw_provider_responses": false,
+      "notes": "Compiled design adapters and import temp scratch; rebuildable from tracked design-system packages."
     },
     {
       "path": ".opensks/tmp/",
