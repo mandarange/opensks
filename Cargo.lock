@@ -656,6 +656,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "opensks-adapter"
+version = "0.1.0"
+dependencies = [
+ "opensks-contracts",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "opensks-artifacts"
 version = "0.1.0"
 dependencies = [

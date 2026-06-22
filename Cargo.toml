@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   ".",
+  "crates/opensks-adapter",
   "crates/opensks-artifacts",
   "crates/opensks-contracts",
   "crates/opensks-conversation",

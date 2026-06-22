@@ -13,6 +13,7 @@ present a `Foundation`/`Simulation` surface as if it were `Live` (recovery direc
 | `agent.code_edit` | Chat code edit | Simulation | Simulation | no | `deterministic_worker_no_real_edits` | — |
 | `agent.parallel_build` | Parallel subcontract build | Foundation | Needs setup | no | `scheduler_present_but_sync_deterministic_worker` | — |
 | `model.dispatch` | Model provider dispatch | Unavailable | Unavailable | no | `no_provider_execution_adapter` | — |
+| `agent.local_test_edit` | Local test agent file edit | Live | Available | yes | `deterministic_adapter_performs_real_file_io` | crate:opensks-adapter, test:local_test_adapter_really_edits_a_file_on_disk |
 | `image.generate` | Image generation | Foundation | Needs setup | no | `fake_image_model_no_adapter` | — |
 | `web.research` | Web research tool | Unavailable | Unavailable | no | `no_web_tool_implementation` | — |
 | `conversation.persistence` | Conversation persistence | Live | Available | yes | `durable_sqlite_repository` | crate:opensks-conversation, table:conversations |

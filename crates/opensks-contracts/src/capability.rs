@@ -243,6 +243,17 @@ pub fn baseline_capability_report() -> RuntimeCapabilityReport {
                 &["connect_model"],
             ),
             capability(
+                "agent.local_test_edit",
+                "Local test agent file edit",
+                Live,
+                "deterministic_adapter_performs_real_file_io",
+                &[
+                    "crate:opensks-adapter",
+                    "test:local_test_adapter_really_edits_a_file_on_disk",
+                ],
+                &[],
+            ),
+            capability(
                 "image.generate",
                 "Image generation",
                 Foundation,
