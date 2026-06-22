@@ -49,7 +49,29 @@ struct RootView: View {
             // then read this workspace's vault inventory (summaries + redacted vaults).
             coordinator.bindVault(cli: state.cli, workspace: state.workspace)
         }
+        .background(globalShortcuts)
         .sheet(isPresented: $state.showPalette) { CommandPalette() }
+        .sheet(isPresented: $state.showHelp) { KeyboardShortcutsHelpView() }
+    }
+
+    /// App-wide keyboard shortcuts surfaced as hidden command buttons so they work
+    /// whenever the window is key, without stealing focus. Discoverable via the
+    /// ⌘/ shortcuts reference and the titlebar affordances.
+    private var globalShortcuts: some View {
+        ZStack {
+            Button("") { state.showPalette = true }
+                .keyboardShortcut("k", modifiers: .command)
+            Button("") { state.showHelp = true }
+                .keyboardShortcut("/", modifiers: .command)
+            Button("") { state.runAcceptance() }
+                .keyboardShortcut("r", modifiers: .command)
+            Button("") { state.focusObjective = true }
+                .keyboardShortcut("l", modifiers: .command)
+        }
+        .buttonStyle(.plain)
+        .opacity(0)
+        .frame(width: 0, height: 0)
+        .accessibilityHidden(true)
     }
 
     private var mainBody: some View {

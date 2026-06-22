@@ -71,17 +71,14 @@ struct PrimaryWorkspaceRouter: View {
                 )
                 .onAppear { Task { await coordinator.vault.refreshStatus() } }
             case .evidence:
-                RoutePlaceholderView(
-                    headline: "Evidence",
-                    detail: "The proof chain and approvals workspace arrives in PR-045.",
-                    systemImage: "checkmark.seal"
-                )
+                // PR-045: the proof-state workspace. Reports acceptance results and
+                // QA / security posture straight from the decoded app-data, with a
+                // truthful empty state + onboarding action before anything is audited.
+                EvidenceWorkspaceView()
             case .settings:
-                RoutePlaceholderView(
-                    headline: "Settings",
-                    detail: "Providers, permissions, retention and shortcuts arrive in later PRs.",
-                    systemImage: "gearshape"
-                )
+                // Providers, permissions and retention land on their own surfaces in
+                // later PRs; the keyboard-shortcut reference is available here today.
+                SettingsWorkspaceView()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

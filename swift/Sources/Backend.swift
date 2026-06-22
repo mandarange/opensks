@@ -904,6 +904,9 @@ final class AppState: ObservableObject {
     @Published var runMode: RunMode = .goal
     @Published var focusObjective = false
     @Published var showPalette = false
+    /// Drives the discoverable keyboard-shortcuts help sheet (PR-045). Opened with
+    /// ⌘/ or the titlebar "?" affordance.
+    @Published var showHelp = false
 
     let workspace: URL
     let cli: URL

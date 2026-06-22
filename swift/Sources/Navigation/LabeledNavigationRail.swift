@@ -54,8 +54,28 @@ private struct RailTile: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 6)
         .onHover { hovering = $0 }
-        .help(route.label)
+        .help(shortcutKey.map { "\(route.label) (⌘\($0))" } ?? route.label)
         .accessibilityLabel(route.label)
         .accessibilityIdentifier(route.railTileAccessibilityIdentifier)
+        // Primary navigation is keyboard-reachable: the first nine routes bind to
+        // ⌘1…⌘9 so an operator can jump between workspaces without the mouse.
+        .modifier(NavigationShortcutModifier(key: shortcutKey))
+    }
+
+    /// The ⌘-number key for this route, if it is within the first nine routes.
+    private var shortcutKey: Character? { KeyboardShortcuts.navigationKey(for: route) }
+}
+
+/// Attaches a `.keyboardShortcut` only when the route has a numeric key, so routes
+/// beyond the first nine simply carry no shortcut (rather than a bogus one).
+private struct NavigationShortcutModifier: ViewModifier {
+    let key: Character?
+
+    func body(content: Content) -> some View {
+        if let key {
+            content.keyboardShortcut(KeyEquivalent(key), modifiers: .command)
+        } else {
+            content
+        }
     }
 }

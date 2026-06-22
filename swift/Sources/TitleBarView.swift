@@ -24,6 +24,7 @@ struct TitleBarView: View {
                 }
                 Spacer()
                 providerReadiness
+                helpChip
                 paletteChip
                 Spacer().frame(width: 14)
             }
@@ -56,6 +57,20 @@ struct TitleBarView: View {
         .help("Configured provider adapters — secrets are never shown")
     }
 
+    private var helpChip: some View {
+        Button { state.showHelp = true } label: {
+            Image(systemName: "questionmark.circle")
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.muted)
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Keyboard shortcuts (⌘/)")
+        .accessibilityLabel("Keyboard shortcuts")
+        .accessibilityIdentifier("titlebar.help")
+    }
+
     private var paletteChip: some View {
         Button { state.showPalette = true } label: {
             HStack(spacing: 4) {
@@ -69,6 +84,8 @@ struct TitleBarView: View {
             .overlay(Capsule().strokeBorder(Theme.stroke, lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .help("Command palette")
+        .help("Command palette (⌘K)")
+        .accessibilityLabel("Command palette")
+        .accessibilityIdentifier("titlebar.palette")
     }
 }
