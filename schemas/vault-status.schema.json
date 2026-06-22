@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VaultStatusResult",
+  "description": "The `vault status` envelope.",
+  "type": "object",
+  "required": [
+    "schema",
+    "summaries",
+    "vaults"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "summaries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/VaultSummaryEntry"
+      }
+    },
+    "vaults": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/VaultEntry"
+      }
+    }
+  },
+  "definitions": {
+    "VaultEntry": {
+      "description": "One `.age` vault entry in `vault status`. The recipient is masked.",
+      "type": "object",
+      "required": [
+        "path",
+        "recipient_redacted"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "recipient_redacted": {
+          "type": "string"
+        }
+      }
+    },
+    "VaultSummaryEntry": {
+      "description": "One summary entry in `vault status`.",
+      "type": "object",
+      "required": [
+        "conversation_id",
+        "decisions",
+        "path",
+        "run_links"
+      ],
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "decisions": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "path": {
+          "type": "string"
+        },
+        "run_links": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

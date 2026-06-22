@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VaultEncryptResult",
+  "description": "The `vault encrypt` success envelope.",
+  "type": "object",
+  "required": [
+    "bytes",
+    "recipient",
+    "schema",
+    "vault_path"
+  ],
+  "properties": {
+    "bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "recipient": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "vault_path": {
+      "type": "string"
+    }
+  }
+}

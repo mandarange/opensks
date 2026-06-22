@@ -1,0 +1,24 @@
+[package]
+name = "opensks-vault"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+opensks-artifacts = { path = "../opensks-artifacts" }
+opensks-contracts = { path = "../opensks-contracts" }
+opensks-conversation = { path = "../opensks-conversation" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# ALL vault encryption goes through the well-vetted `age` crate: X25519
+# recipients + the age format's authenticated ChaCha20-Poly1305. We never
+# hand-roll a cipher, KDF, MAC, nonce scheme, or key exchange.
+age = { workspace = true }
+
+[dev-dependencies]
+opensks-contracts = { path = "../opensks-contracts" }
+
+[lints]
+workspace = true

@@ -27,5 +27,11 @@ opensks-reasoning = { path = "../opensks-reasoning" }
 opensks-retention = { path = "../opensks-retention" }
 opensks-scheduler = { path = "../opensks-scheduler" }
 opensks-triwiki = { path = "../opensks-triwiki" }
+opensks-vault = { path = "../opensks-vault" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# Used only in tests to generate an age keypair and write an identity file when
+# exercising the `vault encrypt`/`decrypt` subcommands end to end.
+age = { workspace = true }

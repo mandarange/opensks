@@ -28,6 +28,7 @@ members = [
   "crates/opensks-stream",
   "crates/opensks-testkit",
   "crates/opensks-triwiki",
+  "crates/opensks-vault",
   "xtask",
 ]
 
@@ -44,6 +45,11 @@ serde_json = "1"
 schemars = "0.8"
 thiserror = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Well-vetted age encryption (X25519 recipients + authenticated ChaCha20-Poly1305
+# via the age format). All vault crypto MUST go through this crate — never roll
+# our own cipher/KDF/MAC/nonce/key-exchange. Default features only (x25519 is
+# built in; we deliberately avoid `cli-common` so no console/tty deps leak in).
+age = "0.11"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

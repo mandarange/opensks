@@ -4,10 +4,12 @@ import XCTest
 
 @MainActor
 final class NavigationTests: XCTestCase {
-    func testRailExposesAllTenLabelledRoutesInOrder() {
+    func testRailExposesAllLabelledRoutesInOrder() {
+        // PR-042 adds the Vault route between Intel and Evidence without removing any
+        // existing route.
         XCTAssertEqual(
             WorkspaceRoute.allCases.map(\.label),
-            ["Home", "Chat", "Code", "Graph", "Runs", "Git", "Design", "Intel", "Evidence", "Settings"]
+            ["Home", "Chat", "Code", "Graph", "Runs", "Git", "Design", "Intel", "Vault", "Evidence", "Settings"]
         )
     }
 

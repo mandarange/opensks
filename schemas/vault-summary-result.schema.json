@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VaultSummaryResult",
+  "description": "The `vault export-summary` CLI result envelope.",
+  "type": "object",
+  "required": [
+    "contains_raw_transcript",
+    "conversation_id",
+    "decisions",
+    "redacted",
+    "run_links",
+    "schema",
+    "summary_path"
+  ],
+  "properties": {
+    "contains_raw_transcript": {
+      "type": "boolean"
+    },
+    "conversation_id": {
+      "type": "string"
+    },
+    "decisions": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "redacted": {
+      "type": "boolean"
+    },
+    "run_links": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "schema": {
+      "type": "string"
+    },
+    "summary_path": {
+      "type": "string"
+    }
+  }
+}

@@ -33,6 +33,15 @@ swift/.build/
 # Design-system import scratch is transient; the tracked packages under
 # .opensks/design-systems/** are explicitly NOT ignored (see below).
 *.import-tmp
+# PR-042 vault: raw transcripts and any plaintext transcript stores stay LOCAL.
+# Sanitized summaries under .opensks/summaries/ are git-trackable (re-asserted
+# below). The .age ciphertext vaults are encrypted, but we ignore them by
+# default so an opt-in export does not silently commit a binary blob; promote a
+# specific .age by force-adding it if you intend to share it.
+*.plaintext
+*.transcript
+.opensks/transcripts/
+.opensks/vaults/
 # <<< OpenSKS managed local state
 
 # Shared, tracked design-system packages must remain in version control so the
@@ -40,6 +49,11 @@ swift/.build/
 # broader rule above would otherwise shadow the directory.
 !.opensks/design-systems/
 !.opensks/design-systems/**
+
+# PR-042: sanitized, secret-redacted conversation summaries are portable and
+# MUST stay in version control. Re-assert in case a broader rule shadows them.
+!.opensks/summaries/
+!.opensks/summaries/**
 
 # OpenSKS compatibility artifact planes remain local until promoted by a
 # later store/history migration.

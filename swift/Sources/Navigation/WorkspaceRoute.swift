@@ -8,7 +8,7 @@
 import Foundation
 
 enum WorkspaceRoute: String, CaseIterable, Hashable, Identifiable, Codable {
-    case home, chat, code, graph, runs, git, design, intelligence, evidence, settings
+    case home, chat, code, graph, runs, git, design, intelligence, vault, evidence, settings
 
     var id: String { rawValue }
 
@@ -23,6 +23,7 @@ enum WorkspaceRoute: String, CaseIterable, Hashable, Identifiable, Codable {
         case .git: return "Git"
         case .design: return "Design"
         case .intelligence: return "Intel"
+        case .vault: return "Vault"
         case .evidence: return "Evidence"
         case .settings: return "Settings"
         }
@@ -38,6 +39,7 @@ enum WorkspaceRoute: String, CaseIterable, Hashable, Identifiable, Codable {
         case .git: return "arrow.triangle.branch"
         case .design: return "paintpalette"
         case .intelligence: return "brain.head.profile"
+        case .vault: return "lock.shield"
         case .evidence: return "checkmark.seal"
         case .settings: return "gearshape"
         }
@@ -61,6 +63,7 @@ enum WorkspaceRoute: String, CaseIterable, Hashable, Identifiable, Codable {
         case .git: return .git
         case .design: return .home
         case .intelligence: return .intelligence
+        case .vault: return .home
         case .evidence: return .evidence
         case .settings: return .settings
         }

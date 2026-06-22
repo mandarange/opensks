@@ -59,6 +59,17 @@ struct PrimaryWorkspaceRouter: View {
                     onOpen: { coordinator.openIntelTarget($0) }
                 )
                 .onAppear { Task { await coordinator.intelligence.recheckFreshness() } }
+            case .vault:
+                // PR-042: the opt-in encrypted-vault + provenance surface. Export a
+                // SANITIZED, git-trackable summary (no raw transcript), opt in to
+                // encrypt the full transcript into an .age vault for a recipient
+                // (public key, configured via the Keychain), or IMPORT a vault with
+                // the matching identity. A failure never reveals plaintext.
+                VaultView(
+                    store: coordinator.vault,
+                    activeConversationID: coordinator.conversations.selectedConversationID
+                )
+                .onAppear { Task { await coordinator.vault.refreshStatus() } }
             case .evidence:
                 RoutePlaceholderView(
                     headline: "Evidence",

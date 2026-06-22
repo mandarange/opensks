@@ -1618,6 +1618,7 @@ pub mod project;
 pub mod projection;
 pub mod stream;
 pub mod text_diff;
+pub mod vault;
 
 pub use conversation::{
     CONVERSATION_DIGEST_SCHEMA, CONVERSATION_MESSAGE_SCHEMA, CONVERSATION_SUMMARY_SCHEMA,
@@ -1670,6 +1671,12 @@ pub use stream::{
     ENGINE_STREAM_FRAME_SCHEMA, EngineStreamFrame, PublicEngineError, STREAM_PROTOCOL_VERSION,
 };
 pub use text_diff::{DiffHunk, DiffHunkKind, TEXT_DIFF_SCHEMA, TextDiff};
+pub use vault::{
+    VAULT_DECRYPT_SCHEMA, VAULT_ENCRYPT_SCHEMA, VAULT_ERROR_SCHEMA, VAULT_STATUS_SCHEMA,
+    VAULT_SUMMARY_SCHEMA, VaultDecryptResult, VaultEncryptResult, VaultEntry, VaultErrorBody,
+    VaultErrorCode, VaultErrorEnvelope, VaultErrorSchemaTag, VaultStatusResult, VaultSummary,
+    VaultSummaryEntry, VaultSummaryResult,
+};
 
 pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> {
     Ok(vec![
@@ -1948,6 +1955,30 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "intel-architecture.schema.json",
             serde_json::to_string_pretty(&schema_for!(Architecture))?,
+        ),
+        (
+            "vault-summary.schema.json",
+            serde_json::to_string_pretty(&schema_for!(VaultSummary))?,
+        ),
+        (
+            "vault-summary-result.schema.json",
+            serde_json::to_string_pretty(&schema_for!(VaultSummaryResult))?,
+        ),
+        (
+            "vault-encrypt-result.schema.json",
+            serde_json::to_string_pretty(&schema_for!(VaultEncryptResult))?,
+        ),
+        (
+            "vault-decrypt-result.schema.json",
+            serde_json::to_string_pretty(&schema_for!(VaultDecryptResult))?,
+        ),
+        (
+            "vault-status.schema.json",
+            serde_json::to_string_pretty(&schema_for!(VaultStatusResult))?,
+        ),
+        (
+            "vault-error.schema.json",
+            serde_json::to_string_pretty(&schema_for!(VaultErrorEnvelope))?,
         ),
     ])
 }

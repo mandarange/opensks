@@ -50,6 +50,15 @@ final class AppCoordinator: ObservableObject {
     /// once `AppState` resolves them.
     let intelligence: IntelligenceStore
 
+    /// The encrypted-vault + provenance store (PR-042). Drives the opt-in
+    /// sanitized-summary export, the opt-in full-transcript encryption, and the
+    /// identity-gated import. Holds NO transcript bytes and NO key material — it
+    /// persists only the PUBLIC recipient via the Keychain. Starts with a live
+    /// service rooted at the process working directory; rebound to the resolved
+    /// workspace + bundled CLI via `bindVault(cli:workspace:)` once `AppState`
+    /// resolves them.
+    let vault: VaultStore
+
     /// Editor store reference (wired by `wireGit`/`wireIntelligence`) so an
     /// intelligence deep link to a file can open it in the code workspace.
     private weak var editorStore: EditorWorkspaceStore?
@@ -72,6 +81,10 @@ final class AppCoordinator: ObservableObject {
         )
         intelligence = IntelligenceStore(
             service: LiveIntelligenceService(cli: cli, workspace: cwd)
+        )
+        vault = VaultStore(
+            service: LiveVaultService(cli: cli, workspace: cwd),
+            recipientStore: KeychainVaultRecipientStore()
         )
     }
 
@@ -106,6 +119,14 @@ final class AppCoordinator: ObservableObject {
     func bindIntelligence(cli: URL, workspace: URL) {
         intelligence.updateService(LiveIntelligenceService(cli: cli, workspace: workspace))
         Task { await intelligence.loadAll() }
+    }
+
+    /// Rebind the Vault store (PR-042) to the resolved workspace + bundled CLI and
+    /// re-read the workspace inventory (summaries + redacted vaults). The configured
+    /// PUBLIC recipient persists across rebinds (it lives in the Keychain, not the
+    /// service).
+    func bindVault(cli: URL, workspace: URL) {
+        vault.rebind(service: LiveVaultService(cli: cli, workspace: workspace))
     }
 
     /// Navigate an Intelligence deep link onto the EXISTING routes (no new route is

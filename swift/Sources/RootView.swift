@@ -45,6 +45,9 @@ struct RootView: View {
             // Bind the Project Intelligence store (PR-041) to the same resolved CLI +
             // workspace, then load architecture / code graph / glossary.
             coordinator.bindIntelligence(cli: state.cli, workspace: state.workspace)
+            // Bind the Vault store (PR-042) to the same resolved CLI + workspace,
+            // then read this workspace's vault inventory (summaries + redacted vaults).
+            coordinator.bindVault(cli: state.cli, workspace: state.workspace)
         }
         .sheet(isPresented: $state.showPalette) { CommandPalette() }
     }

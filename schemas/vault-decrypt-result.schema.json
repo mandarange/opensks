@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VaultDecryptResult",
+  "description": "The `vault decrypt` success envelope.",
+  "type": "object",
+  "required": [
+    "bytes",
+    "conversation_id",
+    "schema"
+  ],
+  "properties": {
+    "bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "conversation_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    }
+  }
+}

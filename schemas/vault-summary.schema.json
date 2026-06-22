@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VaultSummary",
+  "description": "The sanitized, git-trackable summary record written under `.opensks/summaries/`. `contains_raw_transcript` is always `false` and `redacted` is always `true`: this record holds decisions + run links only.",
+  "type": "object",
+  "required": [
+    "contains_raw_transcript",
+    "conversation_id",
+    "decisions",
+    "generated_at_ms",
+    "redacted",
+    "run_links",
+    "schema",
+    "title"
+  ],
+  "properties": {
+    "contains_raw_transcript": {
+      "type": "boolean"
+    },
+    "conversation_id": {
+      "type": "string"
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "generated_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "redacted": {
+      "type": "boolean"
+    },
+    "run_links": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "schema": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    }
+  }
+}

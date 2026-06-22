@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VaultErrorEnvelope",
+  "description": "The `opensks.vault-error.v1` failure envelope emitted (with a nonzero exit) on any encryption/decryption error. Carries no plaintext.",
+  "type": "object",
+  "required": [
+    "error",
+    "schema"
+  ],
+  "properties": {
+    "error": {
+      "$ref": "#/definitions/VaultErrorBody"
+    },
+    "schema": {
+      "$ref": "#/definitions/VaultErrorSchemaTag"
+    }
+  },
+  "definitions": {
+    "VaultErrorBody": {
+      "description": "The inner error body for [`VaultErrorEnvelope`].",
+      "type": "object",
+      "required": [
+        "code"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/VaultErrorCode"
+        }
+      }
+    },
+    "VaultErrorCode": {
+      "description": "Stable error codes for the `vault encrypt` / `vault decrypt` failure contract.",
+      "type": "string",
+      "enum": [
+        "encrypt_failed",
+        "bad_recipient",
+        "decrypt_failed"
+      ]
+    },
+    "VaultErrorSchemaTag": {
+      "description": "A one-variant tag enum so the error `schema` field serializes to the exact literal `\"opensks.vault-error.v1\"`.",
+      "type": "string",
+      "enum": [
+        "opensks.vault-error.v1"
+      ]
+    }
+  }
+}

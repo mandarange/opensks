@@ -2617,6 +2617,205 @@ fn conversation_output(value: &serde_json::Value) -> Result<CliOutput, CliError>
     Ok(CliOutput { stdout })
 }
 
+/// Options for the `vault` verb (PR-042). `workspace` defaults to `cwd`.
+#[derive(Debug, Default)]
+struct VaultCommandOptions {
+    workspace: Option<PathBuf>,
+    conversation: Option<String>,
+    recipient: Option<String>,
+    vault: Option<String>,
+    identity_file: Option<String>,
+}
+
+/// `opensks vault <export-summary|encrypt|decrypt|status> ...`.
+///
+/// Subcommand strings (for the single root dispatch arm):
+///   - `export-summary` : write a SANITIZED, git-trackable summary
+///   - `encrypt`        : opt-in age-encrypt the FULL transcript to a `.age`
+///   - `decrypt`        : age-decrypt a `.age` back to plaintext with an identity
+///   - `status`         : list summaries + `.age` vaults
+///
+/// Encryption/decryption failures emit the `opensks.vault-error.v1` JSON body on
+/// stderr with a nonzero exit (via `CliError::Invalid`), never leaking plaintext.
+pub fn run_vault_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let Some(subcommand) = args.first() else {
+        return Ok(CliOutput {
+            stdout: vault_usage().to_string(),
+        });
+    };
+    if subcommand == "--help" || subcommand == "-h" || subcommand == "help" {
+        return Ok(CliOutput {
+            stdout: vault_usage().to_string(),
+        });
+    }
+    let options = parse_vault_options(&args[1..])?;
+    let workspace = options
+        .workspace
+        .clone()
+        .unwrap_or_else(|| cwd.to_path_buf());
+
+    match subcommand.as_str() {
+        "export-summary" => {
+            let conversation =
+                require_vault_field(options.conversation.as_deref(), "--conversation")?;
+            let repo = open_vault_repo(&workspace)?;
+            let now_ms = now_unix_millis()?;
+            let written = opensks_vault::export_summary(&repo, &workspace, conversation, now_ms)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            let body = serde_json::json!({
+                "schema": opensks_vault::VAULT_SUMMARY_SCHEMA,
+                "conversation_id": written.summary.conversation_id,
+                "summary_path": written.summary_path.to_string_lossy(),
+                "decisions": written.summary.decisions.len(),
+                "run_links": written.summary.run_links,
+                "contains_raw_transcript": written.summary.contains_raw_transcript,
+                "redacted": written.summary.redacted,
+            });
+            vault_output(&body)
+        }
+        "encrypt" => {
+            let conversation =
+                require_vault_field(options.conversation.as_deref(), "--conversation")?;
+            let recipient = require_vault_field(options.recipient.as_deref(), "--recipient")?;
+            let repo = open_vault_repo(&workspace)?;
+            match opensks_vault::encrypt_transcript(&repo, &workspace, conversation, recipient) {
+                Ok(result) => {
+                    let body = serde_json::json!({
+                        "schema": opensks_vault::VAULT_ENCRYPT_SCHEMA,
+                        "vault_path": result.vault_path.to_string_lossy(),
+                        "recipient": result.recipient,
+                        "bytes": result.bytes,
+                    });
+                    vault_output(&body)
+                }
+                Err(error) => Err(vault_error_for(&error)),
+            }
+        }
+        "decrypt" => {
+            let vault = require_vault_field(options.vault.as_deref(), "--vault")?;
+            let identity =
+                require_vault_field(options.identity_file.as_deref(), "--identity-file")?;
+            match opensks_vault::decrypt_vault(Path::new(vault), Path::new(identity)) {
+                Ok(result) => {
+                    let body = serde_json::json!({
+                        "schema": opensks_vault::VAULT_DECRYPT_SCHEMA,
+                        "conversation_id": result.conversation_id,
+                        "bytes": result.bytes,
+                    });
+                    vault_output(&body)
+                }
+                Err(error) => Err(vault_error_for(&error)),
+            }
+        }
+        "status" => {
+            let status = opensks_vault::status(&workspace)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            vault_output(
+                &serde_json::to_value(&status).map_err(|error| {
+                    CliError::Invalid(format!("serialize vault status: {error}"))
+                })?,
+            )
+        }
+        other => Err(CliError::Usage(format!(
+            "unknown vault subcommand `{other}`\n\n{}",
+            vault_usage()
+        ))),
+    }
+}
+
+/// Map a vault error into the `opensks.vault-error.v1` contract: the
+/// `CliError::Invalid` message IS the compact error JSON, so it is printed
+/// verbatim on stderr and the process exits nonzero. No plaintext is included.
+fn vault_error_for(error: &opensks_vault::VaultError) -> CliError {
+    let code = match error.code() {
+        "bad_recipient" => opensks_vault::VaultErrorCode::BadRecipient,
+        "decrypt_failed" => opensks_vault::VaultErrorCode::DecryptFailed,
+        _ => opensks_vault::VaultErrorCode::EncryptFailed,
+    };
+    let envelope = opensks_vault::VaultErrorEnvelope::new(code);
+    let json = serde_json::to_string(&envelope)
+        .unwrap_or_else(|_| "{\"schema\":\"opensks.vault-error.v1\"}".to_string());
+    CliError::Invalid(json)
+}
+
+fn open_vault_repo(
+    workspace: &Path,
+) -> Result<opensks_conversation::ConversationRepository, CliError> {
+    opensks_conversation::ConversationRepository::open_workspace(workspace)
+        .map_err(|error| CliError::Invalid(error.to_string()))
+}
+
+pub fn vault_usage() -> &'static str {
+    concat!(
+        "usage: opensks vault export-summary --workspace <path> --conversation <id>\n",
+        "       opensks vault encrypt --workspace <path> --conversation <id> --recipient <age1...>\n",
+        "       opensks vault decrypt --workspace <path> --vault <path> --identity-file <path>\n",
+        "       opensks vault status --workspace <path>\n"
+    )
+}
+
+fn parse_vault_options(args: &[String]) -> Result<VaultCommandOptions, CliError> {
+    let mut options = VaultCommandOptions::default();
+    let mut idx = 0;
+    while idx < args.len() {
+        let flag = args[idx].as_str();
+        match flag {
+            "--workspace" => {
+                options.workspace = Some(PathBuf::from(vault_flag_value(args, idx, flag)?));
+                idx += 2;
+            }
+            "--conversation" => {
+                options.conversation = Some(vault_flag_value(args, idx, flag)?.to_string());
+                idx += 2;
+            }
+            "--recipient" => {
+                options.recipient = Some(vault_flag_value(args, idx, flag)?.to_string());
+                idx += 2;
+            }
+            "--vault" => {
+                options.vault = Some(vault_flag_value(args, idx, flag)?.to_string());
+                idx += 2;
+            }
+            "--identity-file" => {
+                options.identity_file = Some(vault_flag_value(args, idx, flag)?.to_string());
+                idx += 2;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown vault argument `{other}`\n\n{}",
+                    vault_usage()
+                )));
+            }
+        }
+    }
+    Ok(options)
+}
+
+fn vault_flag_value<'a>(args: &'a [String], idx: usize, flag: &str) -> Result<&'a str, CliError> {
+    args.get(idx + 1).map(String::as_str).ok_or_else(|| {
+        CliError::Usage(format!(
+            "vault flag `{flag}` requires a value\n\n{}",
+            vault_usage()
+        ))
+    })
+}
+
+fn require_vault_field<'a>(value: Option<&'a str>, flag: &str) -> Result<&'a str, CliError> {
+    value.ok_or_else(|| {
+        CliError::Usage(format!(
+            "vault command requires `{flag}`\n\n{}",
+            vault_usage()
+        ))
+    })
+}
+
+fn vault_output(value: &serde_json::Value) -> Result<CliOutput, CliError> {
+    let stdout = serde_json::to_string_pretty(value)
+        .map_err(|error| CliError::Invalid(format!("serialize vault output: {error}")))?
+        + "\n";
+    Ok(CliOutput { stdout })
+}
+
 /// Options for the `file` verb. `path` is workspace-relative; `workspace`
 /// defaults to the process `cwd`.
 #[derive(Debug, Default)]
@@ -6283,5 +6482,190 @@ mod tests {
         assert!(bare_has_ref(&bare, "main"), "acked protected ref is pushed");
 
         fs::remove_dir_all(source.parent().unwrap()).ok();
+    }
+
+    // ----------------------------------------------------------------------
+    // vault (PR-042)
+    // ----------------------------------------------------------------------
+
+    fn vault_json(args: &[&str], workspace: &Path) -> serde_json::Value {
+        let ws = workspace.to_string_lossy().into_owned();
+        let mut owned = vec![args[0].to_string(), "--workspace".to_string(), ws];
+        owned.extend(args[1..].iter().map(|value| value.to_string()));
+        let output = run_vault_command(&owned, workspace).expect("vault command");
+        serde_json::from_str(&output.stdout).expect("valid vault json")
+    }
+
+    fn seed_vault_conversation(workspace: &Path) -> String {
+        let created = conversation_json(&["create", "--title", "Vault slice"], workspace);
+        let cid = created["id"].as_str().expect("conversation id").to_string();
+        conversation_json(
+            &[
+                "append",
+                "--conversation",
+                &cid,
+                "--role",
+                "user",
+                "--text",
+                "Decision: adopt the age crate for the encrypted vault",
+            ],
+            workspace,
+        );
+        conversation_json(
+            &[
+                "append",
+                "--conversation",
+                &cid,
+                "--role",
+                "assistant",
+                "--text",
+                "raw assistant body that should never appear in a summary",
+            ],
+            workspace,
+        );
+        cid
+    }
+
+    #[test]
+    fn vault_export_summary_is_redacted_and_tracks_no_transcript() {
+        let root = temp_workspace("opensks-cli-vault-summary");
+        let cid = seed_vault_conversation(&root);
+
+        let result = vault_json(&["export-summary", "--conversation", &cid], &root);
+        assert_eq!(result["schema"], "opensks.vault-summary.v1");
+        assert_eq!(result["conversation_id"], cid);
+        assert_eq!(result["contains_raw_transcript"], false);
+        assert_eq!(result["redacted"], true);
+
+        let summary_path = result["summary_path"].as_str().expect("summary path");
+        let on_disk = fs::read_to_string(summary_path).expect("summary on disk");
+        assert!(on_disk.contains("adopt the age crate"));
+        assert!(
+            !on_disk.contains("raw assistant body"),
+            "summary leaked raw transcript: {on_disk}"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn vault_encrypt_decrypt_roundtrips_and_bad_recipient_writes_nothing() {
+        let root = temp_workspace("opensks-cli-vault-encrypt");
+        let cid = seed_vault_conversation(&root);
+
+        // Generate an age identity entirely via the age crate.
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public().to_string();
+        let identity_path = root.join("identity.txt");
+        {
+            use age::secrecy::ExposeSecret;
+            fs::write(
+                &identity_path,
+                format!("{}\n", identity.to_string().expose_secret()),
+            )
+            .expect("write identity");
+        }
+
+        let encrypt = vault_json(
+            &["encrypt", "--conversation", &cid, "--recipient", &recipient],
+            &root,
+        );
+        assert_eq!(encrypt["schema"], "opensks.vault-encrypt.v1");
+        let vault_path = encrypt["vault_path"].as_str().expect("vault path");
+        assert!(Path::new(vault_path).exists());
+
+        // decrypt with the matching identity recovers the conversation id.
+        let decrypt = vault_json(
+            &[
+                "decrypt",
+                "--vault",
+                vault_path,
+                "--identity-file",
+                identity_path.to_str().unwrap(),
+            ],
+            &root,
+        );
+        assert_eq!(decrypt["schema"], "opensks.vault-decrypt.v1");
+        assert_eq!(decrypt["conversation_id"], cid);
+
+        // A bad recipient yields the vault-error contract on a nonzero path and
+        // writes no `.age`.
+        let bad = run_vault_command(
+            &[
+                "encrypt".to_string(),
+                "--workspace".to_string(),
+                root.to_string_lossy().into_owned(),
+                "--conversation".to_string(),
+                cid.clone(),
+                "--recipient".to_string(),
+                "totally-not-an-age-key".to_string(),
+            ],
+            &root,
+        )
+        .expect_err("bad recipient must fail");
+        let message = bad.to_string();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&message).expect("vault error is JSON");
+        assert_eq!(parsed["schema"], "opensks.vault-error.v1");
+        assert_eq!(parsed["error"]["code"], "bad_recipient");
+
+        // status lists exactly the one summary-less vault we created.
+        let status = vault_json(&["status"], &root);
+        assert_eq!(status["schema"], "opensks.vault-status.v1");
+        assert_eq!(status["vaults"].as_array().unwrap().len(), 1);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn vault_decrypt_with_wrong_identity_fails_closed() {
+        let root = temp_workspace("opensks-cli-vault-wrongkey");
+        let cid = seed_vault_conversation(&root);
+
+        let right = age::x25519::Identity::generate();
+        let encrypt = vault_json(
+            &[
+                "encrypt",
+                "--conversation",
+                &cid,
+                "--recipient",
+                &right.to_public().to_string(),
+            ],
+            &root,
+        );
+        let vault_path = encrypt["vault_path"]
+            .as_str()
+            .expect("vault path")
+            .to_string();
+
+        let wrong = age::x25519::Identity::generate();
+        let wrong_path = root.join("wrong.txt");
+        {
+            use age::secrecy::ExposeSecret;
+            fs::write(
+                &wrong_path,
+                format!("{}\n", wrong.to_string().expose_secret()),
+            )
+            .expect("write wrong identity");
+        }
+
+        let err = run_vault_command(
+            &[
+                "decrypt".to_string(),
+                "--workspace".to_string(),
+                root.to_string_lossy().into_owned(),
+                "--vault".to_string(),
+                vault_path,
+                "--identity-file".to_string(),
+                wrong_path.to_string_lossy().into_owned(),
+            ],
+            &root,
+        )
+        .expect_err("wrong identity must fail");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&err.to_string()).expect("vault error JSON");
+        assert_eq!(parsed["error"]["code"], "decrypt_failed");
+
+        fs::remove_dir_all(&root).ok();
     }
 }
