@@ -8,11 +8,13 @@ import SwiftUI
 
 struct SettingsWorkspaceView: View {
     @EnvironmentObject private var state: AppState
+    @State private var capabilities: [RuntimeCapability] = []
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.s16) {
                 header
+                capabilitiesCard
                 shortcutsCard
                 workspaceCard
                 upcomingCard
@@ -25,6 +27,39 @@ struct SettingsWorkspaceView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Theme.bg)
         .accessibilityIdentifier("settings.workspace")
+        .task {
+            // Read the honest runtime maturity from the product CLI.
+            if let report = await RuntimeCapabilityReport.load(
+                cli: state.cli,
+                workspace: state.workspace
+            ) {
+                capabilities = report.capabilities
+            }
+        }
+    }
+
+    private var capabilitiesCard: some View {
+        card {
+            VStack(alignment: .leading, spacing: Theme.s10) {
+                Text("Runtime capabilities")
+                    .font(Theme.ui(15, .semibold))
+                    .foregroundStyle(Theme.text)
+                Text("What is live versus what still needs setup or is a simulation — read from the runtime, never assumed.")
+                    .font(Theme.ui(12.5))
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                if capabilities.isEmpty {
+                    Text("Capability report unavailable.")
+                        .font(Theme.ui(12))
+                        .foregroundStyle(Theme.faint)
+                } else {
+                    CapabilityStatusView(capabilities: capabilities)
+                        .padding(.top, Theme.s4)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier("settings.capabilities")
+        }
     }
 
     private var header: some View {
