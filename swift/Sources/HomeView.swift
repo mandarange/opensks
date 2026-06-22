@@ -73,7 +73,7 @@ struct HomeView: View {
             SectionHeader(title: "Start here")
             actionCard(
                 "Describe an autonomous run",
-                "Write an objective in the Composer and start a goal, direct, or naruto run.",
+                "Describe the change you want, then choose Quick Edit, Plan & Execute, or Parallel Build.",
                 "Focus composer", "sparkles"
             ) { state.focusObjective = true }
             actionCard(

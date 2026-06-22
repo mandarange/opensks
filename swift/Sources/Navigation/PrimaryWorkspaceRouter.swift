@@ -32,7 +32,7 @@ struct PrimaryWorkspaceRouter: View {
             case .runs:
                 RoutePlaceholderView(
                     headline: "Runs",
-                    detail: "Run history and the node-level pipeline view arrive in PR-029 / PR-030.",
+                    detail: "Run history and the node-level pipeline view are coming soon.",
                     systemImage: "sparkles"
                 )
             case .git:

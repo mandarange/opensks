@@ -353,18 +353,20 @@ enum RunMode: String, CaseIterable, Identifiable {
         case .naruto: return "naruto"
         }
     }
+    /// User-facing name (recovery directive §5.4). The internal `verb` keeps the
+    /// legacy CLI mapping; only the product label changes.
     var label: String {
         switch self {
-        case .goal: return "Goal"
-        case .direct: return "Direct"
-        case .naruto: return "Naruto"
+        case .goal: return "Plan & Execute"
+        case .direct: return "Quick Edit"
+        case .naruto: return "Parallel Build"
         }
     }
     var caption: String {
         switch self {
-        case .goal: return "Bounded goal-loop with stop policy and proof artifacts."
-        case .direct: return "Immediate single-pass execution."
-        case .naruto: return "Multi-wave agent coordination across lanes."
+        case .goal: return "Plan the change, then execute with proof artifacts."
+        case .direct: return "Make the change directly in a single pass."
+        case .naruto: return "Run several workers in parallel across lanes."
         }
     }
 }

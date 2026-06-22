@@ -100,50 +100,53 @@ private struct EditorTabView: View {
     let onClose: () -> Void
 
     var body: some View {
-        // The whole tile is one Button so clicking the background — not just the
-        // label — selects the tab. The close control is a sibling Button so both
-        // are independently hittable (no onTapGesture anywhere).
-        Button(action: onSelect) {
-            HStack(spacing: 7) {
-                Circle()
-                    .fill(document.language.dotColor)
-                    .frame(width: 6, height: 6)
-                Text(document.displayName)
-                    .font(Theme.ui(11.5, isActive ? .medium : .regular))
-                    .foregroundStyle(isActive ? Theme.text : Theme.muted)
-                if document.isDirty {
+        // Select and close are SIBLING buttons sharing the tab background — never
+        // a Button nested inside a Button (Appendix C rule 6), which collides the
+        // two hit targets. Each is independently hittable.
+        HStack(spacing: 4) {
+            Button(action: onSelect) {
+                HStack(spacing: 7) {
                     Circle()
-                        .fill(Theme.accent)
+                        .fill(document.language.dotColor)
                         .frame(width: 6, height: 6)
-                        .accessibilityLabel("unsaved changes")
+                    Text(document.displayName)
+                        .font(Theme.ui(11.5, isActive ? .medium : .regular))
+                        .foregroundStyle(isActive ? Theme.text : Theme.muted)
+                    if document.isDirty {
+                        Circle()
+                            .fill(Theme.accent)
+                            .frame(width: 6, height: 6)
+                            .accessibilityLabel("unsaved changes")
+                    }
                 }
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(Theme.muted)
-                        .frame(width: 16, height: 16)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Close \(document.displayName)")
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, Theme.s10)
-            .padding(.vertical, Theme.s6)
-            .frame(maxHeight: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.rSm)
-                    .fill(isActive ? Theme.editor : Color.clear)
-            )
-            .overlay(alignment: .top) {
-                if isActive {
-                    Rectangle().fill(Theme.accent).frame(height: 2)
-                }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Open \(document.displayName)")
+            .accessibilityAddTraits(isActive ? [.isSelected] : [])
+
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Theme.muted)
+                    .frame(width: 16, height: 16)
+                    .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close \(document.displayName)")
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Open \(document.displayName)")
-        .accessibilityAddTraits(isActive ? [.isSelected] : [])
+        .padding(.horizontal, Theme.s10)
+        .padding(.vertical, Theme.s6)
+        .frame(maxHeight: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.rSm)
+                .fill(isActive ? Theme.editor : Color.clear)
+        )
+        .overlay(alignment: .top) {
+            if isActive {
+                Rectangle().fill(Theme.accent).frame(height: 2)
+            }
+        }
     }
 }
 

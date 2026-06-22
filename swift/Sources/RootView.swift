@@ -48,6 +48,10 @@ struct RootView: View {
             // Bind the Vault store (PR-042) to the same resolved CLI + workspace,
             // then read this workspace's vault inventory (summaries + redacted vaults).
             coordinator.bindVault(cli: state.cli, workspace: state.workspace)
+            // Bind the Design Studio to the resolved CLI + workspace. Without this
+            // the studio kept its init-time process-cwd CLI path, so a packaged
+            // .app drove the wrong binary/cwd (DESIGN-001).
+            coordinator.bindDesignStudio(cli: state.cli, workspace: state.workspace)
         }
         .background(globalShortcuts)
         .sheet(isPresented: $state.showPalette) { CommandPalette() }
