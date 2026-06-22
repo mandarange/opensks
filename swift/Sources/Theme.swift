@@ -47,6 +47,9 @@ enum Theme {
     static let stroke = GeneratedDesignTokens.colorBorderSubtle
     static let strokeSoft = GeneratedDesignTokens.colorBorderStrong
     static let seam = Color(hex: "2A605A")
+    /// Keyboard-focus ring token (the generated `colorFocus`). Used by previews of
+    /// the focused control state so focus is shown by a ring, not colour alone.
+    static let focusRing = GeneratedDesignTokens.colorFocus
 
     // Text.
     static let text = GeneratedDesignTokens.colorTextPrimary

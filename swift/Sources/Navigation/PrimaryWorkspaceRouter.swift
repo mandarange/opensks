@@ -41,13 +41,13 @@ struct PrimaryWorkspaceRouter: View {
                 GitStatusView(store: coordinator.git)
                     .onAppear { coordinator.git.refresh() }
             case .design:
-                // PR-039: the LOCAL, human-reviewed design IMPORT surface. A package
-                // is quarantined + validated first, its provenance shown, and it is
-                // promoted to the registry ONLY after the operator explicitly
-                // approves. The wider Design Studio (tokens, components, audit) lands
-                // in PR-037 / PR-038 / PR-040.
-                DesignImportView(store: coordinator.designImport)
-                    .onAppear { Task { await coordinator.designImport.refreshStatus() } }
+                // PR-040: the Design Studio — a catalog sidebar + detail tabs
+                // (Tokens / Components / Audit / Revisions). Activation is ATOMIC: a
+                // failing audit blocks it and keeps the previously active package.
+                // The PR-039 LOCAL, human-reviewed IMPORT surface remains reachable
+                // (quarantine → review → promote feeds the catalog).
+                DesignStudioView(store: coordinator.designStudio)
+                    .onAppear { Task { await coordinator.designStudio.refreshActiveStatus() } }
             case .intelligence:
                 RoutePlaceholderView(
                     headline: "Project Intelligence",

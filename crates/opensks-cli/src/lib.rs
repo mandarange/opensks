@@ -1721,6 +1721,97 @@ fn run_scheduler_recover_command(args: &[String], cwd: &Path) -> Result<CliOutpu
     })
 }
 
+/// `opensks design audit|activate|active-status|revision-{propose,accept,reject,
+/// rollback}` (PR-040). Audits a package, atomically activates it (a failing
+/// audit blocks activation and leaves the previous active package in place), and
+/// manages proof-linked design revisions. All logic lives in opensks-design.
+pub fn run_design_studio_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    const USAGE: &str = "usage: opensks design audit|activate|active-status|revision-propose|revision-accept|revision-reject|revision-rollback ...";
+    let subcommand = args
+        .first()
+        .map(String::as_str)
+        .ok_or_else(|| CliError::Usage(USAGE.to_string()))?;
+    let flag = |name: &str| -> Option<String> {
+        args.iter()
+            .position(|arg| arg == name)
+            .and_then(|index| args.get(index + 1))
+            .cloned()
+    };
+    let workspace = flag("--workspace")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cwd.to_path_buf());
+    let registry = opensks_design::DesignRegistry::with_default_order(&workspace, None);
+    let opt = |value: &Option<String>| -> String {
+        match value {
+            Some(inner) => json_string(inner),
+            None => "null".to_string(),
+        }
+    };
+    match subcommand {
+        "audit" => {
+            let id = flag("--package").ok_or_else(|| CliError::Usage(USAGE.to_string()))?;
+            let resolved = registry
+                .resolve(&id)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            let tokens = resolved
+                .load_tokens()
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            let components = resolved
+                .load_components()
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            let report = opensks_design::audit_package(&id, &tokens, components.as_ref())
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            Ok(CliOutput {
+                stdout: report.to_json() + "\n",
+            })
+        }
+        "activate" => {
+            let id = flag("--package").ok_or_else(|| CliError::Usage(USAGE.to_string()))?;
+            let revision = flag("--revision");
+            match opensks_design::activate_package(&workspace, &registry, &id, revision.as_deref())
+            {
+                Ok(outcome) => Ok(CliOutput {
+                    stdout: format!(
+                        "{{\"schema\":\"opensks.design-activate.v1\",\"activated\":true,\"package_id\":{},\"previous_active\":{},\"audit_passed\":{}}}\n",
+                        json_string(&outcome.package_id),
+                        opt(&outcome.previous_active),
+                        outcome.audit.passed()
+                    ),
+                }),
+                Err(error) => Err(CliError::Invalid(error.to_string())),
+            }
+        }
+        "active-status" => {
+            let marker = opensks_design::read_active(&workspace)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            Ok(CliOutput {
+                stdout: marker.to_json() + "\n",
+            })
+        }
+        "revision-propose" => {
+            let id = flag("--package").ok_or_else(|| CliError::Usage(USAGE.to_string()))?;
+            let revision = opensks_design::propose_revision(&workspace, &id)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            Ok(CliOutput {
+                stdout: revision.to_json() + "\n",
+            })
+        }
+        "revision-accept" | "revision-reject" | "revision-rollback" => {
+            let id = flag("--revision").ok_or_else(|| CliError::Usage(USAGE.to_string()))?;
+            let revision = match subcommand {
+                "revision-accept" => opensks_design::accept_revision(&workspace, &id),
+                "revision-reject" => opensks_design::reject_revision(&workspace, &id),
+                _ => opensks_design::rollback_revision(&workspace, &id),
+            }
+            .map_err(|error| CliError::Invalid(error.to_string()))?;
+            Ok(CliOutput {
+                stdout: revision.to_json() + "\n",
+            })
+        }
+        _ => Err(CliError::Usage(USAGE.to_string())),
+    }
+}
+
 /// `opensks design import|import-approve|import-reject|import-status` — the
 /// human-reviewed design package quarantine pipeline (PR-039). The security
 /// logic lives in opensks-design::import; this only parses flags, calls it, and

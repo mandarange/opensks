@@ -36,6 +36,13 @@ final class AppCoordinator: ObservableObject {
     /// `bindDesignImport(cli:workspace:)` once `AppState` resolves them.
     let designImport: DesignImportStore
 
+    /// The Design Studio store (PR-040). Drives the catalog → tokens / components /
+    /// audit / revisions surface, with ATOMIC activation (a failing audit blocks it
+    /// and keeps the previous active package). Starts with a live service rooted at
+    /// the process working directory; rebound to the resolved workspace + bundled CLI
+    /// via `bindDesignStudio(cli:workspace:)` once `AppState` resolves them.
+    let designStudio: DesignStudioStore
+
     init() {
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
         let cli = cwd.appendingPathComponent("target/debug/opensks")
@@ -47,6 +54,10 @@ final class AppCoordinator: ObservableObject {
         )
         designImport = DesignImportStore(
             service: LiveDesignImportService(cli: cli, workspace: cwd)
+        )
+        designStudio = DesignStudioStore(
+            service: LiveDesignStudioService(cli: cli, workspace: cwd),
+            catalog: AppCoordinator.seedDesignCatalog()
         )
     }
 
@@ -68,6 +79,51 @@ final class AppCoordinator: ObservableObject {
     /// and re-read the quarantine listing.
     func bindDesignImport(cli: URL, workspace: URL) {
         designImport.rebind(service: LiveDesignImportService(cli: cli, workspace: workspace))
+    }
+
+    /// Rebind the Design Studio store to the resolved workspace + bundled CLI and
+    /// re-read the active design package.
+    func bindDesignStudio(cli: URL, workspace: URL) {
+        designStudio.rebind(service: LiveDesignStudioService(cli: cli, workspace: workspace))
+    }
+
+    /// The catalog of design packages shown in the Design Studio sidebar. Seeded
+    /// with the canonical live package (`opensks-studio-dark`) whose tokens drive
+    /// the app, so the Tokens tab has real content. Additional promoted packages
+    /// arrive once the registry listing is wired.
+    static func seedDesignCatalog() -> [DesignPackage] {
+        [
+            DesignPackage(
+                packageId: "opensks-studio-dark",
+                title: "OpenSKS Studio (Dark)",
+                tokens: liveStudioDarkTokens()
+            )
+        ]
+    }
+
+    /// The live `opensks-studio-dark` token paths/values, read from the generated
+    /// tokens so the editor reflects the compiled source of truth.
+    private static func liveStudioDarkTokens() -> [DesignTokenEntry] {
+        [
+            DesignTokenEntry(path: "color.canvas", value: "#0E1015"),
+            DesignTokenEntry(path: "color.surface.base", value: "#13161B"),
+            DesignTokenEntry(path: "color.surface.sidebar", value: "#101216"),
+            DesignTokenEntry(path: "color.surface.raised", value: "#181B21"),
+            DesignTokenEntry(path: "color.border.subtle", value: "#262A32"),
+            DesignTokenEntry(path: "color.border.strong", value: "#2C313A"),
+            DesignTokenEntry(path: "color.focus", value: "#5EDEC4"),
+            DesignTokenEntry(path: "color.text.primary", value: "#E9EDF3"),
+            DesignTokenEntry(path: "color.text.secondary", value: "#BCC4D0"),
+            DesignTokenEntry(path: "color.text.muted", value: "#7E8796"),
+            DesignTokenEntry(path: "color.accent.primary", value: "#5EDEC4"),
+            DesignTokenEntry(path: "color.accent.secondary", value: "#9D8EF5"),
+            DesignTokenEntry(path: "color.status.success", value: "#5EDEC4"),
+            DesignTokenEntry(path: "color.status.warning", value: "#E0B25C"),
+            DesignTokenEntry(path: "color.status.danger", value: "#E0876E"),
+            DesignTokenEntry(path: "color.status.running", value: "#70B0F4"),
+            DesignTokenEntry(path: "radius.control", value: "9"),
+            DesignTokenEntry(path: "radius.card", value: "12")
+        ]
     }
 
     /// Wire the Git studio (PR-035 + PR-036) to the rest of the app: the editor

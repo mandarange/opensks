@@ -10,11 +10,22 @@
 //! engine. The crate must not depend on the Swift app or the root `opensks`
 //! binary.
 
+pub mod activation;
+pub mod audit;
 pub mod compiler;
 pub mod contracts;
 pub mod import;
 pub mod registry;
+pub mod revision;
 
+pub use activation::{
+    ActivationError, ActivationOutcome, ActiveMarker, DESIGN_ACTIVE_SCHEMA, activate_package,
+    read_active,
+};
+pub use audit::{
+    DESIGN_AUDIT_SCHEMA, DesignAuditError, DesignAuditReport, DesignFinding, FindingKind, Severity,
+    audit_package, contrast_ratio,
+};
 pub use compiler::{
     DesignCompileError, DesignContext, ResolvedTokenSet, build_design_context_pack,
     compile_css_tokens, pin_design_context, resolve_token_set, verify_design_context_pin,
@@ -32,6 +43,10 @@ pub use registry::{
     DesignRegistry, DesignRegistryError, MANIFEST_FILE_NAME, NormalizedDesign, PackageProvenance,
     ResolvedPackage, content_hash, is_valid_package_id, normalize_legacy_design, validate_package,
     validate_relative_file,
+};
+pub use revision::{
+    DESIGN_REVISION_SCHEMA, Revision, RevisionError, RevisionState, accept_revision, load_revision,
+    propose_revision, reject_revision, rollback_revision,
 };
 
 /// Map a token path (`color.text.primary`, `size.hit_target.primary`) to a

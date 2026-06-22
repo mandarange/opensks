@@ -1271,6 +1271,22 @@ fn run_design_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksE
     if let Some(sub) = args.first().map(String::as_str) {
         if matches!(
             sub,
+            "audit"
+                | "activate"
+                | "active-status"
+                | "revision-propose"
+                | "revision-accept"
+                | "revision-reject"
+                | "revision-rollback"
+        ) {
+            let output =
+                opensks_cli::run_design_studio_command(args, cwd).map_err(convert_cli_error)?;
+            return Ok(CliOutput {
+                stdout: output.stdout,
+            });
+        }
+        if matches!(
+            sub,
             "import" | "import-approve" | "import-reject" | "import-status"
         ) {
             let output =

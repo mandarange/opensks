@@ -161,6 +161,14 @@ impl DesignRegistry {
                 continue;
             }
             let manifest = validate_package(id, &package_dir)?;
+            // Store the CANONICAL package dir so use-time reads (load_tokens /
+            // load_components) re-validate containment against the same canonical
+            // prefix the candidate paths canonicalize to. Without this, a
+            // workspace under a symlinked root (e.g. macOS /var -> /private/var)
+            // makes every referenced file look like a path escape. validate_package
+            // already canonicalized successfully, so this cannot fail; fall back to
+            // the original on the impossible error.
+            let package_dir = package_dir.canonicalize().unwrap_or(package_dir);
             return Ok(ResolvedPackage {
                 manifest,
                 package_dir,
