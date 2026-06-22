@@ -324,6 +324,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "opensks-stream"
+version = "0.1.0"
+dependencies = [
+ "opensks-contracts",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "opensks-testkit"
 version = "0.1.0"
 

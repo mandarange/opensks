@@ -1,0 +1,263 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EngineStreamFrame",
+  "description": "The v2 stream wire envelope.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "conversation_id",
+        "cursor",
+        "frame_type",
+        "project_id",
+        "protocol_version",
+        "request_id",
+        "schema",
+        "stream_id"
+      ],
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "cursor": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "frame_type": {
+          "type": "string",
+          "enum": [
+            "stream_opened"
+          ]
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "protocol_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema": {
+          "type": "string"
+        },
+        "stream_id": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "cursor",
+        "event",
+        "frame_type",
+        "schema",
+        "stream_id"
+      ],
+      "properties": {
+        "cursor": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "event": true,
+        "frame_type": {
+          "type": "string",
+          "enum": [
+            "event"
+          ]
+        },
+        "schema": {
+          "type": "string"
+        },
+        "stream_id": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "cursor",
+        "frame_type",
+        "projection",
+        "schema",
+        "stream_id"
+      ],
+      "properties": {
+        "cursor": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "frame_type": {
+          "type": "string",
+          "enum": [
+            "snapshot"
+          ]
+        },
+        "projection": true,
+        "schema": {
+          "type": "string"
+        },
+        "stream_id": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "cursor",
+        "frame_type",
+        "schema",
+        "server_time_ms",
+        "stream_id"
+      ],
+      "properties": {
+        "cursor": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "frame_type": {
+          "type": "string",
+          "enum": [
+            "heartbeat"
+          ]
+        },
+        "schema": {
+          "type": "string"
+        },
+        "server_time_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "stream_id": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "cursor",
+        "frame_type",
+        "reason_code",
+        "schema",
+        "stream_id"
+      ],
+      "properties": {
+        "cursor": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "frame_type": {
+          "type": "string",
+          "enum": [
+            "stream_completed"
+          ]
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "stream_id": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "cursor",
+        "error",
+        "frame_type",
+        "resumable",
+        "schema",
+        "stream_id"
+      ],
+      "properties": {
+        "cursor": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "error": {
+          "$ref": "#/definitions/PublicEngineError"
+        },
+        "frame_type": {
+          "type": "string",
+          "enum": [
+            "stream_failed"
+          ]
+        },
+        "resumable": {
+          "type": "boolean"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "stream_id": {
+          "type": "string"
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "PublicEngineError": {
+      "description": "A concise, safe error for the wire (no secrets / private paths).",
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "redacted",
+        "retryable",
+        "schema"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "message": {
+          "type": "string"
+        },
+        "redacted": {
+          "type": "boolean"
+        },
+        "remediation": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "schema": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

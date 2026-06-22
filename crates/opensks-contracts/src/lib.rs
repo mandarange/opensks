@@ -1609,6 +1609,7 @@ pub struct ReleaseProof {
 
 pub mod conversation;
 pub mod project;
+pub mod stream;
 
 pub use conversation::{
     CONVERSATION_DIGEST_SCHEMA, CONVERSATION_MESSAGE_SCHEMA, CONVERSATION_SUMMARY_SCHEMA,
@@ -1617,6 +1618,9 @@ pub use conversation::{
     TitleSource,
 };
 pub use project::{PROJECT_SUMMARY_SCHEMA, ProjectSummary};
+pub use stream::{
+    ENGINE_STREAM_FRAME_SCHEMA, EngineStreamFrame, PublicEngineError, STREAM_PROTOCOL_VERSION,
+};
 
 pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> {
     Ok(vec![
@@ -1635,6 +1639,10 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "conversation-digest.schema.json",
             serde_json::to_string_pretty(&schema_for!(ConversationDigest))?,
+        ),
+        (
+            "engine-stream-frame.schema.json",
+            serde_json::to_string_pretty(&schema_for!(EngineStreamFrame))?,
         ),
         (
             "engine-request.schema.json",

@@ -22,6 +22,7 @@ members = [
   "crates/opensks-reasoning",
   "crates/opensks-retention",
   "crates/opensks-scheduler",
+  "crates/opensks-stream",
   "crates/opensks-testkit",
   "crates/opensks-triwiki",
   "xtask",
