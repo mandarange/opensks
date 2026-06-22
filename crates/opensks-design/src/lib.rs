@@ -12,6 +12,7 @@
 
 pub mod compiler;
 pub mod contracts;
+pub mod import;
 pub mod registry;
 
 pub use compiler::{
@@ -21,6 +22,11 @@ pub use compiler::{
 pub use contracts::{
     DESIGN_PROJECT_SCHEMA, DESIGN_TOKEN_SET_SCHEMA, DesignContractError, DesignProjectFiles,
     DesignProjectManifest, DesignSecurity, DesignSource, DesignToken, DesignTokenSet,
+};
+pub use import::{
+    ApproveOutcome, ImportError, ImportKind, ImportLimits, ImportOutcome, Provenance,
+    QuarantineEntry, QuarantineStatus, RejectedReason, approve_import, list_quarantines,
+    quarantine_import, reject_import, render_status_json,
 };
 pub use registry::{
     DesignRegistry, DesignRegistryError, MANIFEST_FILE_NAME, NormalizedDesign, PackageProvenance,

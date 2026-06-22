@@ -41,11 +41,13 @@ struct PrimaryWorkspaceRouter: View {
                 GitStatusView(store: coordinator.git)
                     .onAppear { coordinator.git.refresh() }
             case .design:
-                RoutePlaceholderView(
-                    headline: "Design Systems",
-                    detail: "The Design Studio (tokens, components, audit) arrives in PR-037 → PR-040.",
-                    systemImage: "paintpalette"
-                )
+                // PR-039: the LOCAL, human-reviewed design IMPORT surface. A package
+                // is quarantined + validated first, its provenance shown, and it is
+                // promoted to the registry ONLY after the operator explicitly
+                // approves. The wider Design Studio (tokens, components, audit) lands
+                // in PR-037 / PR-038 / PR-040.
+                DesignImportView(store: coordinator.designImport)
+                    .onAppear { Task { await coordinator.designImport.refreshStatus() } }
             case .intelligence:
                 RoutePlaceholderView(
                     headline: "Project Intelligence",

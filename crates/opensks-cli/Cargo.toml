@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 opensks-contracts = { path = "../opensks-contracts" }
+opensks-design = { path = "../opensks-design" }
 opensks-codegraph = { path = "../opensks-codegraph" }
 opensks-context = { path = "../opensks-context" }
 opensks-conversation = { path = "../opensks-conversation" }

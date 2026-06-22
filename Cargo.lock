@@ -135,6 +135,7 @@ dependencies = [
  "opensks-contracts",
  "opensks-conversation",
  "opensks-daemon",
+ "opensks-design",
  "opensks-engine",
  "opensks-event-store",
  "opensks-file-service",

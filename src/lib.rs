@@ -1268,6 +1268,18 @@ fn run_security_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSk
 }
 
 fn run_design_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
+    if let Some(sub) = args.first().map(String::as_str) {
+        if matches!(
+            sub,
+            "import" | "import-approve" | "import-reject" | "import-status"
+        ) {
+            let output =
+                opensks_cli::run_design_import_command(args, cwd).map_err(convert_cli_error)?;
+            return Ok(CliOutput {
+                stdout: output.stdout,
+            });
+        }
+    }
     require_exact_subcommand(args, "qa", "usage: opensks design qa")?;
     let dir = cwd.join(OPEN_SKSDIR).join("design");
     fs::create_dir_all(&dir)?;

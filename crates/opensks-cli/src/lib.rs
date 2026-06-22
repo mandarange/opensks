@@ -1721,6 +1721,75 @@ fn run_scheduler_recover_command(args: &[String], cwd: &Path) -> Result<CliOutpu
     })
 }
 
+/// `opensks design import|import-approve|import-reject|import-status` — the
+/// human-reviewed design package quarantine pipeline (PR-039). The security
+/// logic lives in opensks-design::import; this only parses flags, calls it, and
+/// prints the contract JSON. A security rejection is an Ok outcome whose entry
+/// carries status:rejected + a rejected_reason; only operator errors (e.g. a
+/// missing source) are CliErrors.
+pub fn run_design_import_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    const USAGE: &str =
+        "usage: opensks design import|import-approve|import-reject|import-status ...";
+    let subcommand = args
+        .first()
+        .map(String::as_str)
+        .ok_or_else(|| CliError::Usage(USAGE.to_string()))?;
+    let flag = |name: &str| -> Option<String> {
+        args.iter()
+            .position(|arg| arg == name)
+            .and_then(|index| args.get(index + 1))
+            .cloned()
+    };
+    let workspace = flag("--workspace")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cwd.to_path_buf());
+    match subcommand {
+        "import" => {
+            let source = flag("--source").ok_or_else(|| CliError::Usage(USAGE.to_string()))?;
+            let kind_str = flag("--kind").unwrap_or_else(|| "local".to_string());
+            let kind = opensks_design::ImportKind::parse(&kind_str)
+                .ok_or_else(|| CliError::Invalid(format!("unknown import kind: {kind_str}")))?;
+            let limits = opensks_design::ImportLimits::default();
+            let outcome =
+                opensks_design::quarantine_import(&workspace, Path::new(&source), kind, &limits)
+                    .map_err(|error| CliError::Invalid(error.to_string()))?;
+            Ok(CliOutput {
+                stdout: outcome.entry.to_json() + "\n",
+            })
+        }
+        "import-approve" => {
+            let id = flag("--quarantine").ok_or_else(|| CliError::Usage(USAGE.to_string()))?;
+            let outcome = opensks_design::approve_import(&workspace, &id)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            Ok(CliOutput {
+                stdout: format!(
+                    "{{\"schema\":\"opensks.design-import-approve.v1\",\"promoted\":{},\"package_id\":{}}}\n",
+                    outcome.promoted,
+                    json_string(&outcome.package_id)
+                ),
+            })
+        }
+        "import-reject" => {
+            let id = flag("--quarantine").ok_or_else(|| CliError::Usage(USAGE.to_string()))?;
+            let deleted = opensks_design::reject_import(&workspace, &id)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            Ok(CliOutput {
+                stdout: format!(
+                    "{{\"schema\":\"opensks.design-import-reject.v1\",\"rejected\":true,\"deleted\":{deleted}}}\n"
+                ),
+            })
+        }
+        "import-status" => {
+            let entries = opensks_design::list_quarantines(&workspace)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            Ok(CliOutput {
+                stdout: opensks_design::render_status_json(&entries) + "\n",
+            })
+        }
+        _ => Err(CliError::Usage(USAGE.to_string())),
+    }
+}
+
 pub fn run_patch_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
     let subcommand = args
         .first()

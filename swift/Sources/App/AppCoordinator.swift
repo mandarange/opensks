@@ -30,6 +30,12 @@ final class AppCoordinator: ObservableObject {
     /// bundled CLI via `bindGit(cli:workspace:)` once `AppState` resolves them.
     let git: GitStudioStore
 
+    /// The LOCAL design-import store (PR-039). Drives the quarantine → human-review
+    /// → promote flow. Starts with a live service rooted at the process working
+    /// directory; rebound to the resolved workspace + bundled CLI via
+    /// `bindDesignImport(cli:workspace:)` once `AppState` resolves them.
+    let designImport: DesignImportStore
+
     init() {
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
         let cli = cwd.appendingPathComponent("target/debug/opensks")
@@ -38,6 +44,9 @@ final class AppCoordinator: ObservableObject {
         )
         git = GitStudioStore(
             service: LiveGitService(cli: cli, workspace: cwd)
+        )
+        designImport = DesignImportStore(
+            service: LiveDesignImportService(cli: cli, workspace: cwd)
         )
     }
 
@@ -53,6 +62,12 @@ final class AppCoordinator: ObservableObject {
     /// Rebind the Git studio to the resolved workspace + bundled CLI and refresh.
     func bindGit(cli: URL, workspace: URL) {
         git.rebind(service: LiveGitService(cli: cli, workspace: workspace))
+    }
+
+    /// Rebind the LOCAL design-import store to the resolved workspace + bundled CLI
+    /// and re-read the quarantine listing.
+    func bindDesignImport(cli: URL, workspace: URL) {
+        designImport.rebind(service: LiveDesignImportService(cli: cli, workspace: workspace))
     }
 
     /// Wire the Git studio (PR-035 + PR-036) to the rest of the app: the editor
