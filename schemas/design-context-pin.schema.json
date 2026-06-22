@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DesignContextPin",
+  "description": "A pin binding a [`DesignContextPack`] to the identity that produced it: a model id and a graph/revision marker, plus a stable content hash. A pinned context can be referenced and re-verified later without re-running selection.",
+  "type": "object",
+  "required": [
+    "design_system_id",
+    "graph_revision",
+    "model_id",
+    "pack_hash",
+    "schema"
+  ],
+  "properties": {
+    "design_system_id": {
+      "description": "The design system the pinned pack was selected from.",
+      "type": "string"
+    },
+    "graph_revision": {
+      "description": "The graph or design revision this context was pinned at.",
+      "type": "string"
+    },
+    "model_id": {
+      "description": "The model id this context was pinned for.",
+      "type": "string"
+    },
+    "pack_hash": {
+      "description": "Stable `fnv1a64:` digest over the pin identity and the pack body.",
+      "type": "string"
+    },
+    "schema": {
+      "description": "Must equal [`DESIGN_CONTEXT_PIN_SCHEMA`].",
+      "type": "string"
+    }
+  }
+}

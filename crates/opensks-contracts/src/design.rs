@@ -27,6 +27,10 @@ pub const DESIGN_PACKAGE_MANIFEST_SCHEMA: &str = "opensks.design-package.v1";
 pub const DESIGN_PACKAGE_TOKENS_SCHEMA: &str = "opensks.design-token-set.v1";
 /// `schema` value for a design-package component catalog.
 pub const DESIGN_PACKAGE_COMPONENTS_SCHEMA: &str = "opensks.component-catalog.v1";
+/// `schema` value for a design-context pack (PR-038).
+pub const DESIGN_CONTEXT_PACK_SCHEMA: &str = "opensks.design-context-pack.v1";
+/// `schema` value for a design-context pin (PR-038).
+pub const DESIGN_CONTEXT_PIN_SCHEMA: &str = "opensks.design-context-pin.v1";
 
 /// Where a package's tokens/components/design files are found, relative to the
 /// package directory. Absolute paths and `..` are contract violations the
@@ -183,6 +187,73 @@ pub struct DesignPackageComponents {
     pub components: Vec<DesignPackageComponent>,
 }
 
+/// What kind of design datum a [`DesignContextItem`] carries. Tokens and
+/// components are selected into a [`DesignContextPack`] by relevance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DesignContextItemKind {
+    Token,
+    Component,
+}
+
+/// A single relevant design datum selected into a context pack: a stable `ref`
+/// (token path or component id), the rendered `text` the model sees, and the
+/// integer `char_cost` that line contributes to the pack budget. Deterministic
+/// and self-describing so a pack can be diffed and pinned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DesignContextItem {
+    pub kind: DesignContextItemKind,
+    /// Token path (`color.canvas`) or component id (`button.primary`).
+    pub reference: String,
+    /// One-line rendering of the datum included in the pack body.
+    pub text: String,
+    /// Number of characters `text` contributes to the budget (`text.len() + 1`
+    /// for the trailing newline), so budgets are exact and platform-neutral.
+    pub char_cost: u32,
+}
+
+/// A budget-bounded, relevance-selected slice of a design context. Produced by
+/// the design compiler's prompt adapter: only the items most relevant to a query
+/// that fit the declared budget are present, in a deterministic order, so the
+/// same `(context, query, budget)` always yields a byte-identical pack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DesignContextPack {
+    /// Must equal [`DESIGN_CONTEXT_PACK_SCHEMA`].
+    pub schema: String,
+    /// The design system the pack was selected from.
+    pub design_system_id: String,
+    /// The lowercased relevance query the pack answers.
+    pub query: String,
+    /// Maximum number of items the pack may contain (item budget).
+    pub max_items: u32,
+    /// Maximum number of characters the pack body may contain (char budget).
+    pub max_chars: u32,
+    /// Selected items, most relevant first then by reference for stable ties.
+    #[serde(default)]
+    pub items: Vec<DesignContextItem>,
+    /// Total characters across all selected items (`<= max_chars`).
+    pub total_chars: u32,
+    /// Rendered prompt body: one item `text` per line, deterministic order.
+    pub body: String,
+}
+
+/// A pin binding a [`DesignContextPack`] to the identity that produced it: a
+/// model id and a graph/revision marker, plus a stable content hash. A pinned
+/// context can be referenced and re-verified later without re-running selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DesignContextPin {
+    /// Must equal [`DESIGN_CONTEXT_PIN_SCHEMA`].
+    pub schema: String,
+    /// The model id this context was pinned for.
+    pub model_id: String,
+    /// The graph or design revision this context was pinned at.
+    pub graph_revision: String,
+    /// The design system the pinned pack was selected from.
+    pub design_system_id: String,
+    /// Stable `fnv1a64:` digest over the pin identity and the pack body.
+    pub pack_hash: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +319,41 @@ mod tests {
         assert_eq!(tokens.design_system_id, components.design_system_id);
         let token_json = serde_json::to_string(&tokens).expect("tokens json");
         assert!(token_json.contains("\"type\":\"color\""));
+    }
+
+    #[test]
+    fn context_pack_and_pin_roundtrip() {
+        let pack = DesignContextPack {
+            schema: DESIGN_CONTEXT_PACK_SCHEMA.to_string(),
+            design_system_id: "demo".to_string(),
+            query: "color".to_string(),
+            max_items: 4,
+            max_chars: 200,
+            items: vec![DesignContextItem {
+                kind: DesignContextItemKind::Token,
+                reference: "color.canvas".to_string(),
+                text: "token color.canvas (color) = #000000".to_string(),
+                char_cost: 37,
+            }],
+            total_chars: 37,
+            body: "token color.canvas (color) = #000000".to_string(),
+        };
+        let json = serde_json::to_string(&pack).expect("pack json");
+        assert!(json.contains("\"schema\":\"opensks.design-context-pack.v1\""));
+        assert!(json.contains("\"kind\":\"token\""));
+        let decoded: DesignContextPack = serde_json::from_str(&json).expect("decode pack");
+        assert_eq!(decoded, pack);
+
+        let pin = DesignContextPin {
+            schema: DESIGN_CONTEXT_PIN_SCHEMA.to_string(),
+            model_id: "model-x".to_string(),
+            graph_revision: "rev-1".to_string(),
+            design_system_id: "demo".to_string(),
+            pack_hash: "fnv1a64:0000000000000000".to_string(),
+        };
+        let pin_json = serde_json::to_string(&pin).expect("pin json");
+        assert!(pin_json.contains("\"schema\":\"opensks.design-context-pin.v1\""));
+        let decoded_pin: DesignContextPin = serde_json::from_str(&pin_json).expect("decode pin");
+        assert_eq!(decoded_pin, pin);
     }
 }

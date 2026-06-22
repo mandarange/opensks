@@ -1625,10 +1625,11 @@ pub use conversation::{
     TitleSource,
 };
 pub use design::{
-    DESIGN_PACKAGE_COMPONENTS_SCHEMA, DESIGN_PACKAGE_MANIFEST_SCHEMA, DESIGN_PACKAGE_TOKENS_SCHEMA,
-    DesignContentHash, DesignPackageComponent, DesignPackageComponents, DesignPackageFiles,
-    DesignPackageManifest, DesignPackageSecurity, DesignPackageSource, DesignPackageToken,
-    DesignPackageTokens,
+    DESIGN_CONTEXT_PACK_SCHEMA, DESIGN_CONTEXT_PIN_SCHEMA, DESIGN_PACKAGE_COMPONENTS_SCHEMA,
+    DESIGN_PACKAGE_MANIFEST_SCHEMA, DESIGN_PACKAGE_TOKENS_SCHEMA, DesignContentHash,
+    DesignContextItem, DesignContextItemKind, DesignContextPack, DesignContextPin,
+    DesignPackageComponent, DesignPackageComponents, DesignPackageFiles, DesignPackageManifest,
+    DesignPackageSecurity, DesignPackageSource, DesignPackageToken, DesignPackageTokens,
 };
 pub use file::{
     ConflictResolution, FileServiceError, LineEnding, OPEN_TEXT_REQUEST_SCHEMA, OpenTextRequest,
@@ -1692,6 +1693,14 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "design-package-components.schema.json",
             serde_json::to_string_pretty(&schema_for!(DesignPackageComponents))?,
+        ),
+        (
+            "design-context-pack.schema.json",
+            serde_json::to_string_pretty(&schema_for!(DesignContextPack))?,
+        ),
+        (
+            "design-context-pin.schema.json",
+            serde_json::to_string_pretty(&schema_for!(DesignContextPin))?,
         ),
         (
             "open-text-request.schema.json",

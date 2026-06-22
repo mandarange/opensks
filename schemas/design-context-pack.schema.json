@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DesignContextPack",
+  "description": "A budget-bounded, relevance-selected slice of a design context. Produced by the design compiler's prompt adapter: only the items most relevant to a query that fit the declared budget are present, in a deterministic order, so the same `(context, query, budget)` always yields a byte-identical pack.",
+  "type": "object",
+  "required": [
+    "body",
+    "design_system_id",
+    "max_chars",
+    "max_items",
+    "query",
+    "schema",
+    "total_chars"
+  ],
+  "properties": {
+    "body": {
+      "description": "Rendered prompt body: one item `text` per line, deterministic order.",
+      "type": "string"
+    },
+    "design_system_id": {
+      "description": "The design system the pack was selected from.",
+      "type": "string"
+    },
+    "items": {
+      "description": "Selected items, most relevant first then by reference for stable ties.",
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DesignContextItem"
+      }
+    },
+    "max_chars": {
+      "description": "Maximum number of characters the pack body may contain (char budget).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "max_items": {
+      "description": "Maximum number of items the pack may contain (item budget).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "query": {
+      "description": "The lowercased relevance query the pack answers.",
+      "type": "string"
+    },
+    "schema": {
+      "description": "Must equal [`DESIGN_CONTEXT_PACK_SCHEMA`].",
+      "type": "string"
+    },
+    "total_chars": {
+      "description": "Total characters across all selected items (`<= max_chars`).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "DesignContextItem": {
+      "description": "A single relevant design datum selected into a context pack: a stable `ref` (token path or component id), the rendered `text` the model sees, and the integer `char_cost` that line contributes to the pack budget. Deterministic and self-describing so a pack can be diffed and pinned.",
+      "type": "object",
+      "required": [
+        "char_cost",
+        "kind",
+        "reference",
+        "text"
+      ],
+      "properties": {
+        "char_cost": {
+          "description": "Number of characters `text` contributes to the budget (`text.len() + 1` for the trailing newline), so budgets are exact and platform-neutral.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "kind": {
+          "$ref": "#/definitions/DesignContextItemKind"
+        },
+        "reference": {
+          "description": "Token path (`color.canvas`) or component id (`button.primary`).",
+          "type": "string"
+        },
+        "text": {
+          "description": "One-line rendering of the datum included in the pack body.",
+          "type": "string"
+        }
+      }
+    },
+    "DesignContextItemKind": {
+      "description": "What kind of design datum a [`DesignContextItem`] carries. Tokens and components are selected into a [`DesignContextPack`] by relevance.",
+      "type": "string",
+      "enum": [
+        "token",
+        "component"
+      ]
+    }
+  }
+}
