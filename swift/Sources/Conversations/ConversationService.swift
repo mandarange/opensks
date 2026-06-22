@@ -170,31 +170,22 @@ struct LiveConversationService: ConversationService {
     /// Off-main-actor process capture, mirroring `CLIRunner.capture` but also
     /// returning stderr + exit code so failures surface honestly.
     private static func capture(cli: URL, cwd: URL, args: [String]) async throws -> CaptureResult {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let proc = Process()
-                proc.executableURL = cli
-                proc.arguments = args
-                proc.currentDirectoryURL = cwd
-                let outPipe = Pipe()
-                let errPipe = Pipe()
-                proc.standardOutput = outPipe
-                proc.standardError = errPipe
-                do {
-                    try proc.run()
-                } catch {
-                    continuation.resume(throwing: ConversationServiceError.launchFailed(error.localizedDescription))
-                    return
-                }
-                let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                proc.waitUntilExit()
-                continuation.resume(returning: CaptureResult(
-                    stdout: outData,
-                    stderr: String(decoding: errData, as: UTF8.self),
-                    exitCode: proc.terminationStatus
-                ))
-            }
+        // Shared child-process runner: concurrent drain + cancel-kill (§19.2).
+        do {
+            let result = try await ProcessSupervisor().run(
+                ProcessSupervisor.Spec(
+                    executable: cli,
+                    arguments: args,
+                    workingDirectory: cwd
+                )
+            )
+            return CaptureResult(
+                stdout: result.stdout,
+                stderr: String(decoding: result.stderr, as: UTF8.self),
+                exitCode: result.exitCode
+            )
+        } catch {
+            throw ConversationServiceError.launchFailed(error.localizedDescription)
         }
     }
 }

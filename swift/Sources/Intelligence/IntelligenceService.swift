@@ -111,36 +111,27 @@ struct LiveIntelligenceService: IntelligenceService {
         let stderr: Data
     }
 
+    /// Shared child-process runner (concurrent drain + cancel-kill, §19.2).
+    private let supervisor = ProcessSupervisor()
+
     private func run(args: [String]) async throws -> ProcessResult {
-        let cli = self.cli
-        let workspace = self.workspace
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = cli
-                process.arguments = args
-                process.currentDirectoryURL = workspace
-                let outPipe = Pipe()
-                let errPipe = Pipe()
-                process.standardOutput = outPipe
-                process.standardError = errPipe
-                do {
-                    try process.run()
-                } catch {
-                    continuation.resume(throwing: IntelligenceServiceError.transport(
-                        message: "could not launch opensks intel: \(error.localizedDescription)"
-                    ))
-                    return
-                }
-                let out = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let err = errPipe.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-                continuation.resume(returning: ProcessResult(
-                    exitCode: process.terminationStatus,
-                    stdout: out,
-                    stderr: err
-                ))
-            }
+        do {
+            let result = try await supervisor.run(
+                ProcessSupervisor.Spec(
+                    executable: cli,
+                    arguments: args,
+                    workingDirectory: workspace
+                )
+            )
+            return ProcessResult(
+                exitCode: result.exitCode,
+                stdout: result.stdout,
+                stderr: result.stderr
+            )
+        } catch {
+            throw IntelligenceServiceError.transport(
+                message: "could not launch opensks intel: \(error.localizedDescription)"
+            )
         }
     }
 
