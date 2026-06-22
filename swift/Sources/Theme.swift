@@ -55,8 +55,12 @@ enum Theme {
     static let text = GeneratedDesignTokens.colorTextPrimary
     static let textSoft = GeneratedDesignTokens.colorTextSecondary
     static let muted = GeneratedDesignTokens.colorTextMuted
-    static let faint = Color(hex: "5A6473")
-    static let gutterText = Color(hex: "4A5260")
+    // Contrast-gated (recovery directive §17.3/§17.4): faint hints and gutter
+    // line numbers carry readable info, so they must clear 4.5:1 on their dark
+    // surfaces. The previous #5A6473 (3.18:1) and #4A5260 (2.45:1) failed; these
+    // targets pass (verified by ContrastTests).
+    static let faint = Color(hex: "7E8A9B")
+    static let gutterText = Color(hex: "8D98A8")
 
     // Accent + semantic.
     static let accent = GeneratedDesignTokens.colorAccentPrimary
