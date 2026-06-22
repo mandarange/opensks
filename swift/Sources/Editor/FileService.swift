@@ -175,42 +175,29 @@ struct LiveEditorFileService: EditorFileService {
         let stderr: Data
     }
 
+    /// Shared child-process runner: concurrent stdout/stderr drain + child
+    /// termination on Task cancellation (PROC-101/102/103, §19.2).
+    private let supervisor = ProcessSupervisor()
+
     private func run(args: [String], stdin: Data?) async throws -> ProcessResult {
-        let cli = self.cli
-        let workspace = self.workspace
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = cli
-                process.arguments = args
-                process.currentDirectoryURL = workspace
-                let outPipe = Pipe()
-                let errPipe = Pipe()
-                let inPipe = Pipe()
-                process.standardOutput = outPipe
-                process.standardError = errPipe
-                process.standardInput = inPipe
-                do {
-                    try process.run()
-                } catch {
-                    continuation.resume(throwing: EditorFileServiceError.transport(
-                        message: "could not launch opensks file: \(error.localizedDescription)"
-                    ))
-                    return
-                }
-                if let stdin {
-                    inPipe.fileHandleForWriting.write(stdin)
-                }
-                inPipe.fileHandleForWriting.closeFile()
-                let out = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let err = errPipe.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-                continuation.resume(returning: ProcessResult(
-                    exitCode: process.terminationStatus,
-                    stdout: out,
-                    stderr: err
-                ))
-            }
+        do {
+            let result = try await supervisor.run(
+                ProcessSupervisor.Spec(
+                    executable: cli,
+                    arguments: args,
+                    workingDirectory: workspace,
+                    stdin: stdin
+                )
+            )
+            return ProcessResult(
+                exitCode: result.exitCode,
+                stdout: result.stdout,
+                stderr: result.stderr
+            )
+        } catch {
+            throw EditorFileServiceError.transport(
+                message: "could not launch opensks file: \(error.localizedDescription)"
+            )
         }
     }
 
