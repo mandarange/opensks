@@ -615,6 +615,35 @@ impl ConversationRepository {
         Ok(rows.next()?.map(|r| r.get::<_, String>(0)).transpose()?)
     }
 
+    /// Durable per-thread settings JSON, or `None` when never set (the caller
+    /// applies its own default). Holds no secrets — only ids/refs.
+    pub fn get_thread_settings(&self, conversation_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT settings_json FROM conversation_settings WHERE conversation_id = ?1",
+        )?;
+        let mut rows = stmt.query(params![conversation_id])?;
+        Ok(rows.next()?.map(|r| r.get::<_, String>(0)).transpose()?)
+    }
+
+    /// Upsert durable per-thread settings (so model/mode/pipeline selections
+    /// survive relaunch — directive §5.7 / PR-048).
+    pub fn set_thread_settings(
+        &self,
+        conversation_id: &str,
+        settings_json: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO conversation_settings(conversation_id, settings_json, updated_at_ms)
+             VALUES(?1, ?2, ?3)
+             ON CONFLICT(conversation_id) DO UPDATE SET
+                 settings_json = excluded.settings_json,
+                 updated_at_ms = excluded.updated_at_ms",
+            params![conversation_id, settings_json, now_ms as i64],
+        )?;
+        Ok(())
+    }
+
     /// Record the identifiers produced for a turn under an idempotency key so a
     /// repeated `turn-start` with the same key can be replayed without a new run.
     pub fn record_turn_idempotency(

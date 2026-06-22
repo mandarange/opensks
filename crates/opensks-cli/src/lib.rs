@@ -2211,6 +2211,7 @@ struct ConversationCommandOptions {
     role: Option<String>,
     text: Option<String>,
     idempotency_key: Option<String>,
+    settings: Option<String>,
 }
 
 pub fn run_conversation_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
@@ -2382,6 +2383,50 @@ pub fn run_conversation_command(args: &[String], cwd: &Path) -> Result<CliOutput
                 "conversation_id": conversation,
                 "runs": runs_json,
             }))
+        }
+        "settings-get" => {
+            let conversation =
+                require_conversation_field(options.conversation.as_deref(), "--conversation")?;
+            let settings = match repo
+                .get_thread_settings(conversation)
+                .map_err(|error| CliError::Invalid(error.to_string()))?
+            {
+                Some(raw) => {
+                    serde_json::from_str::<opensks_contracts::ConversationThreadSettings>(&raw)
+                        .map_err(|error| {
+                            CliError::Invalid(format!(
+                                "stored thread settings are invalid: {error}"
+                            ))
+                        })?
+                }
+                None => {
+                    opensks_contracts::ConversationThreadSettings::default_for(conversation, now_ms)
+                }
+            };
+            conversation_output(&serde_json::to_value(&settings).map_err(|error| {
+                CliError::Invalid(format!("serialize thread settings: {error}"))
+            })?)
+        }
+        "settings-set" => {
+            let conversation =
+                require_conversation_field(options.conversation.as_deref(), "--conversation")?;
+            let raw = require_conversation_field(options.settings.as_deref(), "--settings")?;
+            // Validate by parsing into the typed contract, then store the
+            // normalized form (rejects unknown/garbage settings).
+            let mut settings: opensks_contracts::ConversationThreadSettings =
+                serde_json::from_str(raw).map_err(|error| {
+                    CliError::Invalid(format!("invalid thread settings json: {error}"))
+                })?;
+            settings.conversation_id = conversation.to_string();
+            settings.updated_at_ms = now_ms;
+            let normalized = serde_json::to_string(&settings).map_err(|error| {
+                CliError::Invalid(format!("serialize thread settings: {error}"))
+            })?;
+            repo.set_thread_settings(conversation, &normalized, now_ms)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            conversation_output(&serde_json::to_value(&settings).map_err(|error| {
+                CliError::Invalid(format!("serialize thread settings: {error}"))
+            })?)
         }
         other => Err(CliError::Usage(format!(
             "unknown conversation subcommand `{other}`\n\n{}",
@@ -2570,7 +2615,9 @@ pub fn conversation_usage() -> &'static str {
         "       opensks conversation messages --workspace <path> --conversation <id> [--before-sequence S] [--limit N]\n",
         "       opensks conversation append --workspace <path> --conversation <id> --role user|assistant|system --text \"<text>\"\n",
         "       opensks conversation turn-start --workspace <path> --conversation <id> --text \"<text>\" [--idempotency-key <key>]\n",
-        "       opensks conversation runs --workspace <path> --conversation <id>\n"
+        "       opensks conversation runs --workspace <path> --conversation <id>\n",
+        "       opensks conversation settings-get --workspace <path> --conversation <id>\n",
+        "       opensks conversation settings-set --workspace <path> --conversation <id> --settings '<json>'\n"
     )
 }
 
@@ -2619,6 +2666,10 @@ fn parse_conversation_options(args: &[String]) -> Result<ConversationCommandOpti
             "--idempotency-key" => {
                 options.idempotency_key =
                     Some(conversation_flag_value(args, idx, flag)?.to_string());
+                idx += 2;
+            }
+            "--settings" => {
+                options.settings = Some(conversation_flag_value(args, idx, flag)?.to_string());
                 idx += 2;
             }
             other => {
@@ -5873,6 +5924,70 @@ mod tests {
             !content.contains("work items"),
             "leftover fake summary: {content}"
         );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn thread_settings_default_then_persist_and_survive_relaunch() {
+        let root = temp_workspace("opensks-cli-settings");
+        let cid = create_conversation_id(&root);
+
+        // Unset thread → a safe default (Auto model, Worktree mode).
+        let default = conversation_json(&["settings-get", "--conversation", &cid], &root);
+        assert_eq!(default["schema"], "opensks.thread-settings.v1");
+        assert_eq!(default["model_selection"]["mode"], "auto");
+        assert_eq!(default["execution_mode"], "worktree");
+
+        // Persist explicit settings.
+        let payload = serde_json::json!({
+            "schema": "opensks.thread-settings.v1",
+            "conversation_id": cid,
+            "model_selection": {"mode": "pinned", "model_id": "openai/gpt-4o-mini", "fallback_model_ids": []},
+            "reasoning_effort": "deep",
+            "execution_mode": "local",
+            "pipeline_id": "parallel-build",
+            "max_parallelism": 8,
+            "verifier_count": 2,
+            "tool_policy_id": "project-default",
+            "approval_policy_id": "safe-interactive",
+            "updated_at_ms": 0
+        })
+        .to_string();
+        let set = conversation_json(
+            &[
+                "settings-set",
+                "--conversation",
+                &cid,
+                "--settings",
+                &payload,
+            ],
+            &root,
+        );
+        assert_eq!(set["pipeline_id"], "parallel-build");
+
+        // Reopen the workspace (simulate relaunch) and read it back.
+        let got = conversation_json(&["settings-get", "--conversation", &cid], &root);
+        assert_eq!(got["model_selection"]["mode"], "pinned");
+        assert_eq!(got["model_selection"]["model_id"], "openai/gpt-4o-mini");
+        assert_eq!(got["execution_mode"], "local");
+        assert_eq!(got["reasoning_effort"], "deep");
+        assert_eq!(got["max_parallelism"], 8);
+
+        // Garbage settings are rejected (not silently stored).
+        let bad = run_conversation_command(
+            &[
+                "settings-set".to_string(),
+                "--workspace".to_string(),
+                root.to_string_lossy().into_owned(),
+                "--conversation".to_string(),
+                cid.clone(),
+                "--settings".to_string(),
+                "{\"nope\":true}".to_string(),
+            ],
+            &root,
+        );
+        assert!(bad.is_err(), "invalid settings json must be rejected");
 
         fs::remove_dir_all(root).ok();
     }
