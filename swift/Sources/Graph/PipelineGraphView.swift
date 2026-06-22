@@ -94,6 +94,29 @@ struct PipelineGraphView: View {
             guard !nodes.isEmpty else { return }
             let layout = self.layout
 
+            // Edges first (so nodes draw on top — directive §13.4 draw order):
+            // connect consecutive nodes to show the execution flow instead of
+            // isolated dots (PIPE-003). This sequential baseline is replaced by a
+            // real dependency topology once the topology snapshot is wired.
+            func viewPoint(_ p: CGPoint) -> CGPoint {
+                CGPoint(
+                    x: p.x * currentScale + currentOffset.width,
+                    y: p.y * currentScale + currentOffset.height
+                )
+            }
+            if layout.positions.count > 1 {
+                var edges = Path()
+                for index in 0..<(layout.positions.count - 1) {
+                    edges.move(to: viewPoint(layout.positions[index].center))
+                    edges.addLine(to: viewPoint(layout.positions[index + 1].center))
+                }
+                context.stroke(
+                    edges,
+                    with: .color(Theme.stroke),
+                    lineWidth: max(1, layout.nodeRadius * currentScale * 0.18)
+                )
+            }
+
             for position in layout.positions {
                 let node = nodes[position.index]
                 // Map layout space → view space through pan/zoom.
