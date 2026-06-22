@@ -1993,7 +1993,7 @@ fn run_scheduler_recover_command(args: &[String], cwd: &Path) -> Result<CliOutpu
 /// audit blocks activation and leaves the previous active package in place), and
 /// manages proof-linked design revisions. All logic lives in opensks-design.
 pub fn run_design_studio_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
-    const USAGE: &str = "usage: opensks design audit|activate|active-status|revision-propose|revision-accept|revision-reject|revision-rollback ...";
+    const USAGE: &str = "usage: opensks design audit|activate|active-status|save-tokens|compile|list|revision-propose|revision-accept|revision-reject|revision-rollback ...";
     let subcommand = args
         .first()
         .map(String::as_str)
@@ -2073,6 +2073,87 @@ pub fn run_design_studio_command(args: &[String], cwd: &Path) -> Result<CliOutpu
             .map_err(|error| CliError::Invalid(error.to_string()))?;
             Ok(CliOutput {
                 stdout: revision.to_json() + "\n",
+            })
+        }
+        // DESIGN-002: persist edited token values into the package's tokens.json.
+        // The draft (a `{ "tokens": [{path, value}, …] }` document) arrives on
+        // stdin; only existing token paths are updated, unknown paths reported.
+        "save-tokens" => {
+            let id = flag("--package").ok_or_else(|| CliError::Usage(USAGE.to_string()))?;
+            let body = read_stdin_to_string()?;
+            let parsed: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|e| CliError::Invalid(format!("invalid save-tokens body: {e}")))?;
+            let entries = parsed
+                .get("tokens")
+                .and_then(|t| t.as_array())
+                .ok_or_else(|| {
+                    CliError::Invalid("save-tokens body must have a `tokens` array".to_string())
+                })?;
+            let mut updates: Vec<(String, String)> = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let path = entry.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                    CliError::Invalid("each token needs a string `path`".to_string())
+                })?;
+                let value = match entry.get("value") {
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(other) => other.to_string(),
+                    None => {
+                        return Err(CliError::Invalid("each token needs a `value`".to_string()));
+                    }
+                };
+                updates.push((path.to_string(), value));
+            }
+            let outcome = opensks_design::save_token_values(&workspace, &id, &updates)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            let json = serde_json::json!({
+                "schema": "opensks.design-save-tokens.v1",
+                "package_id": outcome.package_id,
+                "updated": outcome.updated,
+                "unknown_paths": outcome.unknown_paths,
+                "total": outcome.total,
+                "content_hash": outcome.content_hash,
+            });
+            Ok(CliOutput {
+                stdout: json.to_string() + "\n",
+            })
+        }
+        // DESIGN-002: compile/validate a package's tokens in isolation (no
+        // activation) so the editor can surface compile errors before applying.
+        "compile" => {
+            let id = flag("--package").ok_or_else(|| CliError::Usage(USAGE.to_string()))?;
+            let outcome = opensks_design::compile_package(&workspace, &id)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            let json = serde_json::json!({
+                "schema": "opensks.design-compile.v1",
+                "package_id": outcome.package_id,
+                "ok": outcome.ok,
+                "swift_bytes": outcome.swift_bytes,
+                "error": outcome.error,
+            });
+            Ok(CliOutput {
+                stdout: json.to_string() + "\n",
+            })
+        }
+        // DESIGN-101: registry-driven catalog — enumerate the design packages on
+        // disk so the Studio sidebar reflects reality instead of a hard-coded seed.
+        "list" => {
+            let packages = opensks_design::list_packages(&workspace);
+            let arr: Vec<serde_json::Value> = packages
+                .into_iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "package_id": p.package_id,
+                        "title": p.title,
+                        "active": p.active,
+                    })
+                })
+                .collect();
+            let json = serde_json::json!({
+                "schema": "opensks.design-package-list.v1",
+                "packages": arr,
+            });
+            Ok(CliOutput {
+                stdout: json.to_string() + "\n",
             })
         }
         _ => Err(CliError::Usage(USAGE.to_string())),

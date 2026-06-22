@@ -14,6 +14,7 @@ pub mod activation;
 pub mod audit;
 pub mod compiler;
 pub mod contracts;
+pub mod draft;
 pub mod import;
 pub mod registry;
 pub mod revision;
@@ -33,6 +34,10 @@ pub use compiler::{
 pub use contracts::{
     DESIGN_PROJECT_SCHEMA, DESIGN_TOKEN_SET_SCHEMA, DesignContractError, DesignProjectFiles,
     DesignProjectManifest, DesignSecurity, DesignSource, DesignToken, DesignTokenSet,
+};
+pub use draft::{
+    CompileOutcome, DraftError, PackageSummary, SaveTokensOutcome, compile_package, list_packages,
+    save_token_values,
 };
 pub use import::{
     ApproveOutcome, ImportError, ImportKind, ImportLimits, ImportOutcome, Provenance,
