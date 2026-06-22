@@ -30,6 +30,25 @@ pub enum ConversationError {
 
 type Result<T> = std::result::Result<T, ConversationError>;
 
+/// A run linked to a conversation via the `conversation_runs` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationRunRef {
+    pub turn_id: String,
+    pub run_id: String,
+    pub message_id: String,
+    pub relation: String,
+}
+
+/// The persisted identifiers for a previously executed turn, keyed by
+/// (conversation_id, idempotency_key). Used to make `turn-start` idempotent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnIdempotencyRecord {
+    pub turn_id: String,
+    pub user_message_id: String,
+    pub assistant_message_id: String,
+    pub run_id: String,
+}
+
 /// Redact secret-looking tokens from text before it is stored in the searchable
 /// copy or an FTS index. Whitespace within a line is normalized; line breaks are
 /// preserved. Catches common key prefixes and long high-entropy tokens.
@@ -162,6 +181,16 @@ impl ConversationRepository {
                 relation TEXT NOT NULL CHECK(relation IN ('primary','child','retry','verification','design','image')),
                 created_at_ms INTEGER NOT NULL,
                 PRIMARY KEY(conversation_id, run_id)
+            );
+            CREATE TABLE IF NOT EXISTS turn_idempotency (
+                idempotency_key TEXT NOT NULL,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                turn_id TEXT NOT NULL,
+                user_message_id TEXT NOT NULL,
+                assistant_message_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                UNIQUE(conversation_id, idempotency_key)
             );
             CREATE TABLE IF NOT EXISTS message_attachments (
                 message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -418,6 +447,124 @@ impl ConversationRepository {
             params![now_ms as i64, conversation_id],
         )?;
         Ok(id)
+    }
+
+    /// Generate a fresh random id using the same scheme as message/conversation
+    /// ids. Useful for callers that need a `turn_id` before any rows exist.
+    pub fn new_turn_id(&self) -> Result<String> {
+        self.new_id()
+    }
+
+    /// Overwrite a message's stored content (redacted) and state by id. Used to
+    /// finalize an assistant placeholder once a run produces its result.
+    pub fn set_message_content(
+        &self,
+        message_id: &str,
+        content_raw: &str,
+        state: MessageState,
+        now_ms: u64,
+    ) -> Result<()> {
+        let content_redacted = redact_secrets(content_raw);
+        let n = self.conn.execute(
+            "UPDATE messages SET content_redacted = ?1, state = ?2, updated_at_ms = ?3 WHERE id = ?4",
+            params![content_redacted, enum_to_str(&state), now_ms as i64, message_id],
+        )?;
+        if n == 0 {
+            return Err(ConversationError::NotFound(message_id.to_string()));
+        }
+        self.conn.execute(
+            "UPDATE messages_fts SET content_redacted = ?1 WHERE message_id = ?2",
+            params![content_redacted, message_id],
+        )?;
+        Ok(())
+    }
+
+    /// Link a run to a conversation/message/turn in the `conversation_runs`
+    /// table. `relation` must be one of the CHECK-constrained relation kinds.
+    pub fn link_run(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        turn_id: &str,
+        run_id: &str,
+        relation: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO conversation_runs(conversation_id, message_id, turn_id, run_id, relation, created_at_ms)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![conversation_id, message_id, turn_id, run_id, relation, now_ms as i64],
+        )?;
+        Ok(())
+    }
+
+    /// List the runs linked to a conversation, oldest first.
+    pub fn runs_for_conversation(&self, conversation_id: &str) -> Result<Vec<ConversationRunRef>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT turn_id, run_id, message_id, relation FROM conversation_runs
+             WHERE conversation_id = ?1 ORDER BY created_at_ms ASC, run_id ASC",
+        )?;
+        let rows = stmt.query_map(params![conversation_id], |row| {
+            Ok(ConversationRunRef {
+                turn_id: row.get(0)?,
+                run_id: row.get(1)?,
+                message_id: row.get(2)?,
+                relation: row.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Record the identifiers produced for a turn under an idempotency key so a
+    /// repeated `turn-start` with the same key can be replayed without a new run.
+    pub fn record_turn_idempotency(
+        &self,
+        idempotency_key: &str,
+        conversation_id: &str,
+        record: &TurnIdempotencyRecord,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO turn_idempotency(idempotency_key, conversation_id, turn_id, user_message_id, assistant_message_id, run_id, created_at_ms)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                idempotency_key,
+                conversation_id,
+                record.turn_id,
+                record.user_message_id,
+                record.assistant_message_id,
+                record.run_id,
+                now_ms as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Look up the identifiers previously recorded for an idempotency key within
+    /// a conversation, if any.
+    pub fn lookup_turn_idempotency(
+        &self,
+        idempotency_key: &str,
+        conversation_id: &str,
+    ) -> Result<Option<TurnIdempotencyRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT turn_id, user_message_id, assistant_message_id, run_id FROM turn_idempotency
+             WHERE conversation_id = ?1 AND idempotency_key = ?2",
+        )?;
+        let mut rows = stmt.query(params![conversation_id, idempotency_key])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(TurnIdempotencyRecord {
+                turn_id: row.get(0)?,
+                user_message_id: row.get(1)?,
+                assistant_message_id: row.get(2)?,
+                run_id: row.get(3)?,
+            })),
+            None => Ok(None),
+        }
     }
 
     /// Cursor pagination: returns up to `limit` messages with sequence strictly

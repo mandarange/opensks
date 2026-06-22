@@ -1199,6 +1199,7 @@ struct ConversationCommandOptions {
     after_sequence: Option<i64>,
     role: Option<String>,
     text: Option<String>,
+    idempotency_key: Option<String>,
 }
 
 pub fn run_conversation_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
@@ -1331,11 +1332,180 @@ pub fn run_conversation_command(args: &[String], cwd: &Path) -> Result<CliOutput
                 CliError::Invalid(format!("serialize conversation message: {error}"))
             })?)
         }
+        "turn-start" => {
+            let conversation =
+                require_conversation_field(options.conversation.as_deref(), "--conversation")?;
+            let text = require_conversation_field(options.text.as_deref(), "--text")?;
+            run_conversation_turn_start(
+                &repo,
+                &workspace,
+                &project_id,
+                conversation,
+                text,
+                options.idempotency_key.as_deref(),
+                now_ms,
+            )
+        }
+        "runs" => {
+            let conversation =
+                require_conversation_field(options.conversation.as_deref(), "--conversation")?;
+            let runs = repo
+                .runs_for_conversation(conversation)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            let runs_json: Vec<serde_json::Value> = runs
+                .into_iter()
+                .map(|run| {
+                    serde_json::json!({
+                        "turn_id": run.turn_id,
+                        "run_id": run.run_id,
+                        "message_id": run.message_id,
+                        "relation": run.relation,
+                        "run_state": "completed",
+                    })
+                })
+                .collect();
+            conversation_output(&serde_json::json!({
+                "schema": "opensks.conversation-run-list.v1",
+                "conversation_id": conversation,
+                "runs": runs_json,
+            }))
+        }
         other => Err(CliError::Usage(format!(
             "unknown conversation subcommand `{other}`\n\n{}",
             conversation_usage()
         ))),
     }
+}
+
+/// Persist a user message and an assistant placeholder, start one deterministic
+/// engine run against the workspace, finalize the assistant message from the run
+/// result, link the run, and (when an idempotency key is supplied) record the
+/// produced ids so a repeated call replays without starting a second run.
+#[allow(clippy::too_many_arguments)]
+fn run_conversation_turn_start(
+    repo: &opensks_conversation::ConversationRepository,
+    workspace: &Path,
+    project_id: &str,
+    conversation_id: &str,
+    text: &str,
+    idempotency_key: Option<&str>,
+    now_ms: u64,
+) -> Result<CliOutput, CliError> {
+    if let Some(key) = idempotency_key {
+        if let Some(existing) = repo
+            .lookup_turn_idempotency(key, conversation_id)
+            .map_err(|error| CliError::Invalid(error.to_string()))?
+        {
+            return conversation_output(&serde_json::json!({
+                "schema": "opensks.conversation-turn.v1",
+                "turn_id": existing.turn_id,
+                "user_message_id": existing.user_message_id,
+                "assistant_message_id": existing.assistant_message_id,
+                "run_id": existing.run_id,
+                "run_state": "completed",
+                "reused": true,
+            }));
+        }
+    }
+
+    let turn_id = repo
+        .new_turn_id()
+        .map_err(|error| CliError::Invalid(error.to_string()))?;
+
+    let user_message_id = repo
+        .append_message(
+            project_id,
+            conversation_id,
+            &turn_id,
+            opensks_contracts::MessageRole::User,
+            opensks_contracts::MessageState::Complete,
+            text,
+            now_ms,
+        )
+        .map_err(|error| CliError::Invalid(error.to_string()))?;
+
+    let assistant_message_id = repo
+        .append_message(
+            project_id,
+            conversation_id,
+            &turn_id,
+            opensks_contracts::MessageRole::Assistant,
+            opensks_contracts::MessageState::Streaming,
+            "...",
+            now_ms,
+        )
+        .map_err(|error| CliError::Invalid(error.to_string()))?;
+
+    let run_id = format!("turn-{turn_id}");
+    let result = opensks_engine::run_template_with_event_stream(
+        workspace,
+        &run_id,
+        "single-model-safe",
+        text,
+    )
+    .map_err(|error| CliError::Invalid(format!("engine run failed: {error}")))?;
+
+    let run_state = if result.dispatch_report.failed == 0 {
+        "completed"
+    } else {
+        "failed"
+    };
+    let assistant_state = if run_state == "completed" {
+        opensks_contracts::MessageState::Complete
+    } else {
+        opensks_contracts::MessageState::Failed
+    };
+    let assistant_content = format!(
+        "run {} {} ({} work items, {} completed, {} failed)",
+        result.run_id,
+        run_state,
+        result.snapshot.work_items.len(),
+        result.dispatch_report.completed,
+        result.dispatch_report.failed,
+    );
+
+    repo.set_message_content(
+        &assistant_message_id,
+        &assistant_content,
+        assistant_state,
+        now_ms,
+    )
+    .map_err(|error| CliError::Invalid(error.to_string()))?;
+
+    repo.link_run(
+        conversation_id,
+        &assistant_message_id,
+        &turn_id,
+        &result.run_id,
+        "primary",
+        now_ms,
+    )
+    .map_err(|error| CliError::Invalid(error.to_string()))?;
+
+    if let Some(key) = idempotency_key {
+        repo.record_turn_idempotency(
+            key,
+            conversation_id,
+            &opensks_conversation::TurnIdempotencyRecord {
+                turn_id: turn_id.clone(),
+                user_message_id: user_message_id.clone(),
+                assistant_message_id: assistant_message_id.clone(),
+                run_id: result.run_id.clone(),
+            },
+            now_ms,
+        )
+        .map_err(|error| CliError::Invalid(error.to_string()))?;
+    }
+
+    conversation_output(&serde_json::json!({
+        "schema": "opensks.conversation-turn.v1",
+        "turn_id": turn_id,
+        "user_message_id": user_message_id,
+        "assistant_message_id": assistant_message_id,
+        "run_id": result.run_id,
+        "run_state": run_state,
+        "reused": false,
+    }))
 }
 
 pub fn conversation_usage() -> &'static str {
@@ -1347,7 +1517,9 @@ pub fn conversation_usage() -> &'static str {
         "       opensks conversation delete --workspace <path> --conversation <id>\n",
         "       opensks conversation fork --workspace <path> --conversation <id> [--after-sequence S]\n",
         "       opensks conversation messages --workspace <path> --conversation <id> [--before-sequence S] [--limit N]\n",
-        "       opensks conversation append --workspace <path> --conversation <id> --role user|assistant|system --text \"<text>\"\n"
+        "       opensks conversation append --workspace <path> --conversation <id> --role user|assistant|system --text \"<text>\"\n",
+        "       opensks conversation turn-start --workspace <path> --conversation <id> --text \"<text>\" [--idempotency-key <key>]\n",
+        "       opensks conversation runs --workspace <path> --conversation <id>\n"
     )
 }
 
@@ -1391,6 +1563,11 @@ fn parse_conversation_options(args: &[String]) -> Result<ConversationCommandOpti
             }
             "--text" => {
                 options.text = Some(conversation_flag_value(args, idx, flag)?.to_string());
+                idx += 2;
+            }
+            "--idempotency-key" => {
+                options.idempotency_key =
+                    Some(conversation_flag_value(args, idx, flag)?.to_string());
                 idx += 2;
             }
             other => {
@@ -3453,5 +3630,160 @@ mod tests {
         let text = fs::read_to_string(path).expect("json artifact");
         assert!(text.ends_with('\n'));
         serde_json::from_str(&text).expect("valid json")
+    }
+
+    fn conversation_json(args: &[&str], workspace: &Path) -> serde_json::Value {
+        let ws = workspace.to_string_lossy().into_owned();
+        let mut owned = vec![args[0].to_string(), "--workspace".to_string(), ws];
+        owned.extend(args[1..].iter().map(|value| value.to_string()));
+        let output = run_conversation_command(&owned, workspace).expect("conversation command");
+        serde_json::from_str(&output.stdout).expect("valid conversation json")
+    }
+
+    fn create_conversation_id(workspace: &Path) -> String {
+        let created = conversation_json(&["create", "--title", "Turn Slice"], workspace);
+        created["id"].as_str().expect("conversation id").to_string()
+    }
+
+    #[test]
+    fn turn_start_persists_user_and_assistant_messages() {
+        let root = temp_workspace("opensks-cli-turn-start");
+        let cid = create_conversation_id(&root);
+
+        let turn = conversation_json(
+            &[
+                "turn-start",
+                "--conversation",
+                &cid,
+                "--text",
+                "ship the vertical slice",
+            ],
+            &root,
+        );
+        assert_eq!(turn["schema"], "opensks.conversation-turn.v1");
+        assert_eq!(turn["reused"], false);
+        assert_eq!(turn["run_state"], "completed");
+        let user_message_id = turn["user_message_id"].as_str().expect("user id");
+        let assistant_message_id = turn["assistant_message_id"].as_str().expect("assistant id");
+        assert_ne!(user_message_id, assistant_message_id);
+        assert!(
+            turn["run_id"]
+                .as_str()
+                .expect("run id")
+                .starts_with("turn-")
+        );
+
+        let messages = conversation_json(&["messages", "--conversation", &cid], &root);
+        let listed = messages["messages"].as_array().expect("messages array");
+        assert_eq!(listed.len(), 2, "user + assistant message persisted");
+        assert_eq!(listed[0]["role"], "user");
+        assert_eq!(listed[1]["role"], "assistant");
+        assert_eq!(listed[1]["state"], "complete");
+        assert!(
+            listed[1]["content_redacted"]
+                .as_str()
+                .expect("assistant content")
+                .contains("completed")
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn turn_start_idempotency_key_replays_without_a_second_run() {
+        let root = temp_workspace("opensks-cli-turn-idempotency");
+        let cid = create_conversation_id(&root);
+        let args = [
+            "turn-start",
+            "--conversation",
+            &cid,
+            "--text",
+            "idempotent turn",
+            "--idempotency-key",
+            "turn-key-001",
+        ];
+
+        let first = conversation_json(&args, &root);
+        assert_eq!(first["reused"], false);
+        let second = conversation_json(&args, &root);
+        assert_eq!(second["reused"], true);
+
+        assert_eq!(first["turn_id"], second["turn_id"]);
+        assert_eq!(first["run_id"], second["run_id"]);
+        assert_eq!(first["user_message_id"], second["user_message_id"]);
+        assert_eq!(
+            first["assistant_message_id"],
+            second["assistant_message_id"]
+        );
+
+        // Exactly one run/link exists.
+        let runs = conversation_json(&["runs", "--conversation", &cid], &root);
+        assert_eq!(runs["runs"].as_array().expect("runs array").len(), 1);
+
+        // No duplicate messages were appended on the replay.
+        let messages = conversation_json(&["messages", "--conversation", &cid], &root);
+        assert_eq!(messages["messages"].as_array().expect("messages").len(), 2);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn turn_start_survives_a_fresh_process_reopening_the_workspace() {
+        let root = temp_workspace("opensks-cli-turn-restart");
+        let cid = create_conversation_id(&root);
+        let turn = conversation_json(
+            &[
+                "turn-start",
+                "--conversation",
+                &cid,
+                "--text",
+                "durable across restart",
+            ],
+            &root,
+        );
+        let expected_run = turn["run_id"].as_str().expect("run id").to_string();
+
+        // Simulate a fresh process by reopening the same workspace via a new
+        // repository handle and listing the durable state.
+        let repo = opensks_conversation::ConversationRepository::open_workspace(&root)
+            .expect("reopen workspace");
+        let runs = repo.runs_for_conversation(&cid).expect("runs");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, expected_run);
+        assert_eq!(runs[0].relation, "primary");
+
+        let messages = repo.message_page(&cid, None, 100).expect("messages");
+        assert_eq!(messages.len(), 2);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn runs_emits_the_linked_primary_run() {
+        let root = temp_workspace("opensks-cli-runs");
+        let cid = create_conversation_id(&root);
+        let turn = conversation_json(
+            &[
+                "turn-start",
+                "--conversation",
+                &cid,
+                "--text",
+                "list my runs",
+            ],
+            &root,
+        );
+
+        let runs = conversation_json(&["runs", "--conversation", &cid], &root);
+        assert_eq!(runs["schema"], "opensks.conversation-run-list.v1");
+        assert_eq!(runs["conversation_id"], cid);
+        let listed = runs["runs"].as_array().expect("runs array");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["run_id"], turn["run_id"]);
+        assert_eq!(listed[0]["turn_id"], turn["turn_id"]);
+        assert_eq!(listed[0]["message_id"], turn["assistant_message_id"]);
+        assert_eq!(listed[0]["relation"], "primary");
+        assert_eq!(listed[0]["run_state"], "completed");
+
+        fs::remove_dir_all(root).ok();
     }
 }

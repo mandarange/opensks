@@ -11,6 +11,7 @@ opensks-codegraph = { path = "../opensks-codegraph" }
 opensks-context = { path = "../opensks-context" }
 opensks-conversation = { path = "../opensks-conversation" }
 opensks-daemon = { path = "../opensks-daemon" }
+opensks-engine = { path = "../opensks-engine" }
 opensks-event-store = { path = "../opensks-event-store" }
 opensks-git = { path = "../opensks-git" }
 opensks-graph = { path = "../opensks-graph" }

@@ -18,6 +18,16 @@ protocol ConversationService: Sendable {
     func fork(id: String, afterSequence: Int64?) async throws -> ConversationSummary
     func messages(id: String, beforeSequence: Int64?, limit: Int?) async throws -> MessagePage
     func append(id: String, role: MessageRole, text: String) async throws -> ConversationMessage
+
+    /// Start ONE deterministic engine run for `id`: persist the redacted user
+    /// message + an assistant placeholder, run the engine, set the assistant
+    /// content from the result, link the run, and return the ids. Passing the
+    /// same `idempotencyKey` again returns the SAME ids with `reused == true`
+    /// and does NOT start a second run.
+    func turnStart(conversationID: String, text: String, idempotencyKey: String) async throws -> ConversationTurn
+
+    /// The runs linked to a conversation (`opensks.conversation-run-list.v1`).
+    func runs(conversationID: String) async throws -> [ConversationRunRef]
 }
 
 // MARK: - Errors
@@ -117,6 +127,23 @@ struct LiveConversationService: ConversationService {
         )
     }
 
+    func turnStart(conversationID: String, text: String, idempotencyKey: String) async throws -> ConversationTurn {
+        try await run(
+            ["conversation", "turn-start", "--workspace", workspace.path,
+             "--conversation", conversationID, "--text", text,
+             "--idempotency-key", idempotencyKey],
+            verb: "turn-start"
+        )
+    }
+
+    func runs(conversationID: String) async throws -> [ConversationRunRef] {
+        let list: ConversationRunList = try await run(
+            ["conversation", "runs", "--workspace", workspace.path, "--conversation", conversationID],
+            verb: "runs"
+        )
+        return list.runs
+    }
+
     // MARK: Process plumbing
 
     private func run<T: Decodable>(_ args: [String], verb: String) async throws -> T {
@@ -180,19 +207,30 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
     private let lock = NSLock()
     private var summaries: [ConversationSummary]
     private var messagesByConversation: [String: [ConversationMessage]]
+    private var runsByConversation: [String: [ConversationRunRef]] = [:]
+    /// Idempotency ledger: `"<conversationID>\u{1}<key>" -> turn` so a replayed
+    /// key returns the same ids (reused) without starting a second run.
+    private var turnsByIdempotencyKey: [String: ConversationTurn] = [:]
     private var nextId = 0
     private var clock: Int64 = 1_000
 
     let projectId: String
 
+    /// Final state the mock reports for the deterministic run it "completes".
+    /// Defaults to `.completed`; a test can request `.failed` to exercise the
+    /// danger pill without touching the engine.
+    let runStateOnTurn: RunState
+
     init(
         projectId: String = "mock-project",
         summaries: [ConversationSummary] = [],
-        messages: [String: [ConversationMessage]] = [:]
+        messages: [String: [ConversationMessage]] = [:],
+        runStateOnTurn: RunState = .completed
     ) {
         self.projectId = projectId
         self.summaries = summaries
         self.messagesByConversation = messages
+        self.runStateOnTurn = runStateOnTurn
     }
 
     private func tick() -> Int64 {
@@ -277,6 +315,8 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         withLock {
             summaries.removeAll { $0.id == id }
             messagesByConversation[id] = nil
+            runsByConversation[id] = nil
+            turnsByIdempotencyKey = turnsByIdempotencyKey.filter { !$0.key.hasPrefix("\(id)\u{1}") }
         }
     }
 
@@ -358,6 +398,84 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         return message
     }
 
+    func turnStart(conversationID: String, text: String, idempotencyKey: String) async throws -> ConversationTurn {
+        try withLock { try turnStartLocked(conversationID: conversationID, text: text, idempotencyKey: idempotencyKey) }
+    }
+
+    private func turnStartLocked(conversationID id: String, text: String, idempotencyKey: String) throws -> ConversationTurn {
+        guard summaries.contains(where: { $0.id == id }) else {
+            throw ConversationServiceError.emptyOutput("turn-start")
+        }
+        // Replayed idempotency key: return the SAME turn, mark reused, and do
+        // NOT start a second run (no new messages, no new run-list entry).
+        let ledgerKey = "\(id)\u{1}\(idempotencyKey)"
+        if let existing = turnsByIdempotencyKey[ledgerKey] {
+            return ConversationTurn(
+                schema: existing.schema,
+                turnId: existing.turnId,
+                userMessageId: existing.userMessageId,
+                assistantMessageId: existing.assistantMessageId,
+                runId: existing.runId,
+                runState: existing.runState,
+                reused: true
+            )
+        }
+
+        let turnId = mintId("turn")
+        let runId = mintId("run")
+
+        // 1. Persist the redacted user message BEFORE the run.
+        let userMessage = appendLocked(id: id, role: .user, text: text)
+        // 2. Persist the assistant placeholder BEFORE the run.
+        let assistantPlaceholder = appendLocked(id: id, role: .assistant, text: "")
+
+        // 3. "Run" the deterministic engine and set the assistant content from
+        //    its result, linking both messages to the turn.
+        let runState = runStateOnTurn
+        let assistantContent = runState == .failed
+            ? "Run failed."
+            : "Deterministic run \(runId) completed."
+        if var msgs = messagesByConversation[id],
+           let idx = msgs.firstIndex(where: { $0.id == assistantPlaceholder.id }) {
+            msgs[idx] = assistantPlaceholder.with(
+                turnId: turnId,
+                state: runState == .failed ? .failed : .complete,
+                contentRedacted: assistantContent
+            )
+            // Also link the user message to the turn.
+            if let uIdx = msgs.firstIndex(where: { $0.id == userMessage.id }) {
+                msgs[uIdx] = userMessage.with(turnId: turnId)
+            }
+            messagesByConversation[id] = msgs
+        }
+
+        // 4. Link the run to the conversation (primary relation).
+        let runRef = ConversationRunRef(
+            turnId: turnId,
+            runId: runId,
+            messageId: assistantPlaceholder.id,
+            relation: "primary",
+            runState: runState
+        )
+        runsByConversation[id, default: []].append(runRef)
+
+        let turn = ConversationTurn(
+            schema: "opensks.conversation-turn.v1",
+            turnId: turnId,
+            userMessageId: userMessage.id,
+            assistantMessageId: assistantPlaceholder.id,
+            runId: runId,
+            runState: runState,
+            reused: false
+        )
+        turnsByIdempotencyKey[ledgerKey] = turn
+        return turn
+    }
+
+    func runs(conversationID id: String) async throws -> [ConversationRunRef] {
+        withLock { runsByConversation[id] ?? [] }
+    }
+
     private func mutate(_ id: String, _ transform: (ConversationSummary) -> ConversationSummary) throws {
         lock.lock(); defer { lock.unlock() }
         guard let idx = summaries.firstIndex(where: { $0.id == id }) else {
@@ -408,6 +526,26 @@ private extension ConversationMessage {
             role: role,
             state: state,
             contentRedacted: contentRedacted,
+            sequence: sequence,
+            createdAtMs: createdAtMs,
+            updatedAtMs: updatedAtMs
+        )
+    }
+
+    func with(
+        turnId: String? = nil,
+        state: MessageState? = nil,
+        contentRedacted: String? = nil
+    ) -> ConversationMessage {
+        ConversationMessage(
+            schema: schema,
+            id: id,
+            projectId: projectId,
+            conversationId: conversationId,
+            turnId: turnId ?? self.turnId,
+            role: role,
+            state: state ?? self.state,
+            contentRedacted: contentRedacted ?? self.contentRedacted,
             sequence: sequence,
             createdAtMs: createdAtMs,
             updatedAtMs: updatedAtMs

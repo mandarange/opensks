@@ -1,7 +1,10 @@
 // ConversationThreadView.swift — the central `.chat` surface. Renders the
 // selected conversation's stored messages (user / assistant / system cells)
 // oldest -> newest, with a "Load older" affordance when there is an older page.
-// PR-025 has NO composer / send — engine-driven turns arrive in PR-027.
+// A `ConversationComposer` is pinned to the bottom (PR-027): one Send starts one
+// deterministic engine run, surfaced as an inline `RunCard` under the assistant
+// turn it produced. No live token streaming yet — the run completes and the card
+// shows its final state honestly (live streaming is PR-029 / PR-030).
 
 import SwiftUI
 
@@ -32,12 +35,14 @@ struct ConversationThreadView: View {
             if store.messages.isEmpty {
                 EmptyStateView(
                     headline: "No messages yet",
-                    detail: "This conversation has no stored messages. Engine-driven turns arrive in a later PR.",
+                    detail: "Send a message below to start a deterministic engine run.",
                     systemImage: "text.bubble"
                 )
+                .frame(maxHeight: .infinity)
             } else {
                 messageList
             }
+            ConversationComposer(store: store, conversationID: summary.id)
         }
     }
 
@@ -80,6 +85,11 @@ struct ConversationThreadView: View {
                 ForEach(store.messages) { message in
                     MessageCell(message: message)
                         .id(message.id)
+                    // An inline run card under the assistant turn it produced.
+                    if let run = store.run(forMessageID: message.id) {
+                        RunCard(run: run)
+                            .id("run-\(run.runId)")
+                    }
                 }
             }
             .padding(.horizontal, 18)
