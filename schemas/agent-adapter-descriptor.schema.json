@@ -1,0 +1,93 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AgentAdapterDescriptor",
+  "description": "What an adapter advertises to the engine/registry.",
+  "type": "object",
+  "required": [
+    "adapter_id",
+    "display_name",
+    "kind",
+    "schema",
+    "supports_parallel_sessions",
+    "supports_resume",
+    "supports_streaming",
+    "supports_tools"
+  ],
+  "properties": {
+    "adapter_id": {
+      "type": "string"
+    },
+    "display_name": {
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/definitions/AgentAdapterKind"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "supported_reasoning_efforts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ReasoningEffort"
+      }
+    },
+    "supports_parallel_sessions": {
+      "type": "boolean"
+    },
+    "supports_resume": {
+      "type": "boolean"
+    },
+    "supports_streaming": {
+      "type": "boolean"
+    },
+    "supports_tools": {
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+    "AgentAdapterKind": {
+      "description": "What kind of work an adapter performs.",
+      "oneOf": [
+        {
+          "description": "A real configured text/code model.",
+          "type": "string",
+          "enum": [
+            "model"
+          ]
+        },
+        {
+          "description": "A deterministic adapter for tests that still performs real file edits.",
+          "type": "string",
+          "enum": [
+            "local_test"
+          ]
+        },
+        {
+          "description": "An external CLI agent.",
+          "type": "string",
+          "enum": [
+            "cli"
+          ]
+        },
+        {
+          "description": "An image-generation adapter.",
+          "type": "string",
+          "enum": [
+            "image"
+          ]
+        }
+      ]
+    },
+    "ReasoningEffort": {
+      "description": "User-facing reasoning effort. Adapters map these to provider-specific knobs; an adapter that cannot honour a value reports `unsupported` rather than silently ignoring it (§5.3).",
+      "type": "string",
+      "enum": [
+        "quick",
+        "standard",
+        "deep",
+        "maximum"
+      ]
+    }
+  }
+}

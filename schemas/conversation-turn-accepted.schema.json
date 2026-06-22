@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ConversationTurnAccepted",
+  "description": "The immediate accept response: identifiers + a stream handle. `state` is `queued` — the run has not finished.",
+  "type": "object",
+  "required": [
+    "assistant_message_id",
+    "request_id",
+    "run_id",
+    "schema",
+    "state",
+    "stream_id",
+    "turn_id",
+    "user_message_id"
+  ],
+  "properties": {
+    "assistant_message_id": {
+      "type": "string"
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/definitions/RunProjectionState"
+    },
+    "stream_id": {
+      "type": "string"
+    },
+    "turn_id": {
+      "type": "string"
+    },
+    "user_message_id": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "RunProjectionState": {
+      "description": "Coarse lifecycle state of a whole run.",
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "paused",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    }
+  }
+}

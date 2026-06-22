@@ -1,0 +1,128 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PipelineTopologySnapshot",
+  "description": "The compiled topology of a run's pipeline.",
+  "type": "object",
+  "required": [
+    "edges",
+    "graph_revision",
+    "nodes",
+    "pipeline_id",
+    "run_id",
+    "schema"
+  ],
+  "properties": {
+    "edges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/PipelineTopologyEdge"
+      }
+    },
+    "graph_revision": {
+      "type": "string"
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/PipelineTopologyNode"
+      }
+    },
+    "pipeline_id": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "PipelineTopologyEdge": {
+      "description": "A directed edge in the plan graph.",
+      "type": "object",
+      "required": [
+        "from_node",
+        "kind",
+        "to_node"
+      ],
+      "properties": {
+        "from_node": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/TopologyEdgeKind"
+        },
+        "to_node": {
+          "type": "string"
+        }
+      }
+    },
+    "PipelineTopologyNode": {
+      "description": "A node in the compiled pipeline plan.",
+      "type": "object",
+      "required": [
+        "label",
+        "node_id"
+      ],
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WorkerRole"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "TopologyEdgeKind": {
+      "description": "What an edge represents between two nodes.",
+      "oneOf": [
+        {
+          "description": "`to` depends on `from` completing.",
+          "type": "string",
+          "enum": [
+            "dependency"
+          ]
+        },
+        {
+          "description": "`from` produces data consumed by `to`.",
+          "type": "string",
+          "enum": [
+            "data"
+          ]
+        },
+        {
+          "description": "Control/ordering only.",
+          "type": "string",
+          "enum": [
+            "control"
+          ]
+        }
+      ]
+    },
+    "WorkerRole": {
+      "description": "The role a worker plays in a pipeline (§7.4). Routing maps roles to models.",
+      "type": "string",
+      "enum": [
+        "planner",
+        "code_explorer",
+        "implementer",
+        "test_author",
+        "reviewer",
+        "security_reviewer",
+        "image_generator",
+        "arbiter"
+      ]
+    }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ToolPolicy",
+  "description": "A named, reusable tool permission policy referenced by id from thread settings / subcontracts.",
+  "type": "object",
+  "required": [
+    "entries",
+    "policy_id",
+    "schema"
+  ],
+  "properties": {
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ToolPolicyEntry"
+      }
+    },
+    "policy_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "ToolPermission": {
+      "description": "Per-tool permission (§19.7). Risk rises from `Deny` to `Allow`.",
+      "type": "string",
+      "enum": [
+        "deny",
+        "read_only",
+        "ask",
+        "allow"
+      ]
+    },
+    "ToolPolicyEntry": {
+      "description": "One tool's permission within a policy.",
+      "type": "object",
+      "required": [
+        "permission",
+        "tool"
+      ],
+      "properties": {
+        "permission": {
+          "$ref": "#/definitions/ToolPermission"
+        },
+        "tool": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

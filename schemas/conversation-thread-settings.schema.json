@@ -1,0 +1,120 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ConversationThreadSettings",
+  "description": "Durable per-thread settings (persisted in `conversation_settings`). Holds no secrets — only references/ids.",
+  "type": "object",
+  "required": [
+    "approval_policy_id",
+    "conversation_id",
+    "execution_mode",
+    "max_parallelism",
+    "model_selection",
+    "pipeline_id",
+    "reasoning_effort",
+    "schema",
+    "tool_policy_id",
+    "updated_at_ms",
+    "verifier_count"
+  ],
+  "properties": {
+    "approval_policy_id": {
+      "type": "string"
+    },
+    "conversation_id": {
+      "type": "string"
+    },
+    "execution_mode": {
+      "$ref": "#/definitions/ExecutionMode"
+    },
+    "image_model_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "max_parallelism": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "model_selection": {
+      "$ref": "#/definitions/ModelSelection"
+    },
+    "pipeline_id": {
+      "type": "string"
+    },
+    "reasoning_effort": {
+      "$ref": "#/definitions/ReasoningEffort"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "tool_policy_id": {
+      "type": "string"
+    },
+    "updated_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "verifier_count": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "ExecutionMode": {
+      "description": "Where a turn is allowed to write (§5.4). `Cloud` is reserved and hidden until a real adapter exists.",
+      "type": "string",
+      "enum": [
+        "local",
+        "worktree",
+        "read_only",
+        "cloud"
+      ]
+    },
+    "ModelSelection": {
+      "description": "Model choice for a turn/thread. A single configured model auto-selects.",
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "fallback_model_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mode": {
+          "$ref": "#/definitions/ModelSelectionMode"
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ModelSelectionMode": {
+      "description": "Whether the model is auto-routed or pinned by the user.",
+      "type": "string",
+      "enum": [
+        "auto",
+        "pinned"
+      ]
+    },
+    "ReasoningEffort": {
+      "description": "User-facing reasoning effort. Adapters map these to provider-specific knobs; an adapter that cannot honour a value reports `unsupported` rather than silently ignoring it (§5.3).",
+      "type": "string",
+      "enum": [
+        "quick",
+        "standard",
+        "deep",
+        "maximum"
+      ]
+    }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PatchApplyResult",
+  "description": "The outcome of attempting to apply a proposal.",
+  "type": "object",
+  "required": [
+    "applied",
+    "proposal_id",
+    "reason_code",
+    "rolled_back",
+    "schema"
+  ],
+  "properties": {
+    "applied": {
+      "type": "boolean"
+    },
+    "applied_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "conflict_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "proposal_id": {
+      "type": "string"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "rolled_back": {
+      "type": "boolean"
+    },
+    "schema": {
+      "type": "string"
+    }
+  }
+}

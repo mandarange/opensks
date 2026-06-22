@@ -1643,21 +1643,32 @@ pub struct ReleaseProof {
     pub status: TrustStatus,
 }
 
+pub mod agent;
 pub mod capability;
 pub mod conversation;
 pub mod design;
+pub mod diagnostic;
 pub mod file;
 pub mod git;
 pub mod git_mutation;
 pub mod git_push;
 pub mod intel;
+pub mod patch;
 pub mod project;
 pub mod projection;
 pub mod security;
 pub mod stream;
 pub mod text_diff;
+pub mod topology;
+pub mod turn;
 pub mod vault;
 
+pub use agent::{
+    AGENT_ADAPTER_DESCRIPTOR_SCHEMA, AGENT_EVENT_ENVELOPE_SCHEMA, AgentAdapterDescriptor,
+    AgentAdapterKind, AgentEventEnvelope, AgentEventKind, OutputContractKind,
+    SUBCONTRACT_PACKET_SCHEMA, SubcontractPacket, TOOL_POLICY_SCHEMA, ToolPermission, ToolPolicy,
+    ToolPolicyEntry, WORKER_ROLE_SCHEMA, WorkerRole,
+};
 pub use capability::{
     CapabilityMaturity, RUNTIME_CAPABILITY_REPORT_SCHEMA, RUNTIME_CAPABILITY_SCHEMA,
     RuntimeCapability, RuntimeCapabilityReport, baseline_capability_report,
@@ -1675,6 +1686,7 @@ pub use design::{
     DesignPackageComponent, DesignPackageComponents, DesignPackageFiles, DesignPackageManifest,
     DesignPackageSecurity, DesignPackageSource, DesignPackageToken, DesignPackageTokens,
 };
+pub use diagnostic::{PROCESS_DIAGNOSTIC_SCHEMA, ProcessDiagnostic};
 pub use file::{
     ConflictResolution, FileServiceError, LineEnding, OPEN_TEXT_REQUEST_SCHEMA, OpenTextRequest,
     SAVE_TEXT_REQUEST_SCHEMA, SAVE_TEXT_RESULT_SCHEMA, STAT_REQUEST_SCHEMA, SaveTextRequest,
@@ -1703,6 +1715,10 @@ pub use intel::{
     INTEL_CODEGRAPH_SCHEMA, INTEL_FRESHNESS_CHECK_SCHEMA, INTEL_FRESHNESS_SCHEMA,
     INTEL_GLOSSARY_SCHEMA, StaleReason,
 };
+pub use patch::{
+    FileOperation, FilePatch, PATCH_APPLY_RESULT_SCHEMA, PATCH_PROPOSAL_SCHEMA, PatchApplyResult,
+    PatchProposal, RiskLevel, VERIFICATION_RESULT_SCHEMA, VerificationKind, VerificationResult,
+};
 pub use project::{PROJECT_SUMMARY_SCHEMA, ProjectSummary};
 pub use projection::{
     NodeExecutionProjection, NodeProjectionState, PIPELINE_EXECUTION_PROJECTION_SCHEMA,
@@ -1717,6 +1733,17 @@ pub use stream::{
     ENGINE_STREAM_FRAME_SCHEMA, EngineStreamFrame, PublicEngineError, STREAM_PROTOCOL_VERSION,
 };
 pub use text_diff::{DiffHunk, DiffHunkKind, TEXT_DIFF_SCHEMA, TextDiff};
+pub use topology::{
+    PIPELINE_TOPOLOGY_SNAPSHOT_SCHEMA, PipelineTopologyEdge, PipelineTopologyNode,
+    PipelineTopologySnapshot, TopologyEdgeKind,
+};
+pub use turn::{
+    CONVERSATION_THREAD_SETTINGS_SCHEMA, CONVERSATION_TURN_ACCEPTED_SCHEMA,
+    CONVERSATION_TURN_START_REQUEST_SCHEMA, ConversationThreadSettings, ConversationTurnAccepted,
+    ConversationTurnSettings, ConversationTurnStartRequest, ExecutionMode, ModelSelection,
+    ModelSelectionMode, ReasoningEffort, TIMELINE_ITEM_SCHEMA, TimelineItem, TimelineItemKind,
+    TurnContextSelection, UserMessageInput,
+};
 pub use vault::{
     VAULT_DECRYPT_SCHEMA, VAULT_ENCRYPT_SCHEMA, VAULT_ERROR_SCHEMA, VAULT_STATUS_SCHEMA,
     VAULT_SUMMARY_SCHEMA, VaultDecryptResult, VaultEncryptResult, VaultEntry, VaultErrorBody,
@@ -1737,6 +1764,62 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "runtime-capability-report.schema.json",
             serde_json::to_string_pretty(&schema_for!(RuntimeCapabilityReport))?,
+        ),
+        (
+            "conversation-turn-start-request.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ConversationTurnStartRequest))?,
+        ),
+        (
+            "conversation-turn-accepted.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ConversationTurnAccepted))?,
+        ),
+        (
+            "conversation-thread-settings.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ConversationThreadSettings))?,
+        ),
+        (
+            "timeline-item.schema.json",
+            serde_json::to_string_pretty(&schema_for!(TimelineItem))?,
+        ),
+        (
+            "agent-adapter-descriptor.schema.json",
+            serde_json::to_string_pretty(&schema_for!(AgentAdapterDescriptor))?,
+        ),
+        (
+            "agent-event-envelope.schema.json",
+            serde_json::to_string_pretty(&schema_for!(AgentEventEnvelope))?,
+        ),
+        (
+            "worker-role.schema.json",
+            serde_json::to_string_pretty(&schema_for!(WorkerRole))?,
+        ),
+        (
+            "subcontract-packet.schema.json",
+            serde_json::to_string_pretty(&schema_for!(SubcontractPacket))?,
+        ),
+        (
+            "tool-policy.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ToolPolicy))?,
+        ),
+        (
+            "patch-proposal.schema.json",
+            serde_json::to_string_pretty(&schema_for!(PatchProposal))?,
+        ),
+        (
+            "patch-apply-result.schema.json",
+            serde_json::to_string_pretty(&schema_for!(PatchApplyResult))?,
+        ),
+        (
+            "verification-result.schema.json",
+            serde_json::to_string_pretty(&schema_for!(VerificationResult))?,
+        ),
+        (
+            "pipeline-topology-snapshot.schema.json",
+            serde_json::to_string_pretty(&schema_for!(PipelineTopologySnapshot))?,
+        ),
+        (
+            "process-diagnostic.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ProcessDiagnostic))?,
         ),
         (
             "conversation-summary.schema.json",

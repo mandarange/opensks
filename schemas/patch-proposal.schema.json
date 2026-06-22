@@ -1,0 +1,113 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PatchProposal",
+  "description": "A proposed multi-file change produced by a worker.",
+  "type": "object",
+  "required": [
+    "base_tree_hash",
+    "files",
+    "proposal_id",
+    "rationale_summary",
+    "risk_level",
+    "run_id",
+    "schema",
+    "worker_id"
+  ],
+  "properties": {
+    "base_commit": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "base_tree_hash": {
+      "type": "string"
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/FilePatch"
+      }
+    },
+    "proposal_id": {
+      "type": "string"
+    },
+    "rationale_summary": {
+      "type": "string"
+    },
+    "requirement_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "risk_level": {
+      "$ref": "#/definitions/RiskLevel"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "worker_id": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "FileOperation": {
+      "description": "The filesystem operation a single file patch performs.",
+      "type": "string",
+      "enum": [
+        "create",
+        "modify",
+        "delete",
+        "rename"
+      ]
+    },
+    "FilePatch": {
+      "description": "A single file's change. `before_hash` is validated against the current on-disk content before apply (optimistic concurrency / no silent overwrite).",
+      "type": "object",
+      "required": [
+        "after_hash",
+        "before_hash",
+        "operation",
+        "path",
+        "unified_diff"
+      ],
+      "properties": {
+        "after_hash": {
+          "type": "string"
+        },
+        "before_hash": {
+          "type": "string"
+        },
+        "operation": {
+          "$ref": "#/definitions/FileOperation"
+        },
+        "path": {
+          "type": "string"
+        },
+        "unified_diff": {
+          "type": "string"
+        }
+      }
+    },
+    "RiskLevel": {
+      "description": "Coarse risk of applying a patch; drives approval requirements.",
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "destructive"
+      ]
+    }
+  }
+}

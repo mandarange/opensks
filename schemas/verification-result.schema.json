@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VerificationResult",
+  "description": "An evidence-backed verification outcome.",
+  "type": "object",
+  "required": [
+    "kind",
+    "passed",
+    "run_id",
+    "schema",
+    "summary"
+  ],
+  "properties": {
+    "details_redacted": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "kind": {
+      "$ref": "#/definitions/VerificationKind"
+    },
+    "passed": {
+      "type": "boolean"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "VerificationKind": {
+      "description": "The category of verification run.",
+      "type": "string",
+      "enum": [
+        "tests",
+        "static",
+        "security",
+        "build"
+      ]
+    }
+  }
+}

@@ -1,0 +1,130 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SubcontractPacket",
+  "description": "The minimal-authority work packet handed to a worker (§8.3). A worker gets least-privilege context/permissions, never blanket project access.",
+  "type": "object",
+  "required": [
+    "context_pack_ref",
+    "contract_version",
+    "objective",
+    "output_contract",
+    "parent_run_id",
+    "role",
+    "schema",
+    "work_item_id"
+  ],
+  "properties": {
+    "acceptance_criteria": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "allowed_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "allowed_tools": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "context_pack_ref": {
+      "type": "string"
+    },
+    "contract_version": {
+      "type": "string"
+    },
+    "deadline_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "evidence_requirements": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "forbidden_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "objective": {
+      "type": "string"
+    },
+    "output_contract": {
+      "$ref": "#/definitions/OutputContractKind"
+    },
+    "parent_run_id": {
+      "type": "string"
+    },
+    "role": {
+      "$ref": "#/definitions/WorkerRole"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "token_budget": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "work_item_id": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "OutputContractKind": {
+      "description": "What a subcontracted worker is required to produce.",
+      "oneOf": [
+        {
+          "description": "Patch proposals only — no direct writes (the default, §8.4).",
+          "type": "string",
+          "enum": [
+            "patch_only"
+          ]
+        },
+        {
+          "description": "Free-form text/analysis.",
+          "type": "string",
+          "enum": [
+            "text"
+          ]
+        },
+        {
+          "description": "A structured JSON result.",
+          "type": "string",
+          "enum": [
+            "structured_json"
+          ]
+        }
+      ]
+    },
+    "WorkerRole": {
+      "description": "The role a worker plays in a pipeline (§7.4). Routing maps roles to models.",
+      "type": "string",
+      "enum": [
+        "planner",
+        "code_explorer",
+        "implementer",
+        "test_author",
+        "reviewer",
+        "security_reviewer",
+        "image_generator",
+        "arbiter"
+      ]
+    }
+  }
+}

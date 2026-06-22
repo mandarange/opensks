@@ -1,0 +1,108 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AgentEventEnvelope",
+  "description": "A single agent event. Every event carries full identity + an ordered `sequence` so the consumer can dedup/replay deterministically.",
+  "type": "object",
+  "required": [
+    "conversation_id",
+    "kind",
+    "occurred_at_ms",
+    "payload",
+    "project_id",
+    "run_id",
+    "schema",
+    "sensitivity",
+    "sequence",
+    "stream_id",
+    "turn_id"
+  ],
+  "properties": {
+    "conversation_id": {
+      "type": "string"
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "kind": {
+      "$ref": "#/definitions/AgentEventKind"
+    },
+    "node_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "occurred_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "payload": true,
+    "project_id": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "sensitivity": {
+      "$ref": "#/definitions/Sensitivity"
+    },
+    "sequence": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "stream_id": {
+      "type": "string"
+    },
+    "turn_id": {
+      "type": "string"
+    },
+    "worker_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "AgentEventKind": {
+      "description": "The typed kinds of event an adapter can emit (§6.5).",
+      "type": "string",
+      "enum": [
+        "assistant_text_delta",
+        "assistant_text_completed",
+        "plan_updated",
+        "tool_call_started",
+        "tool_call_output",
+        "tool_call_completed",
+        "file_patch_proposed",
+        "file_patch_applied",
+        "verification_started",
+        "verification_completed",
+        "worker_spawned",
+        "worker_progress",
+        "worker_completed",
+        "approval_requested",
+        "approval_resolved",
+        "image_artifact_created",
+        "warning",
+        "error"
+      ]
+    },
+    "Sensitivity": {
+      "type": "string",
+      "enum": [
+        "public",
+        "internal",
+        "secret"
+      ]
+    }
+  }
+}

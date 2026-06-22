@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProcessDiagnostic",
+  "description": "A redacted post-mortem for a child process.",
+  "type": "object",
+  "required": [
+    "occurred_at_ms",
+    "process_label",
+    "reason_code",
+    "schema",
+    "stderr_tail_redacted"
+  ],
+  "properties": {
+    "exit_code": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int32"
+    },
+    "occurred_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "process_label": {
+      "type": "string"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "signal": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int32"
+    },
+    "stderr_tail_redacted": {
+      "description": "Bounded (≤4096 lines / ≤1MB), secret-redacted tail of stderr.",
+      "type": "string"
+    }
+  }
+}
