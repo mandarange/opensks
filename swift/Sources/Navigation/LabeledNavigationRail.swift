@@ -13,7 +13,7 @@ struct LabeledNavigationRail: View {
     var body: some View {
         VStack(spacing: 2) {
             Spacer().frame(height: 8)
-            ForEach(WorkspaceRoute.allCases) { route in
+            ForEach(WorkspaceRoute.primaryRailRoutes) { route in
                 RailTile(route: route, active: nav.route == route) {
                     nav.route = route
                 }

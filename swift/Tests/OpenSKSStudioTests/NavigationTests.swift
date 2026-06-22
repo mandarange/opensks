@@ -5,12 +5,25 @@ import XCTest
 @MainActor
 final class NavigationTests: XCTestCase {
     func testRailExposesAllLabelledRoutesInOrder() {
-        // PR-042 adds the Vault route between Intel and Evidence without removing any
-        // existing route.
+        // User-facing labels (recovery directive §3.4): Git→"Changes",
+        // Graph→"Pipeline", and the new "Project" hub at the end.
         XCTAssertEqual(
             WorkspaceRoute.allCases.map(\.label),
-            ["Home", "Chat", "Code", "Graph", "Runs", "Git", "Design", "Intel", "Vault", "Evidence", "Settings"]
+            [
+                "Home", "Chat", "Code", "Pipeline", "Runs", "Changes", "Design",
+                "Intel", "Vault", "Evidence", "Settings", "Project",
+            ]
         )
+    }
+
+    func testPrimaryRailIsFiveDestinations() {
+        // The primary rail is exactly the five §3.4 destinations.
+        XCTAssertEqual(
+            WorkspaceRoute.primaryRailRoutes,
+            [.chat, .code, .git, .graph, .project]
+        )
+        XCTAssertEqual(WorkspaceRoute.primaryRailRoutes.map(\.label),
+            ["Chat", "Code", "Changes", "Pipeline", "Project"])
     }
 
     func testEachRouteHasADistinctCentralIdentifier() {

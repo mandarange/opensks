@@ -79,6 +79,11 @@ struct PrimaryWorkspaceRouter: View {
                 // Providers, permissions and retention land on their own surfaces in
                 // later PRs; the keyboard-shortcut reference is available here today.
                 SettingsWorkspaceView()
+            case .project:
+                // The Project hub groups the secondary destinations (Intelligence,
+                // Design, Evidence, Vault, Settings, Runs) so the primary rail
+                // stays at five tiles (recovery directive §3.4).
+                ProjectHubView()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

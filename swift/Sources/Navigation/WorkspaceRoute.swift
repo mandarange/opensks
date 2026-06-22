@@ -8,9 +8,14 @@
 import Foundation
 
 enum WorkspaceRoute: String, CaseIterable, Hashable, Identifiable, Codable {
-    case home, chat, code, graph, runs, git, design, intelligence, vault, evidence, settings
+    case home, chat, code, graph, runs, git, design, intelligence, vault, evidence, settings, project
 
     var id: String { rawValue }
+
+    /// The five PRIMARY rail destinations (recovery directive §3.4). The rest
+    /// (Intelligence, Design, Evidence, Vault, Settings, Runs, Home) are reached
+    /// through the Project hub, keeping the rail uncluttered.
+    static let primaryRailRoutes: [WorkspaceRoute] = [.chat, .code, .git, .graph, .project]
 
     /// Visible rail label (English).
     var label: String {
@@ -18,14 +23,15 @@ enum WorkspaceRoute: String, CaseIterable, Hashable, Identifiable, Codable {
         case .home: return "Home"
         case .chat: return "Chat"
         case .code: return "Code"
-        case .graph: return "Graph"
+        case .graph: return "Pipeline"
         case .runs: return "Runs"
-        case .git: return "Git"
+        case .git: return "Changes"
         case .design: return "Design"
         case .intelligence: return "Intel"
         case .vault: return "Vault"
         case .evidence: return "Evidence"
         case .settings: return "Settings"
+        case .project: return "Project"
         }
     }
 
@@ -42,6 +48,7 @@ enum WorkspaceRoute: String, CaseIterable, Hashable, Identifiable, Codable {
         case .vault: return "lock.shield"
         case .evidence: return "checkmark.seal"
         case .settings: return "gearshape"
+        case .project: return "square.grid.2x2"
         }
     }
 
@@ -66,6 +73,7 @@ enum WorkspaceRoute: String, CaseIterable, Hashable, Identifiable, Codable {
         case .vault: return .home
         case .evidence: return .evidence
         case .settings: return .settings
+        case .project: return .home
         }
     }
 }
