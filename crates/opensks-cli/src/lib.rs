@@ -2456,12 +2456,12 @@ fn run_conversation_turn_start(
     let run_id = format!("turn-{turn_id}");
     // Drive a real agent adapter instead of the deterministic engine template
     // (recovery directive §6, Appendix C rule 2 — the product conversation path
-    // must not call the deterministic engine template directly). Today this is
-    // the LocalTestAdapter, which performs genuine file edits when the
-    // prompt carries a structured instruction and otherwise answers honestly
-    // without changing anything; a live model adapter is selected here once one
-    // is configured.
-    let adapter = opensks_adapter::LocalTestAdapter::new();
+    // must not call the deterministic engine template directly). Single-model
+    // fallback (§7.3): when one model is configured (OPENROUTER_API_KEY present)
+    // it is auto-selected and produces a real answer; otherwise the
+    // LocalTestAdapter runs — performing genuine file edits for a structured
+    // instruction and answering honestly (no change) otherwise. The key is read
+    // from the env only inside the adapter; it is never logged or persisted.
     let sink = opensks_adapter::CollectingSink::new();
     let request = opensks_adapter::AgentRunRequest {
         workspace: workspace.to_path_buf(),
@@ -2473,8 +2473,17 @@ fn run_conversation_turn_start(
         now_ms,
         prompt: text.to_string(),
     };
-    let outcome = opensks_adapter::AgentAdapter::run(&adapter, &request, &sink)
-        .map_err(|error| CliError::Invalid(format!("agent run failed: {error}")))?;
+    let model = opensks_adapter::OpenRouterAdapter::default_model();
+    let outcome = if model.is_configured() {
+        opensks_adapter::AgentAdapter::run(&model, &request, &sink)
+    } else {
+        opensks_adapter::AgentAdapter::run(
+            &opensks_adapter::LocalTestAdapter::new(),
+            &request,
+            &sink,
+        )
+    }
+    .map_err(|error| CliError::Invalid(format!("agent run failed: {error}")))?;
     let _ = &sink; // events are streamed by the daemon path; one-shot CLI keeps the outcome.
 
     use opensks_contracts::projection::RunProjectionState;

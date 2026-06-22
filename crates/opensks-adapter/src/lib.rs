@@ -29,6 +29,9 @@ use opensks_contracts::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod openrouter;
+pub use openrouter::OpenRouterAdapter;
+
 #[derive(Debug, thiserror::Error)]
 pub enum AgentAdapterError {
     #[error("io error on {path}: {source}")]
@@ -41,6 +44,10 @@ pub enum AgentAdapterError {
     PathEscape(String),
     #[error("invalid instruction: {0}")]
     InvalidInstruction(String),
+    #[error("missing API key in env var `{0}`")]
+    MissingApiKey(String),
+    #[error("provider call failed: {0}")]
+    Provider(String),
 }
 
 /// Everything an adapter needs to perform one turn. Timestamps are passed in so

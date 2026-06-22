@@ -213,9 +213,12 @@ pub fn baseline_capability_report() -> RuntimeCapabilityReport {
             capability(
                 "chat.answer",
                 "Chat assistant answer",
-                Simulation,
-                "no_live_model_adapter",
-                &[],
+                Foundation,
+                "real_answer_path_needs_model_configured",
+                &[
+                    "crate:opensks-adapter",
+                    "test:live_openrouter_returns_real_text",
+                ],
                 &["connect_model"],
             ),
             capability(
@@ -237,9 +240,9 @@ pub fn baseline_capability_report() -> RuntimeCapabilityReport {
             capability(
                 "model.dispatch",
                 "Model provider dispatch",
-                Unavailable,
-                "no_provider_execution_adapter",
-                &[],
+                Foundation,
+                "openrouter_adapter_present_needs_api_key",
+                &["crate:opensks-adapter", "adapter:openrouter"],
                 &["connect_model"],
             ),
             capability(
