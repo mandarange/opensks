@@ -13,6 +13,7 @@ opensks-conversation = { path = "../opensks-conversation" }
 opensks-daemon = { path = "../opensks-daemon" }
 opensks-engine = { path = "../opensks-engine" }
 opensks-event-store = { path = "../opensks-event-store" }
+opensks-file-service = { path = "../opensks-file-service" }
 opensks-git = { path = "../opensks-git" }
 opensks-graph = { path = "../opensks-graph" }
 opensks-hooks = { path = "../opensks-hooks" }

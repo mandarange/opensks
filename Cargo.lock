@@ -137,6 +137,7 @@ dependencies = [
  "opensks-daemon",
  "opensks-engine",
  "opensks-event-store",
+ "opensks-file-service",
  "opensks-git",
  "opensks-graph",
  "opensks-hooks",

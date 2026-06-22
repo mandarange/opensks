@@ -1697,6 +1697,251 @@ fn conversation_output(value: &serde_json::Value) -> Result<CliOutput, CliError>
     Ok(CliOutput { stdout })
 }
 
+/// Options for the `file` verb. `path` is workspace-relative; `workspace`
+/// defaults to the process `cwd`.
+#[derive(Debug, Default)]
+struct FileCommandOptions {
+    workspace: Option<PathBuf>,
+    path: Option<String>,
+    expected_hash: Option<String>,
+    expected_mtime: Option<u64>,
+    stdin: bool,
+}
+
+/// `opensks file open|save|stat` — the sanctioned editor read/write path over a
+/// canonical workspace (PR-032). Every success serializes a typed JSON document;
+/// every guard failure emits a content-free `opensks.file-error.v1` JSON and
+/// returns `CliError::Invalid` so the process exits nonzero.
+pub fn run_file_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    // The save subcommand reads its new content from stdin; the read is injected
+    // here so the command logic stays testable without a live stdin.
+    run_file_command_with_input(args, cwd, read_stdin_to_string)
+}
+
+/// Inner implementation of [`run_file_command`] with the stdin read injected as
+/// `read_input`, invoked only on the `save` path after its flags validate.
+fn run_file_command_with_input<F>(
+    args: &[String],
+    cwd: &Path,
+    read_input: F,
+) -> Result<CliOutput, CliError>
+where
+    F: FnOnce() -> Result<String, CliError>,
+{
+    let Some(subcommand) = args.first() else {
+        return Ok(CliOutput {
+            stdout: file_usage().to_string(),
+        });
+    };
+    if subcommand == "--help" || subcommand == "-h" || subcommand == "help" {
+        return Ok(CliOutput {
+            stdout: file_usage().to_string(),
+        });
+    }
+
+    let options = parse_file_options(&args[1..])?;
+    let workspace = options
+        .workspace
+        .clone()
+        .unwrap_or_else(|| cwd.to_path_buf());
+    let relative = require_file_field(options.path.as_deref(), "--path")?;
+
+    // Open the service over the canonical workspace. A bad workspace root is a
+    // configuration error, not a per-file guard verdict, so it is reported as a
+    // usage/invalid error rather than a `file-error.v1` payload.
+    let service = match opensks_file_service::WorkspaceFileService::open(&workspace) {
+        Ok(service) => service,
+        Err(error) => {
+            return Err(CliError::Invalid(format!(
+                "open workspace `{}`: {}",
+                workspace.display(),
+                error.reason_code()
+            )));
+        }
+    };
+
+    match subcommand.as_str() {
+        "open" => match service.open_text(relative) {
+            Ok(document) => file_output(&file_document_json(&document)),
+            Err(error) => Err(file_error(&error)),
+        },
+        "stat" => match service.stat(relative) {
+            Ok(entry) => file_output(&file_entry_json(&entry)),
+            Err(error) => Err(file_error(&error)),
+        },
+        "save" => {
+            let expected_hash =
+                require_file_field(options.expected_hash.as_deref(), "--expected-hash")?;
+            if !options.stdin {
+                return Err(CliError::Usage(format!(
+                    "file save requires `--stdin` (new content is read from stdin)\n\n{}",
+                    file_usage()
+                )));
+            }
+            let content = read_input()?;
+            let mut request =
+                opensks_contracts::SaveTextRequest::new(relative, content, expected_hash);
+            request.expected_mtime_ms = options.expected_mtime;
+            match service.save_text(&request) {
+                Ok(result) => file_output(&file_save_json(&result)),
+                Err(error) => Err(file_error(&error)),
+            }
+        }
+        other => Err(CliError::Usage(format!(
+            "unknown file subcommand `{other}`\n\n{}",
+            file_usage()
+        ))),
+    }
+}
+
+pub fn file_usage() -> &'static str {
+    concat!(
+        "usage: opensks file open --workspace <path> --path <relative>\n",
+        "       opensks file save --workspace <path> --path <relative> --expected-hash <hash> [--expected-mtime <ms>] --stdin\n",
+        "       opensks file stat --workspace <path> --path <relative>\n"
+    )
+}
+
+fn parse_file_options(args: &[String]) -> Result<FileCommandOptions, CliError> {
+    let mut options = FileCommandOptions::default();
+    let mut idx = 0;
+    while idx < args.len() {
+        let flag = args[idx].as_str();
+        match flag {
+            "--workspace" => {
+                options.workspace = Some(PathBuf::from(file_flag_value(args, idx, flag)?));
+                idx += 2;
+            }
+            "--path" => {
+                options.path = Some(file_flag_value(args, idx, flag)?.to_string());
+                idx += 2;
+            }
+            "--expected-hash" => {
+                options.expected_hash = Some(file_flag_value(args, idx, flag)?.to_string());
+                idx += 2;
+            }
+            "--expected-mtime" => {
+                options.expected_mtime = Some(file_parse_u64(args, idx, flag)?);
+                idx += 2;
+            }
+            "--stdin" => {
+                options.stdin = true;
+                idx += 1;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown file argument `{other}`\n\n{}",
+                    file_usage()
+                )));
+            }
+        }
+    }
+    Ok(options)
+}
+
+fn file_flag_value<'a>(args: &'a [String], idx: usize, flag: &str) -> Result<&'a str, CliError> {
+    args.get(idx + 1).map(String::as_str).ok_or_else(|| {
+        CliError::Usage(format!(
+            "file flag `{flag}` requires a value\n\n{}",
+            file_usage()
+        ))
+    })
+}
+
+fn file_parse_u64(args: &[String], idx: usize, flag: &str) -> Result<u64, CliError> {
+    file_flag_value(args, idx, flag)?
+        .parse::<u64>()
+        .map_err(|_| {
+            CliError::Usage(format!(
+                "file flag `{flag}` expects a non-negative integer\n\n{}",
+                file_usage()
+            ))
+        })
+}
+
+fn require_file_field<'a>(value: Option<&'a str>, flag: &str) -> Result<&'a str, CliError> {
+    value.ok_or_else(|| {
+        CliError::Usage(format!(
+            "file command requires `{flag}`\n\n{}",
+            file_usage()
+        ))
+    })
+}
+
+/// Read the full save payload from stdin. The bytes are the new file content and
+/// are never echoed into an error message.
+fn read_stdin_to_string() -> Result<String, CliError> {
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input)?;
+    Ok(input)
+}
+
+/// Serialize an opened document to the `opensks.text-document.v1` wire shape with
+/// the contract's explicit field names (`encoding:"utf-8"`, string `line_ending`,
+/// `is_binary:false`).
+fn file_document_json(document: &opensks_contracts::TextDocument) -> serde_json::Value {
+    serde_json::json!({
+        "schema": document.schema,
+        "workspace_relative_path": document.workspace_relative_path,
+        "content": document.content,
+        "content_hash": document.content_hash,
+        "encoding": "utf-8",
+        "line_ending": document.line_ending.as_str(),
+        "byte_size": document.byte_size,
+        "is_secret_restricted": document.is_secret_restricted,
+        "is_binary": false,
+        "on_disk_modification_ms": document.on_disk_modification_ms,
+        "permissions_mode": document.permissions_mode,
+    })
+}
+
+/// Serialize a successful save to the `opensks.save-result.v1` wire shape.
+fn file_save_json(result: &opensks_contracts::SaveTextResult) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "opensks.save-result.v1",
+        "workspace_relative_path": result.workspace_relative_path,
+        "new_hash": result.new_hash,
+        "new_mtime_ms": result.new_mtime_ms,
+    })
+}
+
+/// Serialize a stat to the `opensks.workspace-entry.v1` wire shape.
+fn file_entry_json(entry: &opensks_contracts::WorkspaceEntry) -> serde_json::Value {
+    serde_json::json!({
+        "schema": entry.schema,
+        "workspace_relative_path": entry.workspace_relative_path,
+        "byte_size": entry.byte_size,
+        "modification_ms": entry.modification_ms,
+        "permissions_mode": entry.permissions_mode,
+        "content_hash": entry.content_hash,
+        "is_secret_restricted": entry.is_secret_restricted,
+    })
+}
+
+/// Map a `FileServiceError` to the `opensks.file-error.v1` envelope and wrap it
+/// in `CliError::Invalid` so the binary prints the JSON and exits nonzero. The
+/// message is derived solely from the stable reason code and the
+/// workspace-relative path — never from file contents.
+fn file_error(error: &opensks_contracts::FileServiceError) -> CliError {
+    let body = serde_json::json!({
+        "schema": "opensks.file-error.v1",
+        "error": {
+            "code": error.reason_code(),
+            "message": error.to_string(),
+        },
+    });
+    let payload = serde_json::to_string(&body)
+        .unwrap_or_else(|_| "{\"schema\":\"opensks.file-error.v1\"}".to_string());
+    CliError::Invalid(payload)
+}
+
+fn file_output(value: &serde_json::Value) -> Result<CliOutput, CliError> {
+    let stdout = serde_json::to_string_pretty(value)
+        .map_err(|error| CliError::Invalid(format!("serialize file output: {error}")))?
+        + "\n";
+    Ok(CliOutput { stdout })
+}
+
 fn parse_daemon_options(args: &[String], cwd: &Path) -> Result<DaemonCommandOptions, CliError> {
     let mut stdio = false;
     let mut workspace = cwd.to_path_buf();
@@ -3784,6 +4029,267 @@ mod tests {
         assert_eq!(listed[0]["relation"], "primary");
         assert_eq!(listed[0]["run_state"], "completed");
 
+        fs::remove_dir_all(root).ok();
+    }
+
+    // --- file verb ---------------------------------------------------------
+
+    /// A canonical temp workspace seeded for `file` command tests. Canonicalizing
+    /// up front keeps `--workspace` byte-identical to the service's root so
+    /// containment checks behave the same as in production.
+    fn file_workspace(label: &str) -> PathBuf {
+        let root = temp_workspace(label);
+        root.canonicalize().expect("canonicalize file workspace")
+    }
+
+    fn write_workspace_file(root: &Path, relative: &str, contents: &[u8]) {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent");
+        }
+        fs::write(path, contents).expect("write workspace fixture");
+    }
+
+    /// Run `opensks file <args>` with `--workspace <root>` prepended, returning
+    /// the parsed stdout JSON on success.
+    fn file_ok(root: &Path, args: &[&str]) -> serde_json::Value {
+        let output = file_run(root, args, || Ok(String::new())).expect("file command ok");
+        serde_json::from_str(&output.stdout).expect("valid file json")
+    }
+
+    /// Run `opensks file <args>` driving the save stdin from `input`.
+    fn file_run<F>(root: &Path, args: &[&str], input: F) -> Result<CliOutput, CliError>
+    where
+        F: FnOnce() -> Result<String, CliError>,
+    {
+        let ws = root.to_string_lossy().into_owned();
+        let mut owned = vec![args[0].to_string(), "--workspace".to_string(), ws];
+        owned.extend(args[1..].iter().map(|value| value.to_string()));
+        run_file_command_with_input(&owned, root, input)
+    }
+
+    /// Extract the `file-error.v1` payload from a failed `file` command. The
+    /// command surfaces the error JSON as the `CliError::Invalid` message so the
+    /// binary prints it and exits nonzero.
+    fn file_error_json(error: CliError) -> serde_json::Value {
+        match error {
+            CliError::Invalid(message) => {
+                serde_json::from_str(&message).expect("file-error json payload")
+            }
+            other => panic!("expected CliError::Invalid file-error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_open_returns_document_json_with_hash() {
+        let root = file_workspace("opensks-cli-file-open");
+        write_workspace_file(&root, "src/notes.txt", b"hello world\n");
+
+        let document = file_ok(&root, &["open", "--path", "src/notes.txt"]);
+        assert_eq!(document["schema"], "opensks.text-document.v1");
+        assert_eq!(document["workspace_relative_path"], "src/notes.txt");
+        assert_eq!(document["content"], "hello world\n");
+        assert_eq!(document["encoding"], "utf-8");
+        assert_eq!(document["line_ending"], "lf");
+        assert_eq!(document["byte_size"], 12);
+        assert_eq!(document["is_secret_restricted"], false);
+        assert_eq!(document["is_binary"], false);
+        let hash = document["content_hash"].as_str().expect("content hash");
+        assert!(hash.starts_with("fnv1a64:"), "unexpected hash: {hash}");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_stat_returns_entry_without_contents() {
+        let root = file_workspace("opensks-cli-file-stat");
+        write_workspace_file(&root, "meta.txt", b"abc\n");
+
+        let entry = file_ok(&root, &["stat", "--path", "meta.txt"]);
+        assert_eq!(entry["schema"], "opensks.workspace-entry.v1");
+        assert_eq!(entry["workspace_relative_path"], "meta.txt");
+        assert_eq!(entry["byte_size"], 4);
+        assert_eq!(entry["is_secret_restricted"], false);
+        assert_eq!(entry["content_hash"], "");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_save_with_matching_hash_succeeds_and_changes_bytes() {
+        let root = file_workspace("opensks-cli-file-save-ok");
+        write_workspace_file(&root, "doc.txt", b"v1\n");
+
+        let document = file_ok(&root, &["open", "--path", "doc.txt"]);
+        let baseline = document["content_hash"].as_str().expect("hash").to_string();
+
+        let saved = file_run(
+            &root,
+            &[
+                "save",
+                "--path",
+                "doc.txt",
+                "--expected-hash",
+                &baseline,
+                "--stdin",
+            ],
+            || Ok("v2-edited\n".to_string()),
+        )
+        .expect("save ok");
+        let result: serde_json::Value =
+            serde_json::from_str(&saved.stdout).expect("valid save json");
+        assert_eq!(result["schema"], "opensks.save-result.v1");
+        let new_hash = result["new_hash"].as_str().expect("new hash");
+        assert!(new_hash.starts_with("fnv1a64:"));
+        assert_ne!(new_hash, baseline);
+        assert!(result["new_mtime_ms"].is_u64());
+
+        // The on-disk bytes must reflect the saved content.
+        assert_eq!(
+            fs::read_to_string(root.join("doc.txt")).expect("read back"),
+            "v2-edited\n"
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_save_with_stale_hash_is_file_changed_on_disk_without_contents() {
+        const SENTINEL: &str = "SUPER_SECRET_SENTINEL_91";
+        let root = file_workspace("opensks-cli-file-save-stale");
+        write_workspace_file(&root, "doc.txt", b"v1\n");
+
+        let document = file_ok(&root, &["open", "--path", "doc.txt"]);
+        let stale = document["content_hash"].as_str().expect("hash").to_string();
+
+        // Out-of-band change so the baseline no longer matches; the new on-disk
+        // content carries a sentinel that must never leak into the error.
+        write_workspace_file(&root, "doc.txt", format!("{SENTINEL}\n").as_bytes());
+
+        let error = file_run(
+            &root,
+            &[
+                "save",
+                "--path",
+                "doc.txt",
+                "--expected-hash",
+                &stale,
+                "--stdin",
+            ],
+            || Ok("v3-edited\n".to_string()),
+        )
+        .expect_err("stale baseline conflict");
+        let CliError::Invalid(ref message) = error else {
+            panic!("expected CliError::Invalid, got {error:?}");
+        };
+        assert!(
+            !message.contains(SENTINEL),
+            "file-error payload leaked file contents"
+        );
+        let body = file_error_json(error);
+        assert_eq!(body["schema"], "opensks.file-error.v1");
+        assert_eq!(body["error"]["code"], "file_changed_on_disk");
+
+        // The rejected save must leave the on-disk bytes untouched.
+        assert_eq!(
+            fs::read_to_string(root.join("doc.txt")).expect("read back"),
+            format!("{SENTINEL}\n")
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_open_binary_reports_file_binary() {
+        let root = file_workspace("opensks-cli-file-binary");
+        write_workspace_file(&root, "blob.bin", &[0x00u8, 0x01, 0x02, 0x00]);
+
+        let error = file_run(&root, &["open", "--path", "blob.bin"], || Ok(String::new()))
+            .expect_err("binary rejected");
+        let body = file_error_json(error);
+        assert_eq!(body["error"]["code"], "file_binary");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_open_secret_reports_file_secret_restricted() {
+        let root = file_workspace("opensks-cli-file-secret");
+        write_workspace_file(&root, ".env", b"TOKEN=abc\n");
+
+        let error = file_run(&root, &["open", "--path", ".env"], || Ok(String::new()))
+            .expect_err("secret rejected");
+        let body = file_error_json(error);
+        assert_eq!(body["error"]["code"], "file_secret_restricted");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_open_oversize_reports_file_too_large() {
+        // 5 MiB is the editable ceiling; write one byte past it.
+        let root = file_workspace("opensks-cli-file-oversize");
+        let oversize = vec![b'a'; (5 * 1024 * 1024) + 1];
+        write_workspace_file(&root, "big.txt", &oversize);
+
+        let error = file_run(&root, &["open", "--path", "big.txt"], || Ok(String::new()))
+            .expect_err("oversize rejected");
+        let body = file_error_json(error);
+        assert_eq!(body["error"]["code"], "file_too_large");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_open_traversal_reports_workspace_path_escape() {
+        let root = file_workspace("opensks-cli-file-traversal");
+
+        let error = file_run(&root, &["open", "--path", "../etc/passwd"], || {
+            Ok(String::new())
+        })
+        .expect_err("traversal rejected");
+        let body = file_error_json(error);
+        assert_eq!(body["error"]["code"], "workspace_path_escape");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_open_absolute_reports_workspace_path_escape() {
+        let root = file_workspace("opensks-cli-file-absolute");
+
+        let error = file_run(&root, &["open", "--path", "/etc/passwd"], || {
+            Ok(String::new())
+        })
+        .expect_err("absolute rejected");
+        let body = file_error_json(error);
+        assert_eq!(body["error"]["code"], "workspace_path_escape");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_save_requires_stdin_flag() {
+        let root = file_workspace("opensks-cli-file-save-no-stdin");
+        write_workspace_file(&root, "doc.txt", b"v1\n");
+
+        let error = file_run(
+            &root,
+            &["save", "--path", "doc.txt", "--expected-hash", "fnv1a64:0"],
+            || Ok("ignored\n".to_string()),
+        )
+        .expect_err("save without --stdin");
+        assert!(matches!(error, CliError::Usage(_)));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_unknown_subcommand_is_usage_error() {
+        let root = file_workspace("opensks-cli-file-unknown");
+        let error = file_run(&root, &["frobnicate", "--path", "x"], || Ok(String::new()))
+            .expect_err("unknown subcommand");
+        assert!(matches!(error, CliError::Usage(_)));
         fs::remove_dir_all(root).ok();
     }
 }

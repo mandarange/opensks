@@ -5,6 +5,7 @@
 // them — never a fake "live" surface.
 
 import SwiftUI
+import AppKit
 
 struct PrimaryWorkspaceRouter: View {
     @EnvironmentObject private var nav: NavigationStore
@@ -83,7 +84,8 @@ struct CodeWorkspaceView: View {
             let h = geo.size.height
             let editorH = max(160, h * editorFraction)
             VStack(spacing: 0) {
-                EditorView()
+                EditorWorkspaceView(store: state.editorStore)
+                    .frame(maxWidth: .infinity)
                     .frame(height: state.terminalCollapsed ? h - 30 : editorH)
                 if !state.terminalCollapsed {
                     HorizontalDragDivider(fraction: $editorFraction, totalHeight: h)
@@ -92,6 +94,40 @@ struct CodeWorkspaceView: View {
                     .frame(maxHeight: .infinity)
             }
         }
+        // Keyboard: Cmd-S save, Opt-Cmd-S save all, Cmd-W close (dirty-protected),
+        // Cmd-F find. These are hidden command buttons so the shortcuts work
+        // whenever the code workspace is on screen without stealing focus.
+        .background(editorShortcuts)
+    }
+
+    private var editorShortcuts: some View {
+        ZStack {
+            Button("") { state.saveActiveFile() }
+                .keyboardShortcut("s", modifiers: .command)
+            Button("") { state.saveAllFiles() }
+                .keyboardShortcut("s", modifiers: [.command, .option])
+            Button("") { state.closeActiveFile() }
+                .keyboardShortcut("w", modifiers: .command)
+            Button("") { performEditorFind() }
+                .keyboardShortcut("f", modifiers: .command)
+        }
+        .buttonStyle(.plain)
+        .opacity(0)
+        .frame(width: 0, height: 0)
+        .accessibilityHidden(true)
+    }
+
+    /// Invoke the standard find bar on the first-responder text view by sending
+    /// `performTextFinderAction:` with the show-find-interface tag down the
+    /// responder chain (the focused NSTextView handles it).
+    private func performEditorFind() {
+        let item = NSMenuItem(title: "Find", action: nil, keyEquivalent: "")
+        item.tag = NSTextFinder.Action.showFindInterface.rawValue
+        NSApp.sendAction(
+            #selector(NSResponder.performTextFinderAction(_:)),
+            to: nil,
+            from: item
+        )
     }
 }
 

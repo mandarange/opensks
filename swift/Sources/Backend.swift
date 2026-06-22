@@ -869,14 +869,6 @@ enum FileScanner {
     }
 }
 
-struct FileTab: Identifiable {
-    let id = UUID()
-    let path: String
-    let name: String
-    let lang: CodeLang
-    let lines: [String]
-}
-
 // MARK: - App state (single source of truth)
 
 @MainActor
@@ -900,8 +892,13 @@ final class AppState: ObservableObject {
     @Published var terminalCollapsed = false
 
     @Published var fileRoots: [FileNode] = []
-    @Published var tabs: [FileTab] = []
-    @Published var activeTab: UUID?
+
+    /// The real editable code workspace (PR-032). Backed by the bundled
+    /// `opensks file …` CLI through the hardened file service.
+    let editorStore: EditorWorkspaceStore
+    /// Absolute path of the active editor document, for the Explorer's row
+    /// selection highlight (kept in sync as documents are focused).
+    @Published var activeEditorPath: String?
 
     @Published var objective = ""
     @Published var runMode: RunMode = .goal
@@ -925,14 +922,44 @@ final class AppState: ObservableObject {
             let candidate = res.appendingPathComponent("opensks-cli")
             if FileManager.default.fileExists(atPath: candidate.path) { cliPath = candidate.path }
         }
-        self.workspace = URL(fileURLWithPath: ws, isDirectory: true)
-        self.cli = URL(fileURLWithPath: cliPath)
-        self.fileRoots = FileScanner.scan(self.workspace)
+        let workspaceURL = URL(fileURLWithPath: ws, isDirectory: true)
+        let cliURL = URL(fileURLWithPath: cliPath)
+        self.workspace = workspaceURL
+        self.cli = cliURL
+        self.editorStore = EditorWorkspaceStore(
+            service: LiveEditorFileService(cli: cliURL, workspace: workspaceURL)
+        )
+        self.fileRoots = FileScanner.scan(workspaceURL)
     }
 
-    var activeFileTab: FileTab? {
-        guard let id = activeTab else { return nil }
-        return tabs.first { $0.id == id }
+    /// Convert an absolute (or already-relative) path into a workspace-relative
+    /// path the file service understands. Returns nil for paths outside the
+    /// workspace (the service would reject them as an escape anyway).
+    func workspaceRelativePath(for path: String) -> String? {
+        let wsPath = workspace.standardizedFileURL.path
+        let std = URL(fileURLWithPath: path).standardizedFileURL.path
+        if std == wsPath { return "." }
+        let prefix = wsPath.hasSuffix("/") ? wsPath : wsPath + "/"
+        if std.hasPrefix(prefix) {
+            return String(std.dropFirst(prefix.count))
+        }
+        // Not absolute under the workspace: assume it is already relative.
+        if !path.hasPrefix("/") { return path }
+        return nil
+    }
+
+    /// Sync the Explorer's selection highlight from the editor store's active
+    /// document. Call after any open/close in the editor.
+    func syncActiveEditorPath() {
+        guard let rel = editorStore.activeDocument?.workspaceRelativePath else {
+            activeEditorPath = nil
+            return
+        }
+        if rel == "." {
+            activeEditorPath = workspace.path
+        } else {
+            activeEditorPath = workspace.appendingPathComponent(rel).path
+        }
     }
 
     func loadData() {
@@ -1369,29 +1396,35 @@ final class AppState: ObservableObject {
 
     func clearOutput() { lines.removeAll() }
 
+    /// Open a file (absolute or workspace-relative path) in the real editable
+    /// code workspace. Routing through the editor store focuses an existing tab
+    /// for the same path instead of duplicating it; the Explorer highlight is
+    /// kept in sync.
     func openFile(_ path: String) {
-        if let existing = tabs.first(where: { $0.path == path }) {
-            activeTab = existing.id
+        guard let rel = workspaceRelativePath(for: path) else {
+            editorStore.openError = "\((path as NSString).lastPathComponent): outside the workspace"
             return
         }
-        let content = FileScanner.read(path)
-        let tab = FileTab(
-            path: path,
-            name: (path as NSString).lastPathComponent,
-            lang: CodeLang.detect(path),
-            lines: content.components(separatedBy: "\n")
-        )
-        tabs.append(tab)
-        if tabs.count > 12 { tabs.removeFirst() }
-        activeTab = tab.id
+        Task {
+            await editorStore.open(path: rel)
+            self.syncActiveEditorPath()
+        }
     }
 
-    func closeTab(_ id: UUID) {
-        guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return }
-        tabs.remove(at: idx)
-        if activeTab == id {
-            activeTab = tabs.last?.id
-        }
+    /// Save the active editor document.
+    func saveActiveFile() {
+        Task { await editorStore.save() }
+    }
+
+    /// Save every dirty editor document.
+    func saveAllFiles() {
+        Task { await editorStore.saveAll() }
+    }
+
+    /// Close the active editor tab with dirty protection.
+    func closeActiveFile() {
+        _ = editorStore.closeActive(dirtyProtection: true)
+        syncActiveEditorPath()
     }
 
     func reveal(_ path: String) {

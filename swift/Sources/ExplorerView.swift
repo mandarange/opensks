@@ -55,7 +55,7 @@ struct ExplorerView: View {
     private var fileTree: some View {
         List {
             OutlineGroup(state.fileRoots, children: \.children) { node in
-                FileRow(node: node, selected: state.activeFileTab?.path == node.id)
+                FileRow(node: node, selected: state.activeEditorPath == node.id)
                     .listRowBackground(Color.clear)
             }
         }
