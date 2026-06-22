@@ -15,6 +15,16 @@ final class AppCoordinator: ObservableObject {
     /// service is rebound via `bindConversations(cli:workspace:)`.
     let conversations: ConversationStore
 
+    /// Node-level pipeline projections keyed by run id (PR-029). The `.graph`
+    /// route and the conversation thread's `PipelineRunCard`s both read live
+    /// projections from here. Multiple concurrent runs coexist (one reducer per
+    /// run id), so switching the selected run shows that run's nodes.
+    let pipelines = PipelineProjectionStore()
+
+    /// The run whose live graph the `.graph` route renders. Set when an operator
+    /// opens a run's graph (e.g. from a `PipelineRunCard`'s "Open live graph").
+    @Published var activeGraphRunId: String?
+
     init() {
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
         let cli = cwd.appendingPathComponent("target/debug/opensks")
@@ -30,5 +40,14 @@ final class AppCoordinator: ObservableObject {
             LiveConversationService(cli: cli, workspace: workspace)
         )
         Task { await conversations.load() }
+    }
+
+    /// Focus the `.graph` route on a specific run and navigate there. Used by a
+    /// `PipelineRunCard`'s "Open live graph" control. Selecting a different run
+    /// id swaps the projection the graph renders without disturbing other runs'
+    /// state in the store.
+    func openGraph(runId: String) {
+        activeGraphRunId = runId
+        navigation.route = .graph
     }
 }

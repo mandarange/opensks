@@ -18,12 +18,15 @@ struct PrimaryWorkspaceRouter: View {
             case .code:
                 CodeWorkspaceView()
             case .chat:
-                ConversationThreadView(store: coordinator.conversations)
+                ConversationThreadView(
+                    store: coordinator.conversations,
+                    pipelines: coordinator.pipelines,
+                    onOpenGraph: { coordinator.openGraph(runId: $0) }
+                )
             case .graph:
-                RoutePlaceholderView(
-                    headline: "Pipeline Graph",
-                    detail: "The live visual graph canvas arrives in PR-030.",
-                    systemImage: "point.3.connected.trianglepath.dotted"
+                PipelineGraphWorkspace(
+                    store: coordinator.pipelines,
+                    activeRunId: $coordinator.activeGraphRunId
                 )
             case .runs:
                 RoutePlaceholderView(

@@ -10,6 +10,13 @@ import SwiftUI
 
 struct ConversationThreadView: View {
     @ObservedObject var store: ConversationStore
+    /// Live node-level projections keyed by run id (PR-029/PR-030). When a run
+    /// has a projection, the thread renders a `PipelineRunCard` (node-count
+    /// summary + mini graph + controls) alongside the PR-027 `RunCard`. Optional
+    /// so the thread still renders in contexts without a pipeline store.
+    var pipelines: PipelineProjectionStore?
+    /// Invoked when a run card's "Open live graph" is pressed.
+    var onOpenGraph: (String) -> Void = { _ in }
 
     var body: some View {
         Group {
@@ -89,6 +96,18 @@ struct ConversationThreadView: View {
                     if let run = store.run(forMessageID: message.id) {
                         RunCard(run: run)
                             .id("run-\(run.runId)")
+                        // If a live node-level projection exists for this run,
+                        // surface it as a PipelineRunCard alongside the PR-027
+                        // card. Every number is derived from the projection.
+                        if let projection = pipelines?.projection(for: run.runId) {
+                            PipelineRunCard(
+                                projection: projection,
+                                onControl: { control in
+                                    if control == .openGraph { onOpenGraph(run.runId) }
+                                }
+                            )
+                            .id("pipeline-run-\(run.runId)")
+                        }
                     }
                 }
             }
