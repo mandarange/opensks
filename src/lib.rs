@@ -1201,6 +1201,15 @@ fn run_qa_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError
 }
 
 fn run_security_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
+    // PR-044: the structured `opensks.security-report.v1` aggregator lives in
+    // opensks-cli (over the opensks-contracts schema). Route the `report`
+    // subcommand there; the existing secret-leak `audit` gate below is unchanged.
+    if args.first().map(String::as_str) == Some("report") {
+        let output = opensks_cli::run_security_command(args, cwd).map_err(convert_cli_error)?;
+        return Ok(CliOutput {
+            stdout: output.stdout,
+        });
+    }
     require_exact_subcommand(args, "audit", "usage: opensks security audit")?;
     let dir = cwd.join(OPEN_SKSDIR).join("security");
     fs::create_dir_all(&dir)?;

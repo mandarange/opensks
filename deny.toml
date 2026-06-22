@@ -1,0 +1,68 @@
+# cargo-deny configuration for the OpenSKS workspace (PR-044).
+#
+# This file is the machine-readable dependency-advisory + supply-chain policy.
+# `cargo deny check` is the CI scanner (alongside `cargo audit`); see
+# docs/security/dependency-advisories.md for the human-readable posture.
+#
+# Run locally with:
+#     cargo install cargo-deny
+#     cargo deny check
+#
+# The four sections below mirror the four risk dimensions we gate on:
+#   advisories — known RUSTSEC vulnerabilities / unmaintained crates
+#   bans       — duplicate or explicitly disallowed crates
+#   licenses   — only OSI-permissive licenses are allowed
+#   sources    — only crates.io is a trusted source registry
+
+# ---------------------------------------------------------------------------
+# Advisory database policy. Vulnerabilities and unmaintained crates are denied;
+# yanked crates warn. The crypto cluster derives entirely from the vetted `age`
+# crate — we never roll our own cipher/KDF/MAC/nonce/key-exchange — so advisory
+# coverage of `age` and its transitive RustCrypto deps is the load-bearing
+# control here.
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"
+# Document any temporary, owned exceptions here with a tracking note. Empty by
+# default: a new advisory fails CI until it is fixed or explicitly accepted.
+ignore = []
+
+# ---------------------------------------------------------------------------
+# Ban policy. Default-deny for multiple-version drift is relaxed to "warn" so a
+# transitive duplicate does not block the build, but wildcard version specs are
+# denied to keep the dependency graph reproducible.
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Explicitly disallowed crates would be listed here (none today).
+deny = []
+# Crates allowed to appear more than once (none today).
+skip = []
+
+# ---------------------------------------------------------------------------
+# License policy. Only OSI-approved permissive licenses are allowed; copyleft
+# and unknown licenses fail CI. The workspace itself is MIT.
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+# Confidence threshold for the license text matcher.
+confidence-threshold = 0.8
+
+# ---------------------------------------------------------------------------
+# Source policy. Only the public crates.io registry is trusted; unknown git
+# sources or alternate registries fail CI.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

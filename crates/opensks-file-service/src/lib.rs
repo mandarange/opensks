@@ -866,4 +866,183 @@ mod tests {
         assert!(!entry.is_secret_restricted);
         assert!(entry.content_hash.is_empty());
     }
+
+    // ======================================================================
+    // PR-044 PART B — FUZZ CORPUS (workspace file ingress)
+    //
+    // Deterministic, in-process fuzzing of the file-service ingress
+    // (`open_text` / `stat` / `save_text` / `lexical_candidate`). The
+    // adversarial corpus is hostile path strings — traversal (`..`), absolute,
+    // Windows drive/UNC, embedded NUL, URL-encoded dot-dot, deeply nested, and
+    // long random — plus a real on-disk canary OUTSIDE the workspace root. For
+    // every case the ingress MUST:
+    //   1. never panic (typed `Result` always),
+    //   2. never resolve to or read a path outside the canonical workspace
+    //      root (the outside canary is byte-for-byte intact afterwards),
+    //   3. on success only ever return contents of an in-root regular file.
+    // ======================================================================
+
+    /// Deterministic xorshift64* PRNG.
+    struct Lcg(u64);
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed | 1)
+        }
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+    }
+
+    /// Fixed seed list of adversarial workspace-relative path strings.
+    fn adversarial_paths() -> Vec<String> {
+        let mut v: Vec<String> = vec![
+            "".into(),
+            ".".into(),
+            "..".into(),
+            "../".into(),
+            "../etc/passwd".into(),
+            "../../../../../../etc/passwd".into(),
+            "a/../../b".into(),
+            "a/./b/../c".into(),
+            "/etc/passwd".into(),
+            "//etc/passwd".into(),
+            "/".into(),
+            "C:/windows".into(),
+            "C:\\windows\\system32".into(),
+            "\\\\unc\\share\\x".into(),
+            "%2e%2e/etc/passwd".into(),
+            "%2e%2e%2f%2e%2e%2fetc".into(),
+            "name\0with\0nul".into(),
+            ".env".into(),
+            "secret.key".into(),
+            "id_rsa".into(),
+            "cred/cred.pem".into(),
+            "ok/dir/file.txt".into(),
+            "\u{202e}rtl".into(),
+            "con".into(),
+            "nested/".to_string() + &"deep/".repeat(64) + "leaf.txt",
+            "x".repeat(5000),
+        ];
+        // A handful of segment-fuzzed variants.
+        let mut rng = Lcg::new(0x1357_9BDF);
+        const SEGS: &[&str] = &["..", ".", "a", "%2e%2e", "\0", "sub", "/", "\\", ".env"];
+        for _ in 0..40 {
+            let n = (rng.next_u64() % 6) as usize;
+            let mut parts = Vec::new();
+            for _ in 0..n {
+                parts.push(SEGS[(rng.next_u64() as usize) % SEGS.len()]);
+            }
+            v.push(parts.join("/"));
+        }
+        v
+    }
+
+    #[test]
+    fn fuzz_open_text_never_escapes_workspace() {
+        let ws = TempWorkspace::new("fuzz-open");
+        // A real, in-root regular file the parser is allowed to read.
+        ws.write("ok/dir/file.txt", "in-root-ok\n");
+
+        // The OUTSIDE canary lives next to (but not under) the workspace root.
+        let mut outside = std::env::temp_dir();
+        outside.push(format!(
+            "opensks-file-fuzz-OUTSIDE-{}-{}",
+            std::process::id(),
+            unique()
+        ));
+        const CANARY: &str = "OUTSIDE-SECRET-DO-NOT-READ";
+        fs::write(&outside, CANARY).expect("outside canary");
+
+        let service = ws.service();
+        let mut cases = 0usize;
+        // Each adversarial path, plus deterministic byte-mutated variants.
+        let mut rng = Lcg::new(0x2468_ACE0);
+        for base in adversarial_paths() {
+            for _ in 0..16 {
+                let mut raw = base.clone().into_bytes();
+                // mutate a couple of bytes
+                if !raw.is_empty() {
+                    for _ in 0..((rng.next_u64() % 3) + 1) {
+                        let i = (rng.next_u64() as usize) % raw.len();
+                        raw[i] = (rng.next_u64() >> 24) as u8;
+                    }
+                }
+                let rel = String::from_utf8_lossy(&raw).to_string();
+                cases += 1;
+                match service.open_text(&rel) {
+                    Ok(doc) => {
+                        // A success must NEVER be the outside canary's contents.
+                        assert!(
+                            !doc.content.contains(CANARY),
+                            "open_text escaped the workspace and read the canary via {rel:?}"
+                        );
+                    }
+                    Err(_) => { /* typed rejection is the expected path */ }
+                }
+                // stat and save_text must be equally contained / panic-free.
+                let _ = service.stat(&rel);
+                let req = SaveTextRequest::new(&rel, "x", content_hash(b"x"));
+                let _ = service.save_text(&req);
+                // INVARIANT: the outside canary is never modified or read-through.
+                assert_eq!(
+                    fs::read_to_string(&outside).expect("canary intact"),
+                    CANARY,
+                    "the outside canary was touched via {rel:?}"
+                );
+            }
+        }
+        let _ = fs::remove_file(&outside);
+        assert!(cases >= 500, "fuzzed {cases} file-ingress cases");
+    }
+
+    #[test]
+    fn fuzz_file_bytes_open_text_never_panics() {
+        // Adversarial FILE CONTENTS (not paths): NUL-laden, non-UTF8, huge,
+        // truncated multibyte. `open_text` must classify each via a typed error
+        // (binary / encoding / too_large) or return a valid UTF-8 document —
+        // never panic.
+        let ws = TempWorkspace::new("fuzz-bytes");
+        let service = WorkspaceFileService::open_with_limit(&ws.root, 1024).expect("svc");
+        let mut rng = Lcg::new(0x0BAD_F00D);
+        let seeds: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0x00],
+            vec![0xff, 0xfe, 0xfd],
+            b"valid utf8 text\n".to_vec(),
+            vec![0xc3, 0x28],       // invalid 2-byte sequence
+            vec![0xe2, 0x82],       // truncated 3-byte sequence
+            vec![0xf0, 0x9f, 0x98], // truncated 4-byte emoji
+            vec![b'a'; 2048],       // over the 1 KiB limit
+            (0u8..=255).collect(),
+        ];
+        let mut cases = 0usize;
+        for seed in seeds {
+            for _ in 0..40 {
+                let mut bytes = seed.clone();
+                if !bytes.is_empty() {
+                    let i = (rng.next_u64() as usize) % bytes.len();
+                    bytes[i] = (rng.next_u64() >> 20) as u8;
+                }
+                fs::write(ws.path("fuzz.txt"), &bytes).expect("write fuzz file");
+                cases += 1;
+                match service.open_text("fuzz.txt") {
+                    Ok(doc) => {
+                        // A returned document is always valid UTF-8 and NUL-free
+                        // within the sniff window.
+                        assert!(
+                            !doc.content.as_bytes()[..doc.content.len().min(BINARY_SNIFF_BYTES)]
+                                .contains(&0)
+                        );
+                    }
+                    Err(_) => { /* typed binary/encoding/size rejection */ }
+                }
+            }
+        }
+        assert!(cases >= 300, "fuzzed {cases} file-content cases");
+    }
 }

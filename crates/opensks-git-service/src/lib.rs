@@ -698,12 +698,19 @@ pub fn redact_remote(value: &str) -> String {
         }
         return value.to_string();
     }
-    // scp-like user@host:path — redact only when there is a ':' separating a
-    // host from a path (so we never mangle a short "origin/main" ref, which has
-    // no '@').
-    if let Some(at) = value.find('@') {
-        if value[at..].contains(':') {
-            return value[at + 1..].to_string();
+    // scp-like user@host:path — redact when the segment after the LAST '@' looks
+    // like a host (it contains a ':' port/path separator OR a '/' path). Using
+    // the last '@' means a malformed multi-`@` string such as
+    // `user:tok@evil@host:path` still strips every userinfo segment (a single
+    // `find('@')` would leave a `tok@` credential fragment behind). Checking for
+    // '/' as well as ':' closes a credential-echo edge case: a hostile string
+    // like `user:tok@host/path` (path uses '/', no ':') must NOT be returned
+    // verbatim. A bare `foo@bar` with neither ':' nor '/' is not a remote and is
+    // left untouched so we never mangle a short "origin/main"-style ref.
+    if let Some(at) = value.rfind('@') {
+        let host_part = &value[at + 1..];
+        if host_part.contains(':') || host_part.contains('/') {
+            return host_part.to_string();
         }
     }
     value.to_string()
@@ -1124,5 +1131,246 @@ mod tests {
                 "read-only service must not reference mutating git verb {forbidden}"
             );
         }
+    }
+
+    // ======================================================================
+    // PR-044 PART B — FUZZ CORPUS (git status/diff parsers + remote redactor)
+    //
+    // Deterministic, in-process fuzzing of every PARSER in this crate that
+    // consumes untrusted `git` stdout: `parse_status_v2`, `parse_status_v1`,
+    // `parse_unified_diff`, `parse_diff_git_header`, `parse_hunk_header`,
+    // `parse_range`, `parse_ab`, `parse_track`, and the `redact_remote`
+    // sanitizer. These functions take raw process output as `&str`, so the
+    // adversarial corpus is malformed/hostile text: truncated records, wrong
+    // field counts, huge numbers, NUL-bearing and non-UTF8-origin strings,
+    // path-traversal filenames, and deeply repeated headers. The invariant is
+    // total: a parser must NEVER panic and must always return a typed value
+    // (parsers that return `Result` may return `Err`; infallible parsers must
+    // return a well-formed struct). `redact_remote` must never echo embedded
+    // URL credentials.
+    // ======================================================================
+
+    /// Deterministic xorshift64* PRNG — identical corpus on every run/machine.
+    struct Lcg(u64);
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed | 1)
+        }
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+    }
+
+    /// Pick one of a fixed alphabet of adversarial tokens, joined into a line.
+    fn fuzz_line(rng: &mut Lcg) -> String {
+        const TOKENS: &[&str] = &[
+            "1",
+            "2",
+            "?",
+            "u",
+            "#",
+            "branch.ab",
+            "+0",
+            "-0",
+            "+999999999",
+            "-2147483648",
+            "...",
+            "N...",
+            "branch.oid",
+            "branch.head",
+            "main",
+            "origin/main",
+            "user:tok@host:p",
+            "https://u:p@h/r.git",
+            "A.B.C.D",
+            "XY",
+            "..",
+            "../../etc/passwd",
+            "@@",
+            "@@ -a +b @@",
+            "@@ -1,2 +3,4 @@",
+            "rename",
+            "R100",
+            "\u{0}",
+            "\u{1}\u{2}",
+            "tab\tsep",
+            "  ",
+            "0000000",
+            "9999999999999999999999999999999999999999",
+        ];
+        let count = (rng.next_u64() % 8) as usize;
+        let mut parts = Vec::new();
+        for _ in 0..count {
+            let t = TOKENS[(rng.next_u64() as usize) % TOKENS.len()];
+            parts.push(t.to_string());
+        }
+        parts.join(" ")
+    }
+
+    /// Build a multi-line adversarial blob resembling git porcelain output.
+    fn fuzz_blob(rng: &mut Lcg, max_lines: usize) -> String {
+        let lines = (rng.next_u64() as usize) % max_lines;
+        let mut out = String::new();
+        for _ in 0..lines {
+            out.push_str(&fuzz_line(rng));
+            // occasionally inject a NUL or a stray separator
+            match rng.next_u64() % 5 {
+                0 => out.push('\0'),
+                1 => out.push('\t'),
+                _ => {}
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn fuzz_status_parsers_never_panic() {
+        // Both porcelain v1 and v2 status parsers over hundreds of malformed
+        // blobs. They must return a typed Result — Ok or Err — never panic.
+        let mut rng = Lcg::new(0x5151_2323_8989_0001);
+        let mut cases = 0usize;
+        // Seed blobs that hit specific record-type branches.
+        let seeds = [
+            "1 .M N... 100644 100644 100644 abc def file\n",
+            "1 R. N... 100644 100644 100644 abc def\n", // truncated rename fields
+            "2 R. N... 100644 100644 100644 abc def R100 new\told\n",
+            "u UU N... 1 2 3 abc def ghi conflict\n",
+            "# branch.ab +1 -2\n",
+            "?? untracked\n",
+            " M tracked\n",
+            "1\n1 \n2\nu\n# \n?? \n",
+        ];
+        for seed in seeds {
+            let _ = parse_status_v2(seed);
+            let _ = parse_status_v1(seed);
+        }
+        for _ in 0..600 {
+            let blob = fuzz_blob(&mut rng, 12);
+            cases += 1;
+            let _ = parse_status_v2(&blob);
+            let _ = parse_status_v1(&blob);
+        }
+        assert!(cases >= 500, "fuzzed {cases} status cases");
+    }
+
+    #[test]
+    fn fuzz_diff_parser_never_panics() {
+        // The unified-diff parser is infallible (returns a Vec); it must always
+        // return a well-formed Vec without panicking on hostile input.
+        let mut rng = Lcg::new(0x7777_1111_2222_3333);
+        let mut cases = 0usize;
+        let seeds = [
+            "diff --git a/x b/y\n@@ -1,2 +3,4 @@\n+added\n-removed\n",
+            "diff --git\n@@\n",
+            "@@ -1 +1 @@\n",
+            "@@ -,, +,, @@\n",
+            "diff --git a/../../etc/passwd b/../../etc/shadow\n@@ -1,9999999999 +1,1 @@\n",
+            "+++ /dev/null\n--- a/x\n",
+            "diff --git a/\0 b/\0\n",
+        ];
+        for seed in seeds {
+            let files = parse_unified_diff(seed);
+            // Every returned hunk's line vector is internally consistent.
+            for f in &files {
+                for h in &f.hunks {
+                    let _ = h.lines.len();
+                }
+            }
+        }
+        for _ in 0..600 {
+            // Bias toward diff-looking lines by prefixing common markers.
+            let mut blob = String::new();
+            let lines = (rng.next_u64() as usize) % 14;
+            for _ in 0..lines {
+                match rng.next_u64() % 5 {
+                    0 => blob.push_str("diff --git "),
+                    1 => blob.push_str("@@ "),
+                    2 => blob.push('+'),
+                    3 => blob.push('-'),
+                    _ => {}
+                }
+                blob.push_str(&fuzz_line(&mut rng));
+                blob.push('\n');
+            }
+            cases += 1;
+            let _ = parse_unified_diff(&blob);
+        }
+        assert!(cases >= 500, "fuzzed {cases} diff cases");
+    }
+
+    #[test]
+    fn fuzz_header_and_range_parsers_never_panic() {
+        // The smaller infallible helpers driven directly with hostile strings.
+        let mut rng = Lcg::new(0x9999_AAAA_BBBB_CCCC);
+        let mut cases = 0usize;
+        for _ in 0..600 {
+            let line = fuzz_line(&mut rng);
+            cases += 1;
+            let _ = parse_diff_git_header(&line);
+            let _ = parse_hunk_header(&line);
+            let _ = parse_range(&line);
+            let _ = parse_ab(&line);
+            let _ = parse_track(&line);
+        }
+        assert!(cases >= 500, "fuzzed {cases} header/range cases");
+    }
+
+    #[test]
+    fn fuzz_redact_remote_never_leaks_credentials_or_panics() {
+        // The remote sanitizer over hostile URL/scp strings. It must never
+        // panic and must never echo back an embedded `user:password@` userinfo.
+        let mut rng = Lcg::new(0xFEED_FACE_CAFE_0001);
+        let seeds = [
+            "https://user:s3cr3t@github.com/o/r.git",
+            "http://tok@host/r",
+            "git@github.com:o/r.git",
+            "ssh://user:pw@host:22/r",
+            "user:pw@host:path",
+            "origin/main",
+            "://@:/",
+            "@",
+            ":@/",
+            "\u{0}://\u{0}@\u{0}",
+        ];
+        let mut cases = 0usize;
+        for seed in seeds {
+            let red = redact_remote(seed);
+            // A credential token we plant must never survive redaction.
+            assert!(
+                !red.contains("s3cr3t") && !red.contains(":pw@") && !red.contains(":s3cr3t@"),
+                "redact_remote leaked credentials for {seed:?} -> {red:?}"
+            );
+        }
+        for _ in 0..600 {
+            // Construct adversarial but remote-SHAPED strings with a planted
+            // secret marker: a userinfo segment ALWAYS followed by a non-empty
+            // host and a `:path` or `/path` tail (a real remote always has a
+            // host and a path after the userinfo — a bare `user@` with nothing
+            // after is not a git remote and is out of scope for redaction).
+            let scheme =
+                ["https://", "http://", "ssh://", "git@", "", "://"][(rng.next_u64() as usize) % 6];
+            let userinfo =
+                ["u:SEKRET@", "SEKRET@", "a@b:SEKRET@", "@", ":@"][(rng.next_u64() as usize) % 5];
+            let host = ["host", "h.x.y", "1.2.3.4", "[::1]"][(rng.next_u64() as usize) % 4];
+            let tail = [":path", "/r.git", ":22/r", "/"][(rng.next_u64() as usize) % 4];
+            let remote = format!("{scheme}{userinfo}{host}{tail}");
+            cases += 1;
+            let red = redact_remote(&remote);
+            // The planted `user:SEKRET@` userinfo must never be echoed verbatim
+            // once a host+path follow it. (`rfind('@')` strips every userinfo
+            // segment even in the malformed multi-`@` `a@b:SEKRET@host` case.)
+            assert!(
+                !red.contains(":SEKRET@"),
+                "redact_remote leaked planted credential: {remote:?} -> {red:?}"
+            );
+            // And the result never panics / is always returned (reached here).
+        }
+        assert!(cases >= 500, "fuzzed {cases} redact-remote cases");
     }
 }

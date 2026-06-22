@@ -1652,6 +1652,7 @@ pub mod git_push;
 pub mod intel;
 pub mod project;
 pub mod projection;
+pub mod security;
 pub mod stream;
 pub mod text_diff;
 pub mod vault;
@@ -1702,6 +1703,10 @@ pub use projection::{
     NodeExecutionProjection, NodeProjectionState, PIPELINE_EXECUTION_PROJECTION_SCHEMA,
     PIPELINE_EXECUTION_PROJECTION_VERSION, PipelineExecutionProjection, RunMetrics,
     RunProjectionState,
+};
+pub use security::{
+    FindingStatus, SECURITY_REPORT_SCHEMA, SecurityCheck, SecurityFinding, SecurityReport,
+    Severity as SecuritySeverity, SeveritySummary,
 };
 pub use stream::{
     ENGINE_STREAM_FRAME_SCHEMA, EngineStreamFrame, PublicEngineError, STREAM_PROTOCOL_VERSION,
@@ -2019,6 +2024,10 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "vault-error.schema.json",
             serde_json::to_string_pretty(&schema_for!(VaultErrorEnvelope))?,
+        ),
+        (
+            "security-report.schema.json",
+            serde_json::to_string_pretty(&schema_for!(SecurityReport))?,
         ),
     ])
 }

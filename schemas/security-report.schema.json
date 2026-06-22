@@ -1,0 +1,149 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SecurityReport",
+  "description": "The full structured security report. `generated_at` is an RFC3339-style timestamp string supplied by the caller (no implicit clock in the contract).",
+  "type": "object",
+  "required": [
+    "generated_at",
+    "schema",
+    "summary"
+  ],
+  "properties": {
+    "checks": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/SecurityCheck"
+      }
+    },
+    "findings": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/SecurityFinding"
+      }
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "summary": {
+      "$ref": "#/definitions/SeveritySummary"
+    }
+  },
+  "definitions": {
+    "FindingStatus": {
+      "description": "Lifecycle status of a finding. Only `open` gating findings fail the audit; `accepted` records an explicit, owned risk decision and `fixed` is resolved.",
+      "type": "string",
+      "enum": [
+        "open",
+        "accepted",
+        "fixed"
+      ]
+    },
+    "SecurityCheck": {
+      "description": "A named built-in check and whether it passed. Checks are the cheap, deterministic posture signals (redaction enabled, capabilities configured, approval/replay present, dependency advisories scanned).",
+      "type": "object",
+      "required": [
+        "name",
+        "passed"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "passed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "SecurityFinding": {
+      "description": "A single security finding. `owner` and `deadline` are optional and only set for `accepted`/tracked risks; they are plain strings (e.g. an ISO date) and never carry secret values.",
+      "type": "object",
+      "required": [
+        "category",
+        "detail",
+        "id",
+        "severity",
+        "status",
+        "title"
+      ],
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "deadline": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "owner": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "severity": {
+          "$ref": "#/definitions/Severity"
+        },
+        "status": {
+          "$ref": "#/definitions/FindingStatus"
+        },
+        "title": {
+          "type": "string"
+        }
+      }
+    },
+    "Severity": {
+      "description": "Severity of a single finding, highest to lowest. `critical` and `high` gate the audit when their status is `open`.",
+      "type": "string",
+      "enum": [
+        "critical",
+        "high",
+        "medium",
+        "low"
+      ]
+    },
+    "SeveritySummary": {
+      "description": "Count of findings by severity. A deterministic rollup of `findings`.",
+      "type": "object",
+      "required": [
+        "critical",
+        "high",
+        "low",
+        "medium"
+      ],
+      "properties": {
+        "critical": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "high": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "low": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "medium": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

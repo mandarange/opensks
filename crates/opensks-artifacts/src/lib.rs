@@ -72,4 +72,52 @@ mod tests {
         assert!(!redacted.contains("hunter2"));
         assert!(redacted.contains("safe"));
     }
+
+    // ======================================================================
+    // PR-044 PART B — EXPORT-BOUNDARY REDACTION PROOF
+    //
+    // `redact_secrets` is the shared sanitizer used by the EXPORT paths
+    // (summaries / reports / vault-summary). This proof feeds it realistic
+    // secret patterns embedded in report-like prose and asserts (a) the raw
+    // secret substring is ABSENT from the exported bytes, and (b) benign words
+    // around the secret survive so the export stays useful.
+    // ======================================================================
+
+    #[test]
+    fn export_redaction_strips_realistic_secret_patterns() {
+        // (raw secret, the document it is embedded in)
+        let cases: &[&str] = &[
+            "redaction-test-secret-fixture-0001",
+            "Authorization:Bearer-sk-test-9988",
+            "password=hunter2-very-secret",
+            "my_secret_value_inline",
+            "BEGIN_PRIVATE_KEY-blob",
+        ];
+        for secret in cases {
+            let document = format!(
+                "Run summary for vault export. The provider returned {secret} which must \
+                 never reach the report. Status: ok. Next step: continue."
+            );
+            let exported = redact_secrets(&document);
+            assert!(
+                !exported.contains(*secret),
+                "EXPORT redaction leaked {secret:?}: {exported}"
+            );
+            // Benign surrounding words survive the redaction.
+            assert!(exported.contains("summary"));
+            assert!(exported.contains("Status:"));
+            assert!(exported.contains("continue."));
+            assert!(exported.contains("[redacted]"));
+        }
+    }
+
+    #[test]
+    fn export_redaction_is_idempotent() {
+        // Re-redacting an already-exported (redacted) string is a fixed point:
+        // a second pass over a report must not re-expose or further mangle it.
+        let once = redact_secrets("token=sk-abc123def456 keep this safe");
+        let twice = redact_secrets(&once);
+        assert_eq!(once, twice, "redaction must be idempotent for export reuse");
+        assert!(!twice.contains("sk-abc123def456"));
+    }
 }
