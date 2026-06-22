@@ -1608,6 +1608,7 @@ pub struct ReleaseProof {
 }
 
 pub mod conversation;
+pub mod file;
 pub mod project;
 pub mod projection;
 pub mod stream;
@@ -1617,6 +1618,12 @@ pub use conversation::{
     ConversationDeleteCounts, ConversationDigest, ConversationFilter, ConversationMessage,
     ConversationRunRelation, ConversationStatus, ConversationSummary, MessageRole, MessageState,
     TitleSource,
+};
+pub use file::{
+    ConflictResolution, FileServiceError, LineEnding, OPEN_TEXT_REQUEST_SCHEMA, OpenTextRequest,
+    SAVE_TEXT_REQUEST_SCHEMA, SAVE_TEXT_RESULT_SCHEMA, STAT_REQUEST_SCHEMA, SaveTextRequest,
+    SaveTextResult, StatRequest, TEXT_DOCUMENT_SCHEMA, TextDocument, TextEncoding,
+    WORKSPACE_ENTRY_SCHEMA, WorkspaceEntry,
 };
 pub use project::{PROJECT_SUMMARY_SCHEMA, ProjectSummary};
 pub use projection::{
@@ -1645,6 +1652,34 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "conversation-digest.schema.json",
             serde_json::to_string_pretty(&schema_for!(ConversationDigest))?,
+        ),
+        (
+            "open-text-request.schema.json",
+            serde_json::to_string_pretty(&schema_for!(OpenTextRequest))?,
+        ),
+        (
+            "text-document.schema.json",
+            serde_json::to_string_pretty(&schema_for!(TextDocument))?,
+        ),
+        (
+            "save-text-request.schema.json",
+            serde_json::to_string_pretty(&schema_for!(SaveTextRequest))?,
+        ),
+        (
+            "save-text-result.schema.json",
+            serde_json::to_string_pretty(&schema_for!(SaveTextResult))?,
+        ),
+        (
+            "stat-request.schema.json",
+            serde_json::to_string_pretty(&schema_for!(StatRequest))?,
+        ),
+        (
+            "workspace-entry.schema.json",
+            serde_json::to_string_pretty(&schema_for!(WorkspaceEntry))?,
+        ),
+        (
+            "file-service-error.schema.json",
+            serde_json::to_string_pretty(&schema_for!(FileServiceError))?,
         ),
         (
             "pipeline-execution-projection.schema.json",

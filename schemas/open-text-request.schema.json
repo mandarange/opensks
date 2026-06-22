@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OpenTextRequest",
+  "description": "Request to open a workspace text document for editing.",
+  "type": "object",
+  "required": [
+    "schema",
+    "workspace_relative_path"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "workspace_relative_path": {
+      "description": "Path relative to the workspace root. Absolute paths and any `..` component are rejected by the service.",
+      "type": "string"
+    }
+  }
+}

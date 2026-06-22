@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SaveTextResult",
+  "description": "Result of a successful save: the new baseline for the next edit cycle.",
+  "type": "object",
+  "required": [
+    "byte_size",
+    "new_hash",
+    "new_mtime_ms",
+    "schema",
+    "workspace_relative_path"
+  ],
+  "properties": {
+    "byte_size": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "new_hash": {
+      "type": "string"
+    },
+    "new_mtime_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "schema": {
+      "type": "string"
+    },
+    "workspace_relative_path": {
+      "type": "string"
+    }
+  }
+}

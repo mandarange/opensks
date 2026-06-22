@@ -236,6 +236,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "opensks-file-service"
+version = "0.1.0"
+dependencies = [
+ "opensks-contracts",
+]
+
+[[package]]
 name = "opensks-git"
 version = "0.1.0"
 dependencies = [

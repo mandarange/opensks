@@ -1,0 +1,232 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FileServiceError",
+  "description": "Stable error taxonomy for the workspace file service.\n\nEach variant maps to a stable reason code via [`FileServiceError::reason_code`] and, critically, never embeds file contents. The `Display`/`Debug` output of every variant is content-free.",
+  "oneOf": [
+    {
+      "description": "The supplied path was syntactically invalid (empty, non-UTF-8, root, current-dir only, etc.).",
+      "type": "object",
+      "required": [
+        "code",
+        "workspace_relative_path"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "workspace_path_invalid"
+          ]
+        },
+        "workspace_relative_path": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "description": "The path escaped the workspace root (absolute, `..`, or canonicalized outside the workspace prefix).",
+      "type": "object",
+      "required": [
+        "code",
+        "workspace_relative_path"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "workspace_path_escape"
+          ]
+        },
+        "workspace_relative_path": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "description": "A symlink was encountered on the resolved path. Symlinks are rejected to avoid escaping the workspace via link targets and TOCTOU swaps.",
+      "type": "object",
+      "required": [
+        "code",
+        "workspace_relative_path"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "workspace_symlink_rejected"
+          ]
+        },
+        "workspace_relative_path": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "description": "No regular file exists at the resolved path.",
+      "type": "object",
+      "required": [
+        "code",
+        "workspace_relative_path"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "file_not_found"
+          ]
+        },
+        "workspace_relative_path": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "description": "The file is not a regular text file (binary content, directory, device, socket, or FIFO).",
+      "type": "object",
+      "required": [
+        "code",
+        "workspace_relative_path"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "file_binary"
+          ]
+        },
+        "workspace_relative_path": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "description": "The file exceeds the maximum editable size.",
+      "type": "object",
+      "required": [
+        "byte_size",
+        "code",
+        "max_bytes",
+        "workspace_relative_path"
+      ],
+      "properties": {
+        "byte_size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "code": {
+          "type": "string",
+          "enum": [
+            "file_too_large"
+          ]
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "workspace_relative_path": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "description": "The file contents are not valid in any supported encoding.",
+      "type": "object",
+      "required": [
+        "code",
+        "workspace_relative_path"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "file_encoding_unsupported"
+          ]
+        },
+        "workspace_relative_path": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "description": "The path matches a secret-looking name and is restricted from editing.",
+      "type": "object",
+      "required": [
+        "code",
+        "workspace_relative_path"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "file_secret_restricted"
+          ]
+        },
+        "workspace_relative_path": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "description": "The on-disk file changed since the editor's baseline; a conflict must be resolved before saving.",
+      "type": "object",
+      "required": [
+        "code",
+        "workspace_relative_path"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "file_changed_on_disk"
+          ]
+        },
+        "workspace_relative_path": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "description": "The atomic temp-write-then-rename sequence failed.",
+      "type": "object",
+      "required": [
+        "code",
+        "reason",
+        "workspace_relative_path"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "file_atomic_replace_failed"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "workspace_relative_path": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "description": "The operation was denied by filesystem permissions.",
+      "type": "object",
+      "required": [
+        "code",
+        "workspace_relative_path"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "file_permission_denied"
+          ]
+        },
+        "workspace_relative_path": {
+          "type": "string"
+        }
+      }
+    }
+  ]
+}

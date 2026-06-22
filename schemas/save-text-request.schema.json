@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SaveTextRequest",
+  "description": "Request to save edited text back to a workspace document.",
+  "type": "object",
+  "required": [
+    "content",
+    "expected_baseline_hash",
+    "schema",
+    "workspace_relative_path"
+  ],
+  "properties": {
+    "conflict_resolution": {
+      "description": "Optional override to force a write past a detected on-disk change.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ConflictResolution"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "content": {
+      "type": "string"
+    },
+    "expected_baseline_hash": {
+      "description": "Hash of the content the editor last read; required for conflict detection.",
+      "type": "string"
+    },
+    "expected_mtime_ms": {
+      "description": "Optional mtime the editor last observed. When present it is compared alongside the baseline hash.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "schema": {
+      "type": "string"
+    },
+    "workspace_relative_path": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "ConflictResolution": {
+      "description": "Optional override directing the service to overwrite despite a detected on-disk change. The editor must surface a conflict and obtain explicit user intent before sending this.",
+      "oneOf": [
+        {
+          "description": "Overwrite the on-disk file even though it changed since baseline.",
+          "type": "string",
+          "enum": [
+            "overwrite_on_disk_changes"
+          ]
+        }
+      ]
+    }
+  }
+}

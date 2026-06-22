@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WorkspaceEntry",
+  "description": "Lightweight metadata about a workspace entry (no contents).",
+  "type": "object",
+  "required": [
+    "byte_size",
+    "content_hash",
+    "is_secret_restricted",
+    "modification_ms",
+    "permissions_mode",
+    "schema",
+    "workspace_relative_path"
+  ],
+  "properties": {
+    "byte_size": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "content_hash": {
+      "description": "Best-effort content hash of the on-disk bytes; empty when the entry was stat-only and not hashed.",
+      "type": "string"
+    },
+    "is_secret_restricted": {
+      "type": "boolean"
+    },
+    "modification_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "permissions_mode": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "schema": {
+      "type": "string"
+    },
+    "workspace_relative_path": {
+      "type": "string"
+    }
+  }
+}

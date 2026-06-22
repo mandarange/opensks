@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TextDocument",
+  "description": "An opened text document plus the metadata needed for safe save conflict detection. `content_hash` and `on_disk_modification_ms` together form the optimistic-concurrency baseline echoed back on save.",
+  "type": "object",
+  "required": [
+    "byte_size",
+    "content",
+    "content_hash",
+    "encoding",
+    "is_secret_restricted",
+    "line_ending",
+    "on_disk_modification_ms",
+    "permissions_mode",
+    "schema",
+    "workspace_relative_path"
+  ],
+  "properties": {
+    "byte_size": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "content": {
+      "type": "string"
+    },
+    "content_hash": {
+      "type": "string"
+    },
+    "encoding": {
+      "$ref": "#/definitions/TextEncoding"
+    },
+    "is_secret_restricted": {
+      "description": "True when the path matches a secret-looking name. Such paths are blocked for open/save; the flag exists so the UI can explain the refusal.",
+      "type": "boolean"
+    },
+    "line_ending": {
+      "$ref": "#/definitions/LineEnding"
+    },
+    "on_disk_modification_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "permissions_mode": {
+      "description": "Unix permission bits (e.g. `0o644`) of the on-disk file.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "schema": {
+      "type": "string"
+    },
+    "workspace_relative_path": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "LineEnding": {
+      "description": "Detected dominant line ending of an opened document.",
+      "oneOf": [
+        {
+          "description": "`\\n`",
+          "type": "string",
+          "enum": [
+            "lf"
+          ]
+        },
+        {
+          "description": "`\\r\\n`",
+          "type": "string",
+          "enum": [
+            "crlf"
+          ]
+        }
+      ]
+    },
+    "TextEncoding": {
+      "description": "Text encoding of an opened document. PR-031 only supports UTF-8; the enum is kept open so future encodings can be added without a breaking change.",
+      "type": "string",
+      "enum": [
+        "utf8"
+      ]
+    }
+  }
+}

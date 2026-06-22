@@ -10,6 +10,7 @@ members = [
   "crates/opensks-design",
   "crates/opensks-engine",
   "crates/opensks-event-store",
+  "crates/opensks-file-service",
   "crates/opensks-git",
   "crates/opensks-graph",
   "crates/opensks-hooks",
