@@ -2456,8 +2456,8 @@ fn run_conversation_turn_start(
     let run_id = format!("turn-{turn_id}");
     // Drive a real agent adapter instead of the deterministic engine template
     // (recovery directive §6, Appendix C rule 2 — the product conversation path
-    // must not call run_template_with_event_stream). Today this is the
-    // deterministic LocalTestAdapter, which performs genuine file edits when the
+    // must not call the deterministic engine template directly). Today this is
+    // the LocalTestAdapter, which performs genuine file edits when the
     // prompt carries a structured instruction and otherwise answers honestly
     // without changing anything; a live model adapter is selected here once one
     // is configured.

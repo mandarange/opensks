@@ -72,4 +72,37 @@ if grep -RIlE "$dev_path|$prd_marker|$prd_slug" Cargo.toml src docs README.md .g
 fi
 ok "no developer-machine paths / forbidden PRD markers in tracked sources"
 
+# 7. Recovery-release invariants (directive Appendix C): the chat-first runtime
+#    corrections must not regress. Each guards a landed P0 fix.
+
+# 7a. RootView must not instantiate the removed right-hand ComposerView. The
+#     leading [^A-Za-z] boundary avoids matching CommitComposerView / Conversation*.
+if grep -nE '(^|[^A-Za-z])ComposerView\(' swift/Sources/RootView.swift >/dev/null 2>&1; then
+  fail "RootView instantiates ComposerView; the permanent right composer is removed — Chat's composer is the primary control (SHELL-001 / §0.3)."
+fi
+ok "RootView does not instantiate ComposerView"
+
+# 7b. The product conversation path must drive a real AgentAdapter, never the
+#     engine's deterministic template dispatcher. The pattern is assembled by
+#     concatenation so this guard never matches its own literal. (The standalone
+#     `graph`/`scheduler` smoke-test commands are a separate surface and may
+#     still reference the deterministic worker / template graph names.)
+conv_template="run_template""_with_event_stream"
+if grep -rnE "$conv_template" crates/opensks-cli/src >/dev/null 2>&1; then
+  fail "crates/opensks-cli/src calls the engine deterministic template dispatcher; conversation turns must use a real adapter (CHAT-001)."
+fi
+ok "conversation CLI path uses no deterministic template dispatcher"
+
+# 7c. Chat is the default workspace route (Chat is the main workspace).
+if ! grep -qE 'route:[[:space:]]*WorkspaceRoute[[:space:]]*=[[:space:]]*\.chat' swift/Sources/Navigation/NavigationStore.swift; then
+  fail "NavigationStore default route is not .chat (SHELL-002 / §3.3)."
+fi
+ok "NavigationStore defaults to .chat"
+
+# 7d. Navigation has a single source of truth — no legacy selectedRail state.
+if grep -qE 'var[[:space:]]+selectedRail' swift/Sources/Backend.swift; then
+  fail "AppState.selectedRail reintroduced; navigation must have one source of truth, NavigationStore.route (SHELL-003 / NAV-102)."
+fi
+ok "no AppState.selectedRail dual navigation state"
+
 echo "ARCH-GUARD: all checks passed."
