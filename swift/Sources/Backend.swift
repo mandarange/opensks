@@ -886,6 +886,18 @@ final class AppState: ObservableObject {
     let executionStore = ExecutionStore()
     let intelligenceStore = ProjectIntelligenceStore()
     let graphEditorStore = GraphEditorStore()
+    /// The node-level pipeline projection that drives the graph. Wired at
+    /// bootstrap (RootView.onAppear) so streamed execution events reach it —
+    /// previously nothing called `ingest`, so the graph stayed empty (PIPE-001).
+    weak var pipelines: PipelineProjectionStore?
+
+    /// Apply a streamed execution event to BOTH read models: the flat
+    /// `ExecutionStore` and the node-level pipeline projection. Centralised so a
+    /// new stream consumer cannot forget one (PIPE-001).
+    func applyExecutionEvent(_ event: ExecutionEventEnvelope) {
+        executionStore.apply(event)
+        pipelines?.ingest(event)
+    }
 
     // Navigation has one source of truth (NavigationStore.route); the explorer
     // pane is derived from the route via WorkspaceRoute.legacySection (SHELL-003).
@@ -1041,7 +1053,7 @@ final class AppState: ObservableObject {
                 ))
             }
             for event in stream.executionEvents {
-                self.executionStore.apply(event)
+                self.applyExecutionEvent(event)
                 self.append(RunLine(
                     text: "[event] \(event.kind.rawValue) #\(event.sequence)",
                     kind: .info
@@ -1178,7 +1190,7 @@ final class AppState: ObservableObject {
                 ))
             }
             for event in stream.executionEvents {
-                self.executionStore.apply(event)
+                self.applyExecutionEvent(event)
                 self.append(RunLine(text: "[tail] \(event.kind.rawValue) #\(event.sequence)", kind: .info))
             }
             self.lastExit = stream.exitCode
@@ -1265,7 +1277,7 @@ final class AppState: ObservableObject {
                 ))
             }
             for event in stream.executionEvents {
-                self.executionStore.apply(event)
+                self.applyExecutionEvent(event)
                 self.append(RunLine(text: "[graph event] \(event.kind.rawValue) #\(event.sequence)", kind: .info))
             }
             self.lastExit = stream.exitCode
@@ -1302,7 +1314,7 @@ final class AppState: ObservableObject {
                 ))
             }
             for event in stream.executionEvents {
-                self.executionStore.apply(event)
+                self.applyExecutionEvent(event)
                 self.append(RunLine(text: "[event] \(event.kind.rawValue) #\(event.sequence)", kind: .info))
             }
             self.lastExit = stream.exitCode
@@ -1341,7 +1353,7 @@ final class AppState: ObservableObject {
                 ))
             }
             for event in stream.executionEvents {
-                self.executionStore.apply(event)
+                self.applyExecutionEvent(event)
                 self.append(RunLine(text: "[event] \(event.kind.rawValue) #\(event.sequence)", kind: .info))
             }
             self.lastExit = stream.exitCode

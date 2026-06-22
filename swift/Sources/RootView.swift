@@ -34,6 +34,9 @@ struct RootView: View {
             state.connectEngine()
             // Bind the conversation store to the SAME bundled CLI + workspace
             // path AppState resolved, then load this project's conversations.
+            // Feed streamed execution events into the pipeline projection that
+            // drives the graph (PIPE-001 — it previously never received any).
+            state.pipelines = coordinator.pipelines
             coordinator.bindConversations(cli: state.cli, workspace: state.workspace)
             // Bind the Git studio to the same resolved CLI + workspace, then wire
             // it to the editor (dirty-switch preflight) + conversations (commit
