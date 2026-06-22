@@ -236,8 +236,8 @@ impl AgentAdapter for LocalTestAdapter {
             });
         };
 
-        let rel = instruction.path().to_string();
-        let abs = resolve_in_workspace(&request.workspace, &rel)?;
+        // Pure planning (no writes) — shared with the parallel runtime.
+        let (rel, before, after, operation) = plan_local_edit(&request.workspace, &instruction)?;
 
         self.emit(
             sink,
@@ -246,9 +246,6 @@ impl AgentAdapter for LocalTestAdapter {
             AgentEventKind::PlanUpdated,
             serde_json::json!({ "steps": [format!("edit {rel}")] }),
         );
-
-        // Read pre-image.
-        let before = std::fs::read_to_string(&abs).unwrap_or_default();
         self.emit(
             sink,
             request,
@@ -256,34 +253,6 @@ impl AgentAdapter for LocalTestAdapter {
             AgentEventKind::ToolCallStarted,
             serde_json::json!({ "tool": "files.read", "path": rel }),
         );
-
-        let (after, operation) = match &instruction {
-            LocalTestInstruction::CreateFile { value, .. } => {
-                if abs.exists() {
-                    return Err(AgentAdapterError::InvalidInstruction(format!(
-                        "create_file: `{rel}` already exists"
-                    )));
-                }
-                (value.clone(), FileOperation::Create)
-            }
-            LocalTestInstruction::ReplaceContent { value, .. } => {
-                (value.clone(), FileOperation::Modify)
-            }
-            LocalTestInstruction::AppendLine { value, .. } => {
-                let mut next = before.clone();
-                if !next.is_empty() && !next.ends_with('\n') {
-                    next.push('\n');
-                }
-                next.push_str(value);
-                next.push('\n');
-                let op = if before.is_empty() && !abs.exists() {
-                    FileOperation::Create
-                } else {
-                    FileOperation::Modify
-                };
-                (next, op)
-            }
-        };
 
         let before_hash = content_hash(&before);
         let after_hash = content_hash(&after);
@@ -496,6 +465,169 @@ fn minimal_unified_diff(path: &str, before: &str, after: &str) -> String {
     )
 }
 
+/// Pure planning for a local-test edit (no writes, no events): resolve the path,
+/// read the pre-image, and compute the after-image + operation. Because it only
+/// reads, it is safe to run concurrently across workers (the parallel runtime
+/// relies on this). Returns `(rel_path, before, after, operation)`.
+fn plan_local_edit(
+    workspace: &Path,
+    instruction: &LocalTestInstruction,
+) -> Result<(String, String, String, FileOperation), AgentAdapterError> {
+    let rel = instruction.path().to_string();
+    let abs = resolve_in_workspace(workspace, &rel)?;
+    let before = std::fs::read_to_string(&abs).unwrap_or_default();
+    let (after, operation) = match instruction {
+        LocalTestInstruction::CreateFile { value, .. } => {
+            if abs.exists() {
+                return Err(AgentAdapterError::InvalidInstruction(format!(
+                    "create_file: `{rel}` already exists"
+                )));
+            }
+            (value.clone(), FileOperation::Create)
+        }
+        LocalTestInstruction::ReplaceContent { value, .. } => {
+            (value.clone(), FileOperation::Modify)
+        }
+        LocalTestInstruction::AppendLine { value, .. } => {
+            let mut next = before.clone();
+            if !next.is_empty() && !next.ends_with('\n') {
+                next.push('\n');
+            }
+            next.push_str(value);
+            next.push('\n');
+            let op = if before.is_empty() && !abs.exists() {
+                FileOperation::Create
+            } else {
+                FileOperation::Modify
+            };
+            (next, op)
+        }
+    };
+    Ok((rel, before, after, operation))
+}
+
+/// One subcontracted unit of parallel work: a local-test instruction prompt
+/// against a workspace (recovery directive §8 — parallel subcontracts).
+#[derive(Debug, Clone)]
+pub struct SubPacket {
+    pub id: String,
+    pub workspace: PathBuf,
+    pub prompt: String,
+}
+
+/// The result of a parallel subcontract run.
+#[derive(Debug, Clone)]
+pub struct ParallelOutcome {
+    /// The single atomic apply of the merged, non-conflicting patch set.
+    pub apply: PatchApplyResult,
+    /// Number of file writes each packet planned (by packet id, sorted).
+    pub planned_per_packet: Vec<(String, usize)>,
+    /// Per-packet planning errors (by packet id).
+    pub errors: Vec<(String, String)>,
+}
+
+/// Plan every packet CONCURRENTLY (bounded by `max_concurrency`), then apply the
+/// merged patch set through ONE atomic transaction (§8.4: workers produce
+/// patches in parallel; an arbiter applies them). Two packets that target the
+/// SAME path are a cross-worker conflict — the arbiter refuses the whole set
+/// rather than letting concurrent writes race. All packets are assumed to share
+/// the first packet's workspace.
+pub fn run_parallel(
+    packets: &[SubPacket],
+    max_concurrency: usize,
+) -> Result<ParallelOutcome, AgentAdapterError> {
+    use std::sync::Mutex;
+
+    let max = max_concurrency.max(1);
+    let planned: Mutex<Vec<(String, PlannedWrite)>> = Mutex::new(Vec::new());
+    let errors: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+    // Bounded concurrency: each chunk of up to `max` packets is planned in
+    // parallel. Planning only reads disk, so concurrent planning is race-free.
+    for chunk in packets.chunks(max) {
+        std::thread::scope(|scope| {
+            for packet in chunk {
+                let planned = &planned;
+                let errors = &errors;
+                scope.spawn(move || {
+                    // A packet with no actionable instruction plans nothing.
+                    if let Some(instruction) = LocalTestInstruction::from_prompt(&packet.prompt) {
+                        match plan_local_edit(&packet.workspace, &instruction) {
+                            Ok((rel, before, after, operation)) => {
+                                planned.lock().expect("planned lock").push((
+                                    packet.id.clone(),
+                                    PlannedWrite {
+                                        path: rel,
+                                        expected_before_hash: content_hash(&before),
+                                        after_content: after,
+                                        operation,
+                                    },
+                                ));
+                            }
+                            Err(error) => {
+                                errors
+                                    .lock()
+                                    .expect("errors lock")
+                                    .push((packet.id.clone(), error.to_string()));
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    let mut planned = planned.into_inner().expect("planned lock");
+    planned.sort_by(|a, b| a.0.cmp(&b.0)); // deterministic order
+    let errors = errors.into_inner().expect("errors lock");
+    let planned_per_packet = count_per_packet(&planned);
+
+    // Arbiter: two workers writing the same path cannot both land.
+    let mut seen = std::collections::BTreeSet::new();
+    let mut dup_paths = Vec::new();
+    for (_, write) in &planned {
+        if !seen.insert(write.path.clone()) {
+            dup_paths.push(write.path.clone());
+        }
+    }
+    if !dup_paths.is_empty() {
+        return Ok(ParallelOutcome {
+            apply: PatchApplyResult {
+                schema: PATCH_APPLY_RESULT_SCHEMA.to_string(),
+                proposal_id: "parallel".to_string(),
+                applied: false,
+                applied_files: vec![],
+                conflict_paths: dup_paths,
+                rolled_back: false,
+                reason_code: "cross_worker_path_conflict".to_string(),
+                evidence_refs: vec![],
+            },
+            planned_per_packet,
+            errors,
+        });
+    }
+
+    let writes: Vec<PlannedWrite> = planned.into_iter().map(|(_, write)| write).collect();
+    let workspace = packets
+        .first()
+        .map(|p| p.workspace.clone())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let apply = apply_file_writes(&workspace, "parallel", &writes)?;
+    Ok(ParallelOutcome {
+        apply,
+        planned_per_packet,
+        errors,
+    })
+}
+
+fn count_per_packet(planned: &[(String, PlannedWrite)]) -> Vec<(String, usize)> {
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for (id, _) in planned {
+        *counts.entry(id.clone()).or_insert(0) += 1;
+    }
+    counts.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,6 +779,88 @@ mod tests {
             std::fs::read_to_string(ws.join("nested/b.txt")).unwrap(),
             "B"
         );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn parallel_independent_edits_all_apply() {
+        let ws = temp_workspace("par-indep");
+        let packets = vec![
+            SubPacket {
+                id: "w1".to_string(),
+                workspace: ws.clone(),
+                prompt: r#"{"local_test":{"op":"create_file","path":"a.txt","value":"A"}}"#
+                    .to_string(),
+            },
+            SubPacket {
+                id: "w2".to_string(),
+                workspace: ws.clone(),
+                prompt: r#"{"local_test":{"op":"create_file","path":"b.txt","value":"B"}}"#
+                    .to_string(),
+            },
+        ];
+        let outcome = run_parallel(&packets, 4).unwrap();
+        assert!(outcome.apply.applied);
+        assert_eq!(outcome.apply.applied_files.len(), 2);
+        assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "A");
+        assert_eq!(std::fs::read_to_string(ws.join("b.txt")).unwrap(), "B");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn parallel_same_file_is_a_cross_worker_conflict() {
+        // Two workers targeting one path is a race; the arbiter refuses the set
+        // and the file is left untouched (§8.4 patch-only, no racing writes).
+        let ws = temp_workspace("par-conflict");
+        std::fs::write(ws.join("shared.txt"), "orig").unwrap();
+        let packets = vec![
+            SubPacket {
+                id: "w1".to_string(),
+                workspace: ws.clone(),
+                prompt:
+                    r#"{"local_test":{"op":"replace_content","path":"shared.txt","value":"X"}}"#
+                        .to_string(),
+            },
+            SubPacket {
+                id: "w2".to_string(),
+                workspace: ws.clone(),
+                prompt:
+                    r#"{"local_test":{"op":"replace_content","path":"shared.txt","value":"Y"}}"#
+                        .to_string(),
+            },
+        ];
+        let outcome = run_parallel(&packets, 4).unwrap();
+        assert!(!outcome.apply.applied);
+        assert_eq!(outcome.apply.reason_code, "cross_worker_path_conflict");
+        assert!(
+            outcome
+                .apply
+                .conflict_paths
+                .contains(&"shared.txt".to_string())
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join("shared.txt")).unwrap(),
+            "orig"
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn parallel_respects_bounded_concurrency() {
+        let ws = temp_workspace("par-bounded");
+        let packets: Vec<SubPacket> = (0..5)
+            .map(|i| SubPacket {
+                id: format!("w{i}"),
+                workspace: ws.clone(),
+                prompt: format!(
+                    r#"{{"local_test":{{"op":"create_file","path":"f{i}.txt","value":"{i}"}}}}"#
+                ),
+            })
+            .collect();
+        let outcome = run_parallel(&packets, 2).unwrap(); // at most 2 plan concurrently
+        assert!(outcome.apply.applied);
+        assert_eq!(outcome.apply.applied_files.len(), 5);
+        assert_eq!(outcome.planned_per_packet.len(), 5);
         std::fs::remove_dir_all(&ws).ok();
     }
 }
