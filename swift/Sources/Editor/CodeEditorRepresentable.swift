@@ -135,12 +135,28 @@ struct CodeEditorRepresentable: NSViewRepresentable {
             rulerView?.needsDisplay = true
         }
 
+        /// Coalesces rapid keystrokes into one re-highlight (EDIT-001).
+        private var pendingHighlight: DispatchWorkItem?
+        /// Above this length syntax highlighting is skipped (large-file mode,
+        /// §14.4) so typing stays within the §23.5 budget.
+        private let largeFileHighlightLimit = 1_000_000
+
         func textDidChange(_ notification: Notification) {
             guard !isApplyingExternal, let textView else { return }
             let newText = textView.string
             document.textDidChange(newText)
-            highlight()
             rulerView?.needsDisplay = true
+            scheduleHighlight()
+        }
+
+        /// Debounce: a burst of keystrokes collapses to a single re-highlight
+        /// ~60ms after the last change, instead of re-colouring the whole
+        /// document on every keystroke (EDIT-001).
+        private func scheduleHighlight() {
+            pendingHighlight?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.highlight() }
+            pendingHighlight = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)
         }
 
         /// Apply per-line syntax colors to the text storage in place, preserving
@@ -156,12 +172,17 @@ struct CodeEditorRepresentable: NSViewRepresentable {
                 .foregroundColor: NSColor(Theme.text)
             ], range: whole)
 
-            let language = document.language
-            fullText.enumerateSubstrings(in: whole, options: .byLines) { line, lineRange, _, _ in
-                guard let line, !line.isEmpty else { return }
-                let attributed = SyntaxHighlighter.line(line, lang: language)
-                Self.applyAttributedColors(attributed, baseLocation: lineRange.location,
-                                           into: storage, font: font)
+            // Large-file mode: skip per-line syntax highlighting beyond the limit
+            // so a big file stays within the typing budget (§14.4 / §23.5). The
+            // base font/colour above still applies, so the text stays readable.
+            if fullText.length <= largeFileHighlightLimit {
+                let language = document.language
+                fullText.enumerateSubstrings(in: whole, options: .byLines) { line, lineRange, _, _ in
+                    guard let line, !line.isEmpty else { return }
+                    let attributed = SyntaxHighlighter.line(line, lang: language)
+                    Self.applyAttributedColors(attributed, baseLocation: lineRange.location,
+                                               into: storage, font: font)
+                }
             }
             storage.endEditing()
         }
