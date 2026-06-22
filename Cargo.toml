@@ -15,6 +15,7 @@ members = [
   "crates/opensks-git-service",
   "crates/opensks-graph",
   "crates/opensks-hooks",
+  "crates/opensks-perf",
   "crates/opensks-codegraph",
   "crates/opensks-context",
   "crates/opensks-image",

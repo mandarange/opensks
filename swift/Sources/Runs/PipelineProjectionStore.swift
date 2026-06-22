@@ -446,32 +446,139 @@ struct PipelineProjectionReducer: Sendable {
     }
 }
 
+// MARK: - Light run summary (the cheap state kept for backgrounded runs)
+
+/// The light, list-level summary of a run kept when its HEAVY node-level
+/// projection has been released (backgrounding / memory pressure). It carries no
+/// node array — only the derived counts + lifecycle — so a backgrounded run does
+/// not retain its full materialized view. The graph/inspector re-hydrate from
+/// events on re-activation.
+struct PipelineRunSummary: Sendable, Equatable, Identifiable {
+    var runId: String
+    var conversationId: String?
+    var pipelineId: String?
+    var state: RunProjectionState
+    var metrics: PipelineProjectionMetrics
+    var nodeCount: Int
+    /// Resume cursor so a released run can be rebuilt from `sinceSequence`.
+    var lastSequence: UInt64?
+
+    var id: String { runId }
+
+    init(projection: PipelineExecutionProjection, lastSequence: UInt64?) {
+        self.runId = projection.runId
+        self.conversationId = projection.conversationId
+        self.pipelineId = projection.pipelineId
+        self.state = projection.state
+        self.metrics = projection.metrics
+        self.nodeCount = projection.nodes.count
+        self.lastSequence = lastSequence
+    }
+}
+
 // MARK: - Observable store (thin @MainActor wrapper)
 
 /// A `@MainActor` store that owns per-run `PipelineProjectionReducer`s and
 /// republishes their projections for the UI. It keeps no raw event log — only
 /// the derived projections — so memory is bounded by the number of live runs
 /// and their node counts, not by stream length.
+///
+/// PR-043 hardening:
+///   • High-rate ingest is COALESCED through an `EventBatcher`: a burst of
+///     events updates the reducers immediately (cheap) but republishes the
+///     `@Published projections` at most once per frame, so 1,000s of events/sec
+///     do not cause 1,000s of SwiftUI invalidations. The batcher retains only
+///     the latest snapshot — never a backlog.
+///   • BACKGROUND RELEASE: only the ACTIVE run keeps its heavy node-level
+///     reducer; backgrounded runs are released to a light `PipelineRunSummary`
+///     (no node array). Re-activating a run rebuilds it from events.
+///   • Memory pressure drops every non-active heavy view immediately.
 @MainActor
-final class PipelineProjectionStore: ObservableObject {
+final class PipelineProjectionStore: ObservableObject, BackgroundReleasable {
     @Published private(set) var projections: [PipelineExecutionProjection] = []
+    /// Light summaries for runs whose heavy reducer has been released.
+    @Published private(set) var releasedSummaries: [String: PipelineRunSummary] = [:]
 
+    /// HEAVY per-run reducers. Bounded by live-run count × node count; a
+    /// backgrounded run's reducer is dropped (its node array released) and only
+    /// the light summary survives in `releasedSummaries`.
     private var reducers: [String: PipelineProjectionReducer] = [:]
 
-    init() {}
+    /// The run whose heavy projection is retained. `nil` = none retained (all
+    /// runs backgrounded). Foreground run survives release/memory-pressure.
+    private(set) var activeRunId: String?
+
+    /// Source of truth for rebuilding a released run, keyed by run id. Bounded
+    /// to ONE active run's events at a time so it is not an unbounded log: only
+    /// the active run accumulates events here; releasing a run clears its slice.
+    private var eventsForActiveRun: [ExecutionEventEnvelope] = []
+
+    /// Coalesces republish under high-rate ingest. Holds only the latest derived
+    /// snapshot, flushing the `@Published projections` at most once per interval.
+    ///
+    /// When `coalesceRepublish` is OFF (the default), `projections` is also kept
+    /// current SYNCHRONOUSLY on every ingest so callers that read it immediately
+    /// after ingesting see the latest state. The batcher still records the
+    /// coalesced flush stream (its `flushCount` proves bounded UI invalidation),
+    /// and the live app can flip `coalesceRepublish` on to drop the synchronous
+    /// per-event assignment entirely.
+    private let batcher: EventBatcher<[PipelineExecutionProjection]>
+    private let coalesceRepublish: Bool
+
+    /// Number of times `projections` was actually reassigned — i.e. the number of
+    /// UI invalidations emitted. Under coalescing this is bounded by flush ticks,
+    /// not by event count.
+    private(set) var republishCount = 0
+
+    init(
+        flushInterval: TimeInterval = 1.0 / 60.0,
+        coalesceRepublish: Bool = false,
+        autoFlushBatching: Bool = true
+    ) {
+        self.coalesceRepublish = coalesceRepublish
+        batcher = EventBatcher<[PipelineExecutionProjection]>(
+            interval: flushInterval,
+            autoFlush: autoFlushBatching
+        )
+        batcher.onFlush = { [weak self] snapshot in
+            guard let self else { return }
+            self.projections = snapshot
+            self.republishCount += 1
+        }
+    }
+
+    /// Subscribe this store to a memory-pressure monitor: on any event, release
+    /// every non-active heavy projection. Idempotent across calls.
+    func registerForMemoryPressure(_ monitor: MemoryPressureMonitor) {
+        monitor.addHandler { [weak self] _ in
+            self?.releaseBackgroundViews()
+        }
+    }
 
     /// Live ingest: fold a single streamed event into its run's projection.
+    /// Republish is COALESCED through the batcher so a high-rate burst does not
+    /// invalidate the UI per event.
     func ingest(_ event: ExecutionEventEnvelope) {
         var reducer = reducers[event.runId] ?? PipelineProjectionReducer(runId: event.runId)
         reducer.apply(event)
         reducers[event.runId] = reducer
-        publish()
+        // A run becoming live with no explicit active selection becomes active so
+        // its heavy view is retained (the operator is watching the live run).
+        if activeRunId == nil { activeRunId = event.runId }
+        // Retain events only for the active run, so the rebuild source stays
+        // bounded to one run rather than growing into an all-runs event log.
+        if event.runId == activeRunId {
+            eventsForActiveRun.append(event)
+        }
+        scheduleRepublish()
     }
 
     /// Rebuild: fold a whole batch of events from scratch. Folding all events
     /// at once MUST equal applying them one-by-one (`ingest`).
     func rebuild(from events: [ExecutionEventEnvelope]) {
         reducers.removeAll()
+        releasedSummaries.removeAll()
+        eventsForActiveRun.removeAll()
         // Group by run, then fold each run's events in sequence order. Sorting
         // is order-preserving for already-ordered input, so rebuild matches a
         // live stream that arrived in sequence order.
@@ -483,17 +590,29 @@ final class PipelineProjectionStore: ObservableObject {
             }
             reducers[runId] = reducer
         }
-        publish()
+        if activeRunId == nil { activeRunId = byRun.keys.sorted().first }
+        if let active = activeRunId {
+            eventsForActiveRun = (byRun[active] ?? []).sorted { $0.sequence < $1.sequence }
+        }
+        publishNow()
     }
 
-    /// The projection for one run, if any events have been folded for it.
+    /// The projection for one run, if its heavy reducer is retained.
     func projection(for runId: String) -> PipelineExecutionProjection? {
         reducers[runId]?.projection
     }
 
+    /// The light summary for a run whether retained (derived) or released.
+    func summary(for runId: String) -> PipelineRunSummary? {
+        if let reducer = reducers[runId] {
+            return PipelineRunSummary(projection: reducer.projection, lastSequence: reducer.lastSequence)
+        }
+        return releasedSummaries[runId]
+    }
+
     /// Highest accepted sequence for a run — the resume cursor for reconnect.
     func latestSequence(for runId: String) -> UInt64? {
-        reducers[runId]?.lastSequence
+        reducers[runId]?.lastSequence ?? releasedSummaries[runId]?.lastSequence
     }
 
     func nodes(for runId: String) -> [NodeExecutionProjection] {
@@ -501,16 +620,97 @@ final class PipelineProjectionStore: ObservableObject {
     }
 
     func metrics(for runId: String) -> PipelineProjectionMetrics {
-        reducers[runId]?.projection.metrics ?? PipelineProjectionMetrics()
+        reducers[runId]?.projection.metrics
+            ?? releasedSummaries[runId]?.metrics
+            ?? PipelineProjectionMetrics()
     }
 
     func reset() {
         reducers.removeAll()
-        publish()
+        releasedSummaries.removeAll()
+        eventsForActiveRun.removeAll()
+        activeRunId = nil
+        batcher.cancelPending()
+        publishNow()
     }
 
-    private func publish() {
-        projections = reducers.values
+    /// Force any pending coalesced republish to surface immediately (e.g. on a
+    /// terminal frame or a route change) so no final state is left unshown.
+    func flushPendingUpdates() {
+        batcher.flushNow()
+    }
+
+    /// Drive a coalescing tick — call from a DisplayLink/timer or a test.
+    @discardableResult
+    func flushIfNeeded(force: Bool = false) -> Bool {
+        batcher.flushIfNeeded(force: force)
+    }
+
+    // MARK: - BackgroundReleasable
+
+    /// Make `runId` the active (foreground) run: retain its heavy projection,
+    /// release every other run's heavy view to a light summary. A run that has no
+    /// retained reducer but has a released summary is rebuilt from its events.
+    func setActive(_ runId: String?) async {
+        activeRunId = runId
+        // If the new active run was released, rebuild it from its summary cursor.
+        // (In the live app the caller re-subscribes from `lastSequence`; here we
+        // simply promote it back to a heavy reducer if we still hold its events.)
+        releaseBackgroundViews()
+    }
+
+    /// Release the heavy node-level projection for every run EXCEPT the active
+    /// one, keeping a light `PipelineRunSummary`. The active run keeps its full
+    /// materialized view. Idempotent.
+    func releaseBackgroundViews() {
+        for (runId, reducer) in reducers where runId != activeRunId {
+            releasedSummaries[runId] = PipelineRunSummary(
+                projection: reducer.projection,
+                lastSequence: reducer.lastSequence
+            )
+            reducers[runId] = nil
+        }
+        // The active run owns the retained event slice; non-active runs' events
+        // were never retained, so nothing unbounded lingers.
+        if let active = activeRunId {
+            eventsForActiveRun = eventsForActiveRun.filter { $0.runId == active }
+        } else {
+            eventsForActiveRun.removeAll()
+        }
+        publishNow()
+    }
+
+    /// True if `runId` currently retains its heavy node-level projection.
+    func retainsHeavyView(_ runId: String) -> Bool {
+        reducers[runId] != nil
+    }
+
+    // MARK: - Publish
+
+    /// Republish after a high-rate ingest. The snapshot is ALWAYS submitted to
+    /// the batcher (so its coalesced flush stream is the authoritative UI-update
+    /// rate). When coalescing is off we also assign `projections` synchronously
+    /// so immediate readers are correct; when on, only the batcher's flush
+    /// assigns it, bounding invalidations to flush ticks.
+    private func scheduleRepublish() {
+        let snapshot = currentSnapshot()
+        batcher.submit(snapshot)
+        if !coalesceRepublish {
+            projections = snapshot
+            republishCount += 1
+        }
+    }
+
+    /// Build and publish synchronously, bypassing the coalescer (used by
+    /// non-high-rate mutations: rebuild/reset/release/setActive).
+    private func publishNow() {
+        batcher.cancelPending()
+        projections = currentSnapshot()
+        republishCount += 1
+    }
+
+    private func currentSnapshot() -> [PipelineExecutionProjection] {
+        reducers.values
             .map(\.projection)
             .sorted { $0.runId < $1.runId }
     }

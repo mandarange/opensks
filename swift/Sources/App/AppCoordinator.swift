@@ -63,6 +63,16 @@ final class AppCoordinator: ObservableObject {
     /// intelligence deep link to a file can open it in the code workspace.
     private weak var editorStore: EditorWorkspaceStore?
 
+    /// Process-lifetime memory-pressure monitor (PR-043). On a WARNING it shrinks
+    /// bounded caches + releases backgrounded heavy views; on CRITICAL it purges
+    /// them. The conversation + pipeline stores register their background-release
+    /// here so only the foreground view survives a pressure event.
+    let memoryPressure = MemoryPressureMonitor()
+
+    /// A bounded LRU cache for rendered thumbnails / pages (PR-043). Capacity caps
+    /// live entries; the monitor shrinks it on warning and purges on critical.
+    let renderCache = BoundedCache<String, Data>(capacity: 256)
+
     init() {
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
         let cli = cwd.appendingPathComponent("target/debug/opensks")
@@ -86,6 +96,15 @@ final class AppCoordinator: ObservableObject {
             service: LiveVaultService(cli: cli, workspace: cwd),
             recipientStore: KeychainVaultRecipientStore()
         )
+
+        // PR-043: wire memory-pressure reclaim. The render cache shrinks/purges,
+        // and the conversation + pipeline stores release their backgrounded heavy
+        // views (full thread page / full node projection) so only the foreground
+        // view survives. Then start listening to the OS for real pressure events.
+        memoryPressure.register(cache: renderCache)
+        conversations.registerForMemoryPressure(memoryPressure)
+        pipelines.registerForMemoryPressure(memoryPressure)
+        memoryPressure.start()
     }
 
     /// Rebind the conversation store's live service to the resolved workspace and

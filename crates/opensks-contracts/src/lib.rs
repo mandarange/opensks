@@ -33,6 +33,7 @@ pub const OUTBOX_DISPATCH_REPORT_SCHEMA: &str = "opensks.outbox-dispatch-report.
 pub const DATA_PLANE_MANIFEST_SCHEMA: &str = "opensks.data-plane-manifest.v1";
 pub const RETENTION_PLAN_SCHEMA: &str = "opensks.retention-plan.v1";
 pub const RELEASE_PROOF_SCHEMA: &str = "opensks.release-proof.v1";
+pub const PERF_STRESS_REPORT_SCHEMA: &str = "opensks.perf-stress-report.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -857,6 +858,41 @@ pub struct SchedulerSnapshot {
     pub decision: ConcurrencyDecision,
     pub overlap_ratio: f64,
     pub max_concurrent_workers: u32,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+/// Result of the PR-043 high-rate stress harness: a deterministic report proving
+/// the bounded event batcher + LRU cache stay within their configured retention
+/// budget regardless of input size, lose nothing silently (only counted drops),
+/// and that the supervised run reaped every child with zero leaked handles.
+///
+/// The invariant `within_budget` is `true` iff `peak_retained <= retention_cap`
+/// AND `processed + dropped == events` AND `children_reaped == children_spawned`
+/// AND `leaked_handles == 0`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PerfStressReport {
+    pub schema: String,
+    /// Number of synthetic events fed into the harness.
+    pub events: u64,
+    /// Events that flowed all the way through the batcher to the sink.
+    pub processed: u64,
+    /// Events dropped by an explicit, counted overflow policy (never silent).
+    pub dropped: u64,
+    /// Hard cap on retained items (cache capacity + the largest in-flight batch),
+    /// expressed as a single item budget for the wire contract.
+    pub retention_cap: u64,
+    /// High-water mark of simultaneously retained items across the whole run.
+    pub peak_retained: u64,
+    /// Children spawned by the supervisor during the run.
+    pub children_spawned: u64,
+    /// Children deterministically reaped by the supervisor (must equal spawned).
+    pub children_reaped: u64,
+    /// Live OS handles still registered after the supervised run drained. Zero
+    /// proves no orphaned process / leaked file descriptor.
+    pub leaked_handles: u64,
+    /// The single load-bearing invariant the harness asserts.
+    pub within_budget: bool,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
 }
@@ -1867,6 +1903,10 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "release-proof.schema.json",
             serde_json::to_string_pretty(&schema_for!(ReleaseProof))?,
+        ),
+        (
+            "perf-stress-report.schema.json",
+            serde_json::to_string_pretty(&schema_for!(PerfStressReport))?,
         ),
         (
             "text-diff.schema.json",

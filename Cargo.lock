@@ -684,6 +684,7 @@ dependencies = [
  "opensks-hooks",
  "opensks-image",
  "opensks-intel",
+ "opensks-perf",
  "opensks-policy",
  "opensks-provider",
  "opensks-reasoning",
@@ -843,6 +844,16 @@ dependencies = [
  "opensks-contracts",
  "opensks-triwiki",
  "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "opensks-perf"
+version = "0.1.0"
+dependencies = [
+ "opensks-contracts",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

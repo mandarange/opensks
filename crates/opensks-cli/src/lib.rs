@@ -1658,6 +1658,97 @@ pub fn scheduler_usage() -> &'static str {
     )
 }
 
+/// `opensks perf <subcommand>` — Lifecycle / memory / high-rate performance
+/// hardening (PR-043). Currently exposes `stress`, which runs the bounded
+/// event-batcher + LRU-cache stress harness under a supervised, deterministically
+/// reaped child pool and prints the `opensks.perf-stress-report.v1` contract.
+///
+/// All harness logic lives in `opensks-perf`; this is a thin wire-up that parses
+/// flags, calls `opensks_perf::run_stress`, and serializes the report to stdout.
+pub fn run_perf_command(args: &[String], _cwd: &Path) -> Result<CliOutput, CliError> {
+    let subcommand = args
+        .first()
+        .ok_or_else(|| CliError::Usage(perf_usage().to_string()))?;
+    match subcommand.as_str() {
+        "stress" => run_perf_stress_command(&args[1..]),
+        other => Err(CliError::Usage(format!(
+            "unknown perf subcommand `{other}`\n\n{}",
+            perf_usage()
+        ))),
+    }
+}
+
+pub fn perf_usage() -> &'static str {
+    concat!(
+        "usage: opensks perf stress [--events <n>] [--cache-capacity <n>]\n",
+        "                           [--max-batch <n>] [--max-pending <n>] [--children <n>]\n"
+    )
+}
+
+fn run_perf_stress_command(args: &[String]) -> Result<CliOutput, CliError> {
+    let mut config = opensks_perf::StressConfig::default();
+    let mut idx = 0;
+    while idx < args.len() {
+        let flag = args[idx].as_str();
+        let value = || -> Result<&str, CliError> {
+            args.get(idx + 1).map(String::as_str).ok_or_else(|| {
+                CliError::Usage(format!(
+                    "flag `{flag}` requires a value\n\n{}",
+                    perf_usage()
+                ))
+            })
+        };
+        let parse_u64 = |raw: &str| -> Result<u64, CliError> {
+            raw.parse::<u64>().map_err(|_| {
+                CliError::Usage(format!(
+                    "flag `{flag}` requires a number\n\n{}",
+                    perf_usage()
+                ))
+            })
+        };
+        let parse_usize = |raw: &str| -> Result<usize, CliError> {
+            raw.parse::<usize>().map_err(|_| {
+                CliError::Usage(format!(
+                    "flag `{flag}` requires a number\n\n{}",
+                    perf_usage()
+                ))
+            })
+        };
+        match flag {
+            "--events" => {
+                config.events = parse_u64(value()?)?;
+                idx += 2;
+            }
+            "--cache-capacity" => {
+                config.cache_capacity = parse_usize(value()?)?;
+                idx += 2;
+            }
+            "--max-batch" => {
+                config.max_batch = parse_usize(value()?)?;
+                idx += 2;
+            }
+            "--max-pending" => {
+                config.max_pending = parse_usize(value()?)?;
+                idx += 2;
+            }
+            "--children" => {
+                config.supervised_children = parse_u64(value()?)?;
+                idx += 2;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown argument `{other}`\n\n{}",
+                    perf_usage()
+                )));
+            }
+        }
+    }
+    let report = opensks_perf::run_stress(config);
+    let body = serde_json::to_value(&report)
+        .map_err(|error| CliError::Invalid(format!("serialize perf stress report: {error}")))?;
+    file_output(&body)
+}
+
 fn run_scheduler_run_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
     let goal = require_freeform_cli(args, "usage: opensks scheduler run \"<goal>\"")?;
     let stamp = ClockStamp::now()?;
@@ -4594,6 +4685,57 @@ mod tests {
         )
         .expect_err("invalid count");
         assert_eq!(invalid_count.to_string(), scheduler_usage());
+    }
+
+    #[test]
+    fn perf_stress_command_reports_within_budget() {
+        // The `perf stress` verb runs the PR-043 harness and prints the
+        // perf-stress-report contract; the headline invariant must hold.
+        let output = run_perf_command(
+            &[
+                "stress".to_string(),
+                "--events".to_string(),
+                "100000".to_string(),
+            ],
+            Path::new("."),
+        )
+        .expect("perf stress");
+        let report: serde_json::Value =
+            serde_json::from_str(&output.stdout).expect("parse perf report");
+        assert_eq!(report["schema"], "opensks.perf-stress-report.v1");
+        assert_eq!(report["events"], 100_000);
+        assert_eq!(report["within_budget"], true);
+        assert_eq!(report["leaked_handles"], 0);
+        assert_eq!(report["children_spawned"], report["children_reaped"]);
+        let processed = report["processed"].as_u64().expect("processed");
+        let dropped = report["dropped"].as_u64().expect("dropped");
+        assert_eq!(processed + dropped, 100_000);
+        let cap = report["retention_cap"].as_u64().expect("cap");
+        let peak = report["peak_retained"].as_u64().expect("peak");
+        assert!(peak <= cap, "peak {peak} exceeded cap {cap}");
+    }
+
+    #[test]
+    fn perf_usage_preserves_errors() {
+        let missing = run_perf_command(&[], Path::new(".")).expect_err("missing perf subcommand");
+        assert_eq!(missing.to_string(), perf_usage());
+        let unknown = run_perf_command(&["bogus".to_string()], Path::new("."))
+            .expect_err("unknown perf subcommand");
+        assert!(
+            unknown
+                .to_string()
+                .contains("unknown perf subcommand `bogus`")
+        );
+        let bad_flag = run_perf_command(
+            &[
+                "stress".to_string(),
+                "--events".to_string(),
+                "nope".to_string(),
+            ],
+            Path::new("."),
+        )
+        .expect_err("invalid events value");
+        assert!(bad_flag.to_string().contains("requires a number"));
     }
 
     #[test]

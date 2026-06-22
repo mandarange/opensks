@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PerfStressReport",
+  "description": "Result of the PR-043 high-rate stress harness: a deterministic report proving the bounded event batcher + LRU cache stay within their configured retention budget regardless of input size, lose nothing silently (only counted drops), and that the supervised run reaped every child with zero leaked handles.\n\nThe invariant `within_budget` is `true` iff `peak_retained <= retention_cap` AND `processed + dropped == events` AND `children_reaped == children_spawned` AND `leaked_handles == 0`.",
+  "type": "object",
+  "required": [
+    "children_reaped",
+    "children_spawned",
+    "dropped",
+    "events",
+    "leaked_handles",
+    "peak_retained",
+    "processed",
+    "retention_cap",
+    "schema",
+    "within_budget"
+  ],
+  "properties": {
+    "children_reaped": {
+      "description": "Children deterministically reaped by the supervisor (must equal spawned).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "children_spawned": {
+      "description": "Children spawned by the supervisor during the run.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "dropped": {
+      "description": "Events dropped by an explicit, counted overflow policy (never silent).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "events": {
+      "description": "Number of synthetic events fed into the harness.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "leaked_handles": {
+      "description": "Live OS handles still registered after the supervised run drained. Zero proves no orphaned process / leaked file descriptor.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "peak_retained": {
+      "description": "High-water mark of simultaneously retained items across the whole run.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "processed": {
+      "description": "Events that flowed all the way through the batcher to the sink.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "retention_cap": {
+      "description": "Hard cap on retained items (cache capacity + the largest in-flight batch), expressed as a single item budget for the wire contract.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "schema": {
+      "type": "string"
+    },
+    "within_budget": {
+      "description": "The single load-bearing invariant the harness asserts.",
+      "type": "boolean"
+    }
+  }
+}

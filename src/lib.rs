@@ -652,6 +652,7 @@ where
         "app-data" => run_app_data_command(&args[1..], cwd),
         "history" => run_history_command(&args[1..], cwd),
         "scheduler" => run_scheduler_command(&args[1..], cwd),
+        "perf" => run_perf_command(&args[1..], cwd),
         "worker" => run_worker_command(&args[1..], cwd),
         "worktree" => run_worktree_command(&args[1..], cwd),
         "patch" => run_patch_command(&args[1..], cwd),
@@ -1776,6 +1777,13 @@ fn render_app_data_json(d: &NativeAppDashboard) -> String {
 
 fn run_scheduler_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
     let output = opensks_cli::run_scheduler_command(args, cwd).map_err(convert_cli_error)?;
+    Ok(CliOutput {
+        stdout: output.stdout,
+    })
+}
+
+fn run_perf_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
+    let output = opensks_cli::run_perf_command(args, cwd).map_err(convert_cli_error)?;
     Ok(CliOutput {
         stdout: output.stdout,
     })
@@ -14758,6 +14766,7 @@ fn usage() -> &'static str {
         "  opensks scheduler simulate [count]\n",
         "  opensks scheduler dispatch [count]\n",
         "  opensks scheduler recover [count]\n",
+        "  opensks perf stress [--events <n>]\n",
         "  opensks worker runtime \"<goal>\"\n",
         "  opensks worktree create \"<worker label>\"\n",
         "  opensks worktree isolate \"<worker label>\"\n",

@@ -8,7 +8,7 @@
 import SwiftUI
 
 @MainActor
-final class ConversationStore: ObservableObject {
+final class ConversationStore: ObservableObject, BackgroundReleasable {
     // Service boundary. Swappable so the live service can be (re)bound once the
     // workspace path is known at runtime (RootView.onAppear).
     @Published private(set) var service: ConversationService
@@ -18,7 +18,10 @@ final class ConversationStore: ObservableObject {
     @Published var selectedConversationID: String?
     @Published var projectId: String?
 
-    // Loaded message page for the current selection.
+    // Loaded message page for the current selection. This is the HEAVY
+    // materialized view (PR-043): only the FOREGROUND conversation retains its
+    // loaded page; backgrounding releases it so an inactive conversation does not
+    // retain a full thread in memory. The light `summaries` entry survives.
     @Published private(set) var messages: [ConversationMessage] = []
     @Published private(set) var hasMoreMessages = false
 
@@ -59,9 +62,23 @@ final class ConversationStore: ObservableObject {
     /// Page size for the message pager.
     let messagePageSize: Int
 
+    /// The conversation whose HEAVY message page is retained. Only this one holds
+    /// a full thread page; backgrounding (`releaseBackgroundViews` / memory
+    /// pressure) drops the page for any non-active selection. Re-activating
+    /// (`setActive` / `select`) reloads it from the service.
+    private(set) var activeConversationID: String?
+
     init(service: ConversationService, messagePageSize: Int = 50) {
         self.service = service
         self.messagePageSize = messagePageSize
+    }
+
+    /// Subscribe this store to a memory-pressure monitor: any event releases the
+    /// heavy page for every non-active conversation. Idempotent across calls.
+    func registerForMemoryPressure(_ monitor: MemoryPressureMonitor) {
+        monitor.addHandler { [weak self] _ in
+            self?.releaseBackgroundViews()
+        }
     }
 
     /// Rebind the service (e.g. when the live workspace path becomes known).
@@ -176,7 +193,12 @@ final class ConversationStore: ObservableObject {
     // MARK: - Selection + messages
 
     func select(_ id: String) async {
+        // Selecting a conversation makes it the FOREGROUND view: it gets its heavy
+        // message page (re)loaded; the previously-selected conversation is now
+        // backgrounded and its page released by the swap below (a single page is
+        // ever held). `activeConversationID` tracks the retained heavy view.
         selectedConversationID = id
+        activeConversationID = id
         await loadMessages(for: id)
         await loadRuns(for: id)
     }
@@ -326,6 +348,7 @@ final class ConversationStore: ObservableObject {
             pushCardsByConversation[id] = nil
             if selectedConversationID == id {
                 selectedConversationID = nil
+                activeConversationID = nil
                 messages = []
                 hasMoreMessages = false
             }
@@ -333,5 +356,46 @@ final class ConversationStore: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    // MARK: - Background release (PR-043)
+
+    /// Make `id` the foreground conversation: hydrate its heavy message page and
+    /// release any other retained page. Passing `nil` backgrounds everything (no
+    /// heavy page retained). This is the explicit active/inactive transition the
+    /// app drives on focus / route changes; `select` also routes through it.
+    func setActive(_ id: String?) async {
+        activeConversationID = id
+        guard let id else {
+            // Background everything: drop the heavy page, keep summaries.
+            messages = []
+            hasMoreMessages = false
+            return
+        }
+        selectedConversationID = id
+        await loadMessages(for: id)
+        await loadRuns(for: id)
+    }
+
+    /// Release the heavy message page for any conversation that is NOT the active
+    /// one, keeping the light `summaries` list intact. Idempotent. Driven by
+    /// memory pressure or an app "background everything" transition. The active
+    /// conversation keeps its page; everything else is reclaimed.
+    func releaseBackgroundViews() {
+        // A single page is ever held — for the selected conversation. If that
+        // selection is not the active (foreground) conversation, drop the page.
+        guard let selected = selectedConversationID else { return }
+        if selected != activeConversationID {
+            messages = []
+            hasMoreMessages = false
+        }
+    }
+
+    /// True if `id` currently retains its heavy message page (i.e. it is the
+    /// active conversation and its page is loaded).
+    func retainsHeavyView(_ id: String) -> Bool {
+        id == activeConversationID
+            && selectedConversationID == id
+            && !messages.isEmpty
     }
 }
