@@ -53,6 +53,43 @@ final class ContractsTests: XCTestCase {
         XCTAssertFalse(rightFinal.timedOut)
     }
 
+    func testEnginePendingResponseRouterCompletesOnExplicitTerminalMarker() {
+        // STREAM-001: the router completes a request when its EXPLICIT terminal
+        // marker (request_completed) arrives — never on a silence/quiet-window
+        // heuristic. The marker is an envelope signal, not a user-facing event, so
+        // it is NOT added to the response lines.
+        let router = EnginePendingResponseRouter()
+        router.register(EngineRequestEnvelope.health(id: "req-term"))
+
+        // A normal correlated event arrives first. The response is NOT complete yet,
+        // even though a line is present and time passes — completion is marker-driven,
+        // not line-count- or silence-driven.
+        router.append(Data("""
+        {"schema":"opensks.engine-event.v1","event_id":"engine-health","request_id":"req-term","event_type":"engine_health","severity":"info","message":"health ok","protocol_version":"opensks.contracts.v1","timestamp_ms":1,"evidence_refs":["daemon:stdio-health"],"redacted":true}
+
+        """.utf8))
+        let before = router.snapshot(for: "req-term")
+        XCTAssertTrue(before.sawRequestEvent)
+        XCTAssertFalse(before.isComplete, "no terminal marker yet ⇒ not complete")
+        XCTAssertEqual(before.lines.count, 1)
+
+        // The explicit terminal marker arrives back-to-back (zero quiet-window gap).
+        router.append(Data("""
+        {"schema":"opensks.engine-event.v1","event_id":"engine-request-completed-req-term","request_id":"req-term","event_type":"request_completed","severity":"info","message":"request completed","protocol_version":"opensks.contracts.v1","timestamp_ms":2,"evidence_refs":["daemon:request-completed"],"redacted":true}
+
+        """.utf8))
+        let after = router.snapshot(for: "req-term")
+        XCTAssertTrue(after.isComplete, "the terminal marker completes the response immediately")
+        // The terminal marker is envelope-only — it does NOT pollute the decoded lines.
+        XCTAssertEqual(after.lines.count, 1, "terminal marker must not be added to the response lines")
+        XCTAssertFalse(after.lines.contains { $0.contains("request_completed") })
+
+        let final = router.finish(requestId: "req-term", timedOut: false)
+        XCTAssertEqual(final.lines.count, 1)
+        XCTAssertTrue(final.sawRequestEvent)
+        XCTAssertFalse(final.timedOut)
+    }
+
     func testEnginePendingResponseRouterRoutesRunEventsByRunId() {
         let router = EnginePendingResponseRouter()
         let request = EngineRequestEnvelope.runStart(

@@ -81,6 +81,10 @@ enum EngineEventType: OpenSKSStringEnum {
     case engineHealth
     case executionEvent
     case error
+    /// STREAM-001: the explicit per-request terminal marker. The daemon emits one
+    /// as the final event of every request response; the client completes on it
+    /// rather than on a silence/quiet-window heuristic.
+    case requestCompleted
     case unrecognized(String)
 
     var rawValue: String {
@@ -89,6 +93,7 @@ enum EngineEventType: OpenSKSStringEnum {
         case .engineHealth: return "engine_health"
         case .executionEvent: return "execution_event"
         case .error: return "error"
+        case .requestCompleted: return "request_completed"
         case .unrecognized(let value): return value
         }
     }
@@ -99,6 +104,7 @@ enum EngineEventType: OpenSKSStringEnum {
         case "engine_health": self = .engineHealth
         case "execution_event": self = .executionEvent
         case "error": self = .error
+        case "request_completed": self = .requestCompleted
         default: self = .unrecognized(rawValue)
         }
     }

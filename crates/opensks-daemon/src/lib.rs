@@ -151,50 +151,93 @@ fn request_lines(
     trimmed: &str,
     options: &DaemonOptions,
 ) -> Result<Vec<String>, DaemonError> {
-    let parsed: Result<EngineRequest, _> = serde_json::from_str(trimmed);
-    let event = match parsed {
-        Ok(request) => match request.kind {
-            EngineRequestKind::Hello => {
-                return Ok(vec![serde_json::to_string(&hello_event(
-                    Some(request.id),
-                    options,
-                ))?]);
-            }
-            EngineRequestKind::Health => {
-                return Ok(vec![serde_json::to_string(&health_event(
-                    Some(request.id),
-                    options,
-                ))?]);
-            }
-            EngineRequestKind::SubscribeEvents => match subscription_lines(&request, options) {
-                Ok(subscription_lines) => return Ok(subscription_lines),
-                Err(error) => run_start_error_event(Some(request.id), error),
-            },
-            EngineRequestKind::RunStart => match run_start_lines(&request, options) {
-                Ok(run_lines) => return Ok(run_lines),
-                Err(error) => run_start_error_event(Some(request.id), error),
-            },
-            EngineRequestKind::RunPause
-            | EngineRequestKind::RunResume
-            | EngineRequestKind::RunCancel
-            | EngineRequestKind::RunSteer => match run_control_lines(&request, options) {
-                Ok(control_lines) => return Ok(control_lines),
-                Err(error) => run_start_error_event(Some(request.id), error),
-            },
-            EngineRequestKind::ApprovalRequest
-            | EngineRequestKind::ApprovalApprove
-            | EngineRequestKind::ApprovalDeny => match approval_lines(&request, options) {
-                Ok(approval_lines) => return Ok(approval_lines),
-                Err(error) => run_start_error_event(Some(request.id), error),
-            },
-            EngineRequestKind::OutboxDispatch => match outbox_dispatch_lines(&request) {
-                Ok(outbox_lines) => return Ok(outbox_lines),
-                Err(error) => run_start_error_event(Some(request.id), error),
-            },
-        },
-        Err(error) => parse_error_event(idx, error),
+    let request = match serde_json::from_str::<EngineRequest>(trimmed) {
+        Ok(request) => request,
+        // An unparseable request has no id to correlate a terminal marker to; the
+        // client's hard deadline is the only safety net for this defensive path.
+        Err(error) => return Ok(vec![serde_json::to_string(&parse_error_event(idx, error))?]),
     };
-    Ok(vec![serde_json::to_string(&event)?])
+    let request_id = request.id.clone();
+
+    // Compute the response body lines per request kind, then ALWAYS append an
+    // explicit per-request terminal marker (STREAM-001) so the client completes on
+    // it rather than on a silence/quiet-window heuristic.
+    let body = match request.kind {
+        EngineRequestKind::Hello => {
+            vec![serde_json::to_string(&hello_event(
+                Some(request_id.clone()),
+                options,
+            ))?]
+        }
+        EngineRequestKind::Health => {
+            vec![serde_json::to_string(&health_event(
+                Some(request_id.clone()),
+                options,
+            ))?]
+        }
+        EngineRequestKind::SubscribeEvents => match subscription_lines(&request, options) {
+            Ok(subscription_lines) => subscription_lines,
+            Err(error) => vec![serde_json::to_string(&run_start_error_event(
+                Some(request_id.clone()),
+                error,
+            ))?],
+        },
+        EngineRequestKind::RunStart => match run_start_lines(&request, options) {
+            Ok(run_lines) => run_lines,
+            Err(error) => vec![serde_json::to_string(&run_start_error_event(
+                Some(request_id.clone()),
+                error,
+            ))?],
+        },
+        EngineRequestKind::RunPause
+        | EngineRequestKind::RunResume
+        | EngineRequestKind::RunCancel
+        | EngineRequestKind::RunSteer => match run_control_lines(&request, options) {
+            Ok(control_lines) => control_lines,
+            Err(error) => vec![serde_json::to_string(&run_start_error_event(
+                Some(request_id.clone()),
+                error,
+            ))?],
+        },
+        EngineRequestKind::ApprovalRequest
+        | EngineRequestKind::ApprovalApprove
+        | EngineRequestKind::ApprovalDeny => match approval_lines(&request, options) {
+            Ok(approval_lines) => approval_lines,
+            Err(error) => vec![serde_json::to_string(&run_start_error_event(
+                Some(request_id.clone()),
+                error,
+            ))?],
+        },
+        EngineRequestKind::OutboxDispatch => match outbox_dispatch_lines(&request) {
+            Ok(outbox_lines) => outbox_lines,
+            Err(error) => vec![serde_json::to_string(&run_start_error_event(
+                Some(request_id.clone()),
+                error,
+            ))?],
+        },
+    };
+
+    let mut lines = body;
+    lines.push(serde_json::to_string(&request_completed_event(request_id))?);
+    Ok(lines)
+}
+
+/// STREAM-001: the explicit per-request terminal marker. Emitted as the final line
+/// of every (parseable) request response, correlated by `request_id`, so the client
+/// completes the response deterministically instead of inferring completion from a
+/// silence/quiet-window heuristic.
+fn request_completed_event(request_id: String) -> EngineEvent {
+    let event_id = format!("engine-request-completed-{request_id}");
+    let mut event = EngineEvent::new(
+        event_id,
+        Some(request_id),
+        EngineEventType::RequestCompleted,
+        "request completed",
+        timestamp_ms(),
+    );
+    event.evidence_refs = vec!["daemon:request-completed".to_string()];
+    event.redacted = true;
+    event
 }
 
 fn pending_request_backpressure_event(idx: usize) -> EngineEvent {
@@ -912,6 +955,46 @@ mod tests {
         let output = String::from_utf8(output).expect("utf8");
         assert!(output.contains("\"request_id\":\"req-health-1\""));
         assert!(output.contains("\"request_id\":\"req-health-2\""));
+    }
+
+    #[test]
+    fn request_response_ends_with_an_explicit_terminal_marker() {
+        // STREAM-001: every request response ends with an explicit, request_id-
+        // correlated terminal marker so the client completes on it — never on a
+        // silence/quiet-window heuristic.
+        let input = serde_json::to_string(&EngineRequest::health("req-term-1")).expect("request");
+        let output = run_stdio(
+            &input,
+            &DaemonOptions {
+                workspace: PathBuf::from("."),
+            },
+        )
+        .expect("stdio");
+
+        assert!(output.contains("\"event_type\":\"request_completed\""));
+        assert!(output.contains("\"daemon:request-completed\""));
+        // Exactly one terminal marker for the one request (the startup hello/health
+        // banner is not a request response and carries none).
+        assert_eq!(
+            output
+                .matches("\"event_type\":\"request_completed\"")
+                .count(),
+            1
+        );
+        // The terminal marker carries the request id AND is the final line, so the
+        // client can correlate it and stop reading deterministically.
+        let last = output
+            .lines()
+            .rfind(|line| !line.trim().is_empty())
+            .expect("at least one output line");
+        assert!(
+            last.contains("\"event_type\":\"request_completed\""),
+            "terminal marker must be the final line, got: {last}"
+        );
+        assert!(
+            last.contains("\"request_id\":\"req-term-1\""),
+            "terminal marker must carry the request id, got: {last}"
+        );
     }
 
     #[test]

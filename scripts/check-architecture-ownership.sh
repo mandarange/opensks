@@ -105,4 +105,12 @@ if grep -qE 'var[[:space:]]+selectedRail' swift/Sources/Backend.swift; then
 fi
 ok "no AppState.selectedRail dual navigation state"
 
+# 7e. Daemon responses complete on an EXPLICIT terminal marker, never on a silence
+#     / quiet-window heuristic (STREAM-001 / §0.4). The forbidden pattern is a
+#     completion that fires after N seconds of stdout silence.
+if grep -qE 'quietWindow' swift/Sources/Backend.swift; then
+  fail "Backend.swift reintroduced a quiet-window completion heuristic; daemon responses must complete on the explicit request_completed terminal marker (STREAM-001 / §0.4)."
+fi
+ok "no quiet-window stream-completion heuristic in Backend.swift"
+
 echo "ARCH-GUARD: all checks passed."

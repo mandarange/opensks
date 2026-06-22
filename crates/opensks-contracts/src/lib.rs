@@ -59,6 +59,10 @@ pub enum EngineEventType {
     EngineHealth,
     ExecutionEvent,
     Error,
+    /// STREAM-001: the explicit per-request terminal marker. The daemon emits one
+    /// as the FINAL event of every request response so the client completes on it,
+    /// never on a silence/quiet-window heuristic. Carries the `request_id`.
+    RequestCompleted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

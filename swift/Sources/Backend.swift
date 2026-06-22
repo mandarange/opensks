@@ -173,6 +173,10 @@ struct EngineCollectedResponse {
 struct EngineResponseSnapshot {
     let lines: [String]
     let sawRequestEvent: Bool
+    /// STREAM-001: true once the explicit per-request terminal marker
+    /// (`request_completed`) has arrived for this request. Completion keys off this,
+    /// never off a silence/quiet-window heuristic.
+    let isComplete: Bool
     let lastLineAt: Date
 }
 
@@ -184,6 +188,7 @@ private struct EnginePendingResponse {
     var lastLineOrder: UInt64
     var lines: [String]
     var sawRequestEvent: Bool
+    var isComplete: Bool
     var lastLineAt: Date
 }
 
@@ -206,6 +211,7 @@ final class EnginePendingResponseRouter: @unchecked Sendable {
             lastLineOrder: 0,
             lines: [],
             sawRequestEvent: false,
+            isComplete: false,
             lastLineAt: Date()
         )
     }
@@ -232,11 +238,14 @@ final class EnginePendingResponseRouter: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard let response = pending[requestId] else {
-            return EngineResponseSnapshot(lines: [], sawRequestEvent: false, lastLineAt: Date())
+            return EngineResponseSnapshot(
+                lines: [], sawRequestEvent: false, isComplete: false, lastLineAt: Date()
+            )
         }
         return EngineResponseSnapshot(
             lines: response.lines,
             sawRequestEvent: response.sawRequestEvent,
+            isComplete: response.isComplete,
             lastLineAt: response.lastLineAt
         )
     }
@@ -259,7 +268,9 @@ final class EnginePendingResponseRouter: @unchecked Sendable {
     }
 
     private func route(_ line: String) {
-        let requestId = decodedEngineRequestId(from: line)
+        let engine = decodedEngineEvent(from: line)
+        let requestId = engine?.requestId
+        let isTerminal = engine?.isTerminal ?? false
         let runId = decodedExecutionRunId(from: line)
         let matchedIds = matchedPendingIds(requestId: requestId, runId: runId)
         guard !matchedIds.isEmpty else {
@@ -270,9 +281,17 @@ final class EnginePendingResponseRouter: @unchecked Sendable {
         let now = Date()
         for id in matchedIds {
             guard var response = pending[id] else { continue }
-            response.lines.append(line)
-            if requestId == id {
+            if isTerminal && requestId == id {
+                // STREAM-001: the explicit terminal marker completes the response.
+                // It is an envelope-level signal, not a user-facing event, so it is
+                // NOT appended to the response lines — the decoded stream stays clean.
+                response.isComplete = true
                 response.sawRequestEvent = true
+            } else {
+                response.lines.append(line)
+                if requestId == id {
+                    response.sawRequestEvent = true
+                }
             }
             response.lastLineOrder = lineOrder
             response.lastLineAt = now
@@ -302,13 +321,15 @@ final class EnginePendingResponseRouter: @unchecked Sendable {
         return owner.map { [$0.requestId] } ?? []
     }
 
-    private func decodedEngineRequestId(from line: String) -> String? {
+    /// Decode an engine event line once, returning its correlation request id and
+    /// whether it is the explicit per-request terminal marker (STREAM-001).
+    private func decodedEngineEvent(from line: String) -> (requestId: String?, isTerminal: Bool)? {
         guard let data = line.data(using: .utf8),
               let event = try? JSONDecoder.opensks.decode(EngineEvent.self, from: data)
         else {
             return nil
         }
-        return event.requestId
+        return (event.requestId, event.eventType == .requestCompleted)
     }
 
     private func decodedExecutionRunId(from line: String) -> String? {
@@ -572,12 +593,16 @@ actor EngineProcess {
         from session: EngineDaemonSession,
         request: EngineRequestEnvelope
     ) async -> EngineCollectedResponse {
+        // STREAM-001: completion is signalled by the EXPLICIT per-request terminal
+        // marker (`request_completed`), never by a silence/quiet-window heuristic.
+        // The deadline is only a timeout safety net — it reports a timeout, it does
+        // not fabricate a successful completion. The 20ms sleep is a cheap poll
+        // interval, not a completion signal.
         let deadline = Date().addingTimeInterval(responseTimeout(for: request))
-        let quietWindow: TimeInterval = 0.15
 
         while Date() < deadline {
             let snapshot = session.responseSnapshot(for: request.id)
-            if snapshot.sawRequestEvent && Date().timeIntervalSince(snapshot.lastLineAt) >= quietWindow {
+            if snapshot.isComplete {
                 return session.finishResponse(for: request.id, timedOut: false)
             }
             if !session.isRunning {

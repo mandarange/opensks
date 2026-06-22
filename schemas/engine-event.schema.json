@@ -55,12 +55,23 @@
   },
   "definitions": {
     "EngineEventType": {
-      "type": "string",
-      "enum": [
-        "engine_hello",
-        "engine_health",
-        "execution_event",
-        "error"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "engine_hello",
+            "engine_health",
+            "execution_event",
+            "error"
+          ]
+        },
+        {
+          "description": "STREAM-001: the explicit per-request terminal marker. The daemon emits one as the FINAL event of every request response so the client completes on it, never on a silence/quiet-window heuristic. Carries the `request_id`.",
+          "type": "string",
+          "enum": [
+            "request_completed"
+          ]
+        }
       ]
     },
     "EventSeverity": {
