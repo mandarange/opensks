@@ -55,11 +55,16 @@ pub struct TurnIdempotencyRecord {
 
 /// Redact secret-looking tokens from text before it is stored in the searchable
 /// copy or an FTS index. Whitespace within a line is normalized; line breaks are
-/// preserved. Catches common key prefixes and long high-entropy tokens.
+/// preserved. Catches common provider/key prefixes, long high-entropy tokens,
+/// `KEY=VALUE` / `KEY: VALUE` secret values, and whole credential lines (private
+/// key blocks, `Authorization: Bearer …`) — recovery directive §19.5.
 pub fn redact_secrets(input: &str) -> String {
     input
         .lines()
         .map(|line| {
+            if line_has_credential_marker(line) {
+                return "[REDACTED]".to_string();
+            }
             line.split_whitespace()
                 .map(|tok| if looks_secret(tok) { "[REDACTED]" } else { tok })
                 .collect::<Vec<_>>()
@@ -69,16 +74,75 @@ pub fn redact_secrets(input: &str) -> String {
         .join("\n")
 }
 
+/// Whole-line markers that should redact the entire line regardless of token
+/// shape: PEM private-key blocks and bearer auth headers.
+fn line_has_credential_marker(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("-----begin") && lower.contains("key") {
+        return true;
+    }
+    if lower.contains("private key") {
+        return true;
+    }
+    if lower.contains("authorization") && lower.contains("bearer ") {
+        return true;
+    }
+    false
+}
+
 fn looks_secret(token: &str) -> bool {
+    if looks_secret_core(token) {
+        return true;
+    }
+    // `KEY=VALUE` / `KEY:VALUE` (e.g. a `.env` assignment or `password: …`):
+    // judge the value part after the last separator.
+    for sep in ['=', ':'] {
+        if let Some((_, value)) = token.rsplit_once(sep) {
+            if !value.is_empty() && looks_secret_core(value) {
+                return true;
+            }
+        }
+    }
+    // URL userinfo: `scheme://user:pass@host` — the embedded credential.
+    if token.contains("://") && token.contains('@') && token.contains(':') {
+        if let Some(rest) = token.split("://").nth(1) {
+            if let Some((userinfo, _)) = rest.split_once('@') {
+                if userinfo.contains(':') {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn looks_secret_core(token: &str) -> bool {
     let core = token.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     if core.len() < 12 {
         return false;
     }
-    const PREFIXES: [&str; 6] = ["sk-", "sk_", "ghp_", "xoxb-", "aws_", "akia"];
+    // Known provider/key prefixes (lowercased compare). `sk-` also covers
+    // OpenRouter `sk-or-…` and OpenAI `sk-…`.
+    const PREFIXES: [&str; 13] = [
+        "sk-",
+        "sk_",
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "github_pat_",
+        "glpat-",
+        "xoxb-",
+        "xoxp-",
+        "aws_",
+        "akia",
+        "asia",
+        "aiza",
+    ];
     let lower = core.to_ascii_lowercase();
     if PREFIXES.iter().any(|p| lower.starts_with(p)) {
         return true;
     }
+    // Long, mixed alphanumeric high-entropy tokens.
     if core.len() >= 28
         && core
             .chars()
@@ -847,6 +911,47 @@ mod tests {
         let pid = repo.create_project("/ws/demo", "Demo", 1_000).unwrap();
         let cid = repo.create_conversation(&pid, "First", 1_000).unwrap();
         (pid, cid)
+    }
+
+    #[test]
+    fn redaction_corpus_catches_secrets_and_spares_safe_text() {
+        // Secret-bearing inputs that MUST be redacted (recovery directive §19.5 /
+        // §23.6 security corpus). Includes the OpenRouter key shape.
+        let secrets = [
+            concat!("sk-", "or-v1-deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+            concat!("sk-", "proj-abcdefghijklmnop1234567890"),
+            concat!("ghp", "_0123456789abcdef0123456789abcdef0123"),
+            concat!("github", "_pat_11ABCDEFG0abcdefghijklmnopqrstuv"),
+            concat!("AKIA", "IOSFODNN7EXAMPLE"),
+            concat!("AIza", "SyA1234567890abcdefghijklmnop"),
+            concat!("xoxb", "-1234567890-abcdefABCDEF1234"),
+            concat!("API_KEY=sk-", "or-v1-deadbeefdeadbeefdeadbeef"),
+            "password:s3cr3tValueWithEnoughEntropy123",
+            "https://user:hunter2longpassword@example.com/x",
+        ];
+        for secret in secrets {
+            assert!(
+                redact_secrets(secret).contains("[REDACTED]"),
+                "not redacted: {secret}"
+            );
+        }
+        // Whole credential lines redact wholesale.
+        assert_eq!(
+            redact_secrets("-----BEGIN OPENSSH PRIVATE KEY-----"),
+            "[REDACTED]"
+        );
+        assert!(redact_secrets("Authorization: Bearer sometoken").contains("[REDACTED]"));
+
+        // Ordinary content must survive untouched (no over-redaction).
+        for safe in [
+            "hello world",
+            "fix the parser bug",
+            "src/lib.rs:42",
+            "RunProjectionState::Paused",
+            "the cat sat on the mat",
+        ] {
+            assert_eq!(redact_secrets(safe), safe, "wrongly redacted: {safe}");
+        }
     }
 
     #[test]
