@@ -18,6 +18,7 @@ members = [
   "crates/opensks-codegraph",
   "crates/opensks-context",
   "crates/opensks-image",
+  "crates/opensks-intel",
   "crates/opensks-policy",
   "crates/opensks-proof",
   "crates/opensks-provider",

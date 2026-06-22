@@ -1613,6 +1613,7 @@ pub mod file;
 pub mod git;
 pub mod git_mutation;
 pub mod git_push;
+pub mod intel;
 pub mod project;
 pub mod projection;
 pub mod stream;
@@ -1652,6 +1653,12 @@ pub use git_push::{
     PUSH_APPROVAL_SCHEMA, PUSH_ERROR_SCHEMA, PUSH_INTENT_SCHEMA, PUSH_RECEIPT_SCHEMA,
     PUSH_STATUS_SCHEMA, PushApproval, PushError, PushErrorBody, PushErrorCode, PushIntent,
     PushReceipt, PushStatus,
+};
+pub use intel::{
+    Architecture, ArchitectureRecord, CodegraphQuery, CodegraphRecordView, FreshnessCheck,
+    FreshnessCurrent, FreshnessStamp, Glossary, GlossaryTerm, INTEL_ARCHITECTURE_SCHEMA,
+    INTEL_CODEGRAPH_SCHEMA, INTEL_FRESHNESS_CHECK_SCHEMA, INTEL_FRESHNESS_SCHEMA,
+    INTEL_GLOSSARY_SCHEMA, StaleReason,
 };
 pub use project::{PROJECT_SUMMARY_SCHEMA, ProjectSummary};
 pub use projection::{
@@ -1921,6 +1928,26 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "push-error.schema.json",
             serde_json::to_string_pretty(&schema_for!(PushError))?,
+        ),
+        (
+            "intel-freshness.schema.json",
+            serde_json::to_string_pretty(&schema_for!(FreshnessStamp))?,
+        ),
+        (
+            "intel-freshness-check.schema.json",
+            serde_json::to_string_pretty(&schema_for!(FreshnessCheck))?,
+        ),
+        (
+            "intel-codegraph.schema.json",
+            serde_json::to_string_pretty(&schema_for!(CodegraphQuery))?,
+        ),
+        (
+            "intel-glossary.schema.json",
+            serde_json::to_string_pretty(&schema_for!(Glossary))?,
+        ),
+        (
+            "intel-architecture.schema.json",
+            serde_json::to_string_pretty(&schema_for!(Architecture))?,
         ),
     ])
 }

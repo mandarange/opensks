@@ -49,11 +49,16 @@ struct PrimaryWorkspaceRouter: View {
                 DesignStudioView(store: coordinator.designStudio)
                     .onAppear { Task { await coordinator.designStudio.refreshActiveStatus() } }
             case .intelligence:
-                RoutePlaceholderView(
-                    headline: "Project Intelligence",
-                    detail: "Architecture, code graph and freshness arrive in PR-041.",
-                    systemImage: "brain.head.profile"
+                // PR-041: the Project Intelligence surface — architecture records,
+                // a PAGED + LOD code-graph explorer, a glossary, and source
+                // navigation, each carrying a freshness badge (a STALE section is
+                // never drawn as current). Records/results deep-link onto the
+                // existing chat / graph / code routes.
+                IntelligenceView(
+                    store: coordinator.intelligence,
+                    onOpen: { coordinator.openIntelTarget($0) }
                 )
+                .onAppear { Task { await coordinator.intelligence.recheckFreshness() } }
             case .evidence:
                 RoutePlaceholderView(
                     headline: "Evidence",

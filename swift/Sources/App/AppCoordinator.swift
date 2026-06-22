@@ -43,6 +43,17 @@ final class AppCoordinator: ObservableObject {
     /// via `bindDesignStudio(cli:workspace:)` once `AppState` resolves them.
     let designStudio: DesignStudioStore
 
+    /// The Project Intelligence store (PR-041). Drives the architecture / code
+    /// graph / glossary surface with per-section freshness badges. Starts with a
+    /// live service rooted at the process working directory; rebound to the
+    /// resolved workspace + bundled CLI via `bindIntelligence(cli:workspace:)`
+    /// once `AppState` resolves them.
+    let intelligence: IntelligenceStore
+
+    /// Editor store reference (wired by `wireGit`/`wireIntelligence`) so an
+    /// intelligence deep link to a file can open it in the code workspace.
+    private weak var editorStore: EditorWorkspaceStore?
+
     init() {
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
         let cli = cwd.appendingPathComponent("target/debug/opensks")
@@ -58,6 +69,9 @@ final class AppCoordinator: ObservableObject {
         designStudio = DesignStudioStore(
             service: LiveDesignStudioService(cli: cli, workspace: cwd),
             catalog: AppCoordinator.seedDesignCatalog()
+        )
+        intelligence = IntelligenceStore(
+            service: LiveIntelligenceService(cli: cli, workspace: cwd)
         )
     }
 
@@ -85,6 +99,34 @@ final class AppCoordinator: ObservableObject {
     /// re-read the active design package.
     func bindDesignStudio(cli: URL, workspace: URL) {
         designStudio.rebind(service: LiveDesignStudioService(cli: cli, workspace: workspace))
+    }
+
+    /// Rebind the Project Intelligence store to the resolved workspace + bundled CLI
+    /// and reload its sections (architecture / code graph / glossary).
+    func bindIntelligence(cli: URL, workspace: URL) {
+        intelligence.updateService(LiveIntelligenceService(cli: cli, workspace: workspace))
+        Task { await intelligence.loadAll() }
+    }
+
+    /// Navigate an Intelligence deep link onto the EXISTING routes (no new route is
+    /// invented, none removed): a conversation ref → the `.chat` thread (selecting
+    /// the conversation), a run ref → the `.graph` route focused on that run, a file
+    /// ref → the `.code` editor opening the file. The target's id is the source of
+    /// truth so a record/result lands on exactly the right surface.
+    func openIntelTarget(_ target: IntelDeepLinkTarget) {
+        switch target {
+        case .conversation(let id):
+            conversations.selectedConversationID = id
+            Task { await conversations.select(id) }
+            navigation.route = .chat
+        case .run(let id):
+            openGraph(runId: id)
+        case .file(let path, _):
+            if let editorStore {
+                Task { _ = await editorStore.open(path: path) }
+            }
+            navigation.route = .code
+        }
     }
 
     /// The catalog of design packages shown in the Design Studio sidebar. Seeded
@@ -134,6 +176,8 @@ final class AppCoordinator: ObservableObject {
     /// rebind.
     func wireGit(editorStore: EditorWorkspaceStore) {
         git.editorStore = editorStore
+        // Stash the editor store so an Intelligence deep link to a file can open it.
+        self.editorStore = editorStore
         git.onCommitted = { [weak self] result, message in
             self?.conversations.postCommitCard(result, message: message)
         }

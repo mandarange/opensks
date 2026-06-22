@@ -144,6 +144,7 @@ dependencies = [
  "opensks-graph",
  "opensks-hooks",
  "opensks-image",
+ "opensks-intel",
  "opensks-policy",
  "opensks-provider",
  "opensks-reasoning",
@@ -290,6 +291,19 @@ dependencies = [
  "opensks-contracts",
  "opensks-policy",
  "opensks-provider",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "opensks-intel"
+version = "0.1.0"
+dependencies = [
+ "opensks-codegraph",
+ "opensks-contracts",
+ "opensks-triwiki",
+ "schemars",
+ "serde",
  "serde_json",
  "thiserror",
 ]

@@ -42,6 +42,9 @@ struct RootView: View {
             // Bind the LOCAL design-import store (PR-039) to the same resolved CLI +
             // workspace, then read this project's quarantine listing.
             coordinator.bindDesignImport(cli: state.cli, workspace: state.workspace)
+            // Bind the Project Intelligence store (PR-041) to the same resolved CLI +
+            // workspace, then load architecture / code graph / glossary.
+            coordinator.bindIntelligence(cli: state.cli, workspace: state.workspace)
         }
         .sheet(isPresented: $state.showPalette) { CommandPalette() }
     }

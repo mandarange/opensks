@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Glossary",
+  "description": "The workspace glossary, with the current freshness stamp attached.",
+  "type": "object",
+  "required": [
+    "freshness",
+    "schema",
+    "terms"
+  ],
+  "properties": {
+    "freshness": {
+      "$ref": "#/definitions/FreshnessStamp"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "terms": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/GlossaryTerm"
+      }
+    }
+  },
+  "definitions": {
+    "FreshnessStamp": {
+      "description": "A deterministic freshness stamp for a workspace at one instant.\n\n- `head_hash` is the committed `HEAD` object id, or `None` when the workspace is not a Git repository (or has an unborn HEAD). - `worktree_hash` is a content-addressed digest over the tracked working-tree state, so any in-place edit flips it. - `index_hash` is a digest of the codegraph index (the staged knowledge of symbols), so a re-index flips it.",
+      "type": "object",
+      "required": [
+        "in_repo",
+        "index_hash",
+        "schema",
+        "worktree_hash"
+      ],
+      "properties": {
+        "head_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "in_repo": {
+          "type": "boolean"
+        },
+        "index_hash": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "worktree_hash": {
+          "type": "string"
+        }
+      }
+    },
+    "GlossaryTerm": {
+      "description": "One glossary term with its definition and supporting references.",
+      "type": "object",
+      "required": [
+        "definition",
+        "term"
+      ],
+      "properties": {
+        "definition": {
+          "type": "string"
+        },
+        "refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "term": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

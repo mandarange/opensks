@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FreshnessCheck",
+  "description": "The result of comparing a previously *stamped* freshness against the current workspace state.\n\n`fresh` is `true` **only** when every provided stamp equals the current value. Any divergence — or any provided stamp that cannot be matched, or an empty comparison — yields `fresh: false`. The invariant \"stale is never reported as fresh\" is paramount: on any doubt this defaults to `false`.",
+  "type": "object",
+  "required": [
+    "current",
+    "fresh",
+    "schema"
+  ],
+  "properties": {
+    "current": {
+      "$ref": "#/definitions/FreshnessCurrent"
+    },
+    "fresh": {
+      "type": "boolean"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "stale_reason": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/StaleReason"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "FreshnessCurrent": {
+      "description": "The current stamp values surfaced alongside a [`FreshnessCheck`] so a caller can re-stamp without a second round trip.",
+      "type": "object",
+      "required": [
+        "index_hash",
+        "worktree_hash"
+      ],
+      "properties": {
+        "head_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "index_hash": {
+          "type": "string"
+        },
+        "worktree_hash": {
+          "type": "string"
+        }
+      }
+    },
+    "StaleReason": {
+      "description": "The reason a stamped freshness diverged from the current stamp. The first divergence found (in HEAD → worktree → index order) is reported.",
+      "type": "string",
+      "enum": [
+        "head_changed",
+        "worktree_changed",
+        "index_changed"
+      ]
+    }
+  }
+}

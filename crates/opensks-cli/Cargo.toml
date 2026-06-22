@@ -20,6 +20,7 @@ opensks-git-service = { path = "../opensks-git-service" }
 opensks-graph = { path = "../opensks-graph" }
 opensks-hooks = { path = "../opensks-hooks" }
 opensks-image = { path = "../opensks-image" }
+opensks-intel = { path = "../opensks-intel" }
 opensks-policy = { path = "../opensks-policy" }
 opensks-provider = { path = "../opensks-provider" }
 opensks-reasoning = { path = "../opensks-reasoning" }

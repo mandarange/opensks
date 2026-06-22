@@ -436,6 +436,156 @@ pub fn codegraph_usage() -> &'static str {
     )
 }
 
+/// Flags for the PR-041 `intel` subcommands. `workspace` defaults to `cwd`.
+/// `query`/`limit`/`offset` drive `codegraph-query`; `head`/`worktree`/`index`
+/// are the stamped freshness values compared by `freshness-check`.
+#[derive(Debug, Default)]
+struct IntelOptions {
+    workspace: Option<PathBuf>,
+    query: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    head: Option<String>,
+    worktree: Option<String>,
+    index: Option<String>,
+}
+
+fn parse_intel_options(args: &[String]) -> Result<IntelOptions, CliError> {
+    let usage = intel_usage();
+    let mut options = IntelOptions::default();
+    let mut idx = 0;
+    while idx < args.len() {
+        let flag = args[idx].as_str();
+        let value = || -> Result<&str, CliError> {
+            args.get(idx + 1).map(String::as_str).ok_or_else(|| {
+                CliError::Usage(format!("flag `{flag}` requires a value\n\n{usage}"))
+            })
+        };
+        let parse_count = |raw: &str| -> Result<usize, CliError> {
+            raw.parse::<usize>()
+                .map_err(|_| CliError::Usage(format!("flag `{flag}` requires a number\n\n{usage}")))
+        };
+        match flag {
+            "--workspace" => {
+                options.workspace = Some(PathBuf::from(value()?));
+                idx += 2;
+            }
+            "--query" => {
+                options.query = Some(value()?.to_string());
+                idx += 2;
+            }
+            "--limit" => {
+                options.limit = Some(parse_count(value()?)?);
+                idx += 2;
+            }
+            "--offset" => {
+                options.offset = Some(parse_count(value()?)?);
+                idx += 2;
+            }
+            "--head" => {
+                options.head = Some(value()?.to_string());
+                idx += 2;
+            }
+            "--worktree" => {
+                options.worktree = Some(value()?.to_string());
+                idx += 2;
+            }
+            "--index" => {
+                options.index = Some(value()?.to_string());
+                idx += 2;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown argument `{other}`\n\n{usage}"
+                )));
+            }
+        }
+    }
+    Ok(options)
+}
+
+/// `opensks intel <subcommand>` — Project Intelligence + Freshness (PR-041).
+///
+/// Subcommands: `freshness`, `freshness-check`, `codegraph-query`, `glossary`,
+/// `architecture`. Each emits its `opensks.intel-*.v1` JSON contract on stdout.
+/// `workspace` defaults to the process `cwd` when `--workspace` is omitted.
+pub fn run_intel_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let subcommand = args
+        .first()
+        .ok_or_else(|| CliError::Usage(intel_usage().to_string()))?;
+    let options = parse_intel_options(&args[1..])?;
+    let workspace = options
+        .workspace
+        .clone()
+        .unwrap_or_else(|| cwd.to_path_buf());
+    match subcommand.as_str() {
+        "freshness" => {
+            let stamp = opensks_intel::freshness(&workspace)
+                .map_err(|error| CliError::Invalid(format!("intel freshness: {error}")))?;
+            let body = serde_json::to_value(&stamp)
+                .map_err(|error| CliError::Invalid(format!("serialize freshness: {error}")))?;
+            file_output(&body)
+        }
+        "freshness-check" => {
+            let stamped = opensks_intel::StampedFreshness {
+                head_hash: options.head.clone(),
+                worktree_hash: options.worktree.clone(),
+                index_hash: options.index.clone(),
+            };
+            let check = opensks_intel::freshness_check(&workspace, &stamped)
+                .map_err(|error| CliError::Invalid(format!("intel freshness-check: {error}")))?;
+            let body = serde_json::to_value(&check).map_err(|error| {
+                CliError::Invalid(format!("serialize freshness-check: {error}"))
+            })?;
+            file_output(&body)
+        }
+        "codegraph-query" => {
+            let query = options.query.clone().ok_or_else(|| {
+                CliError::Usage(format!(
+                    "intel codegraph-query requires `--query`\n\n{}",
+                    intel_usage()
+                ))
+            })?;
+            let limit = options.limit.unwrap_or(50);
+            let offset = options.offset.unwrap_or(0);
+            let result = opensks_intel::codegraph_query(&workspace, &query, limit, offset)
+                .map_err(|error| CliError::Invalid(format!("intel codegraph-query: {error}")))?;
+            let body = serde_json::to_value(&result).map_err(|error| {
+                CliError::Invalid(format!("serialize codegraph-query: {error}"))
+            })?;
+            file_output(&body)
+        }
+        "glossary" => {
+            let glossary = opensks_intel::glossary(&workspace)
+                .map_err(|error| CliError::Invalid(format!("intel glossary: {error}")))?;
+            let body = serde_json::to_value(&glossary)
+                .map_err(|error| CliError::Invalid(format!("serialize glossary: {error}")))?;
+            file_output(&body)
+        }
+        "architecture" => {
+            let architecture = opensks_intel::architecture(&workspace)
+                .map_err(|error| CliError::Invalid(format!("intel architecture: {error}")))?;
+            let body = serde_json::to_value(&architecture)
+                .map_err(|error| CliError::Invalid(format!("serialize architecture: {error}")))?;
+            file_output(&body)
+        }
+        other => Err(CliError::Usage(format!(
+            "unknown intel subcommand `{other}`\n\n{}",
+            intel_usage()
+        ))),
+    }
+}
+
+pub fn intel_usage() -> &'static str {
+    concat!(
+        "usage: opensks intel freshness --workspace <path>\n",
+        "       opensks intel freshness-check --workspace <path> [--head <h>] [--worktree <h>] [--index <h>]\n",
+        "       opensks intel codegraph-query --workspace <path> --query <text> [--limit <n>] [--offset <n>]\n",
+        "       opensks intel glossary --workspace <path>\n",
+        "       opensks intel architecture --workspace <path>\n"
+    )
+}
+
 pub fn run_triwiki_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
     if args.len() != 1 || args[0] != "seed" {
         return Err(CliError::Usage(triwiki_usage().to_string()));

@@ -662,6 +662,7 @@ where
         "context" => run_context_command(&args[1..], cwd),
         "conversation" => run_conversation_command(&args[1..], cwd),
         "file" => run_file_command(&args[1..], cwd),
+        "intel" => run_intel_command(&args[1..], cwd),
         "image" => run_image_command(&args[1..], cwd),
         "reasoning" => run_reasoning_command(&args[1..], cwd),
         "git" => run_git_command(&args[1..], cwd),
@@ -1844,6 +1845,13 @@ fn run_conversation_command(args: &[String], cwd: &Path) -> Result<CliOutput, Op
 
 fn run_file_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
     let output = opensks_cli::run_file_command(args, cwd).map_err(convert_cli_error)?;
+    Ok(CliOutput {
+        stdout: output.stdout,
+    })
+}
+
+fn run_intel_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
+    let output = opensks_cli::run_intel_command(args, cwd).map_err(convert_cli_error)?;
     Ok(CliOutput {
         stdout: output.stdout,
     })
