@@ -29,7 +29,12 @@ use opensks_contracts::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod agentic;
 pub mod openrouter;
+pub use agentic::{
+    AgentStep, AgenticConfig, FnDriver, SequenceDriver, ToolCall, ToolDriver, ToolResult,
+    run_agentic_loop,
+};
 pub use openrouter::OpenRouterAdapter;
 
 #[derive(Debug, thiserror::Error)]
@@ -130,6 +135,12 @@ pub enum LocalTestInstruction {
     ReplaceContent { path: String, value: String },
     /// Append a line to a file (creating it if absent).
     AppendLine { path: String, value: String },
+    /// Run a MULTI-STEP agentic edit: each tool call is one loop step, executed
+    /// against the workspace with its result fed back, applied transactionally
+    /// (recovery release §6/§8). This reaches the real [`agentic::run_agentic_loop`]
+    /// from a single conversation turn, so coordinated multi-file edits are real and
+    /// reachable — not just a single-shot op.
+    Steps { steps: Vec<agentic::ToolCall> },
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,6 +161,9 @@ impl LocalTestInstruction {
             Self::CreateFile { path, .. }
             | Self::ReplaceContent { path, .. }
             | Self::AppendLine { path, .. } => path,
+            // A multi-step edit has no single path; it is handled by the agentic
+            // loop, never by the single-file planner below.
+            Self::Steps { .. } => "",
         }
     }
 }
@@ -235,6 +249,22 @@ impl AgentAdapter for LocalTestAdapter {
                 final_state: RunProjectionState::Completed,
             });
         };
+
+        // A multi-step instruction drives the REAL agentic loop: each tool call is
+        // one loop step, applied transactionally with its result fed back.
+        if let LocalTestInstruction::Steps { steps } = &instruction {
+            let groups: Vec<Vec<agentic::ToolCall>> =
+                steps.iter().cloned().map(|call| vec![call]).collect();
+            let count = groups.len();
+            let mut driver =
+                agentic::SequenceDriver::new(groups, format!("Completed {count} agentic step(s)."));
+            return agentic::run_agentic_loop(
+                request,
+                &mut driver,
+                &agentic::AgenticConfig::default(),
+                sink,
+            );
+        }
 
         // Pure planning (no writes) — shared with the parallel runtime.
         let (rel, before, after, operation) = plan_local_edit(&request.workspace, &instruction)?;
@@ -502,6 +532,12 @@ fn plan_local_edit(
             };
             (next, op)
         }
+        // A multi-step edit is not a single-file plan; the agentic loop handles it.
+        LocalTestInstruction::Steps { .. } => {
+            return Err(AgentAdapterError::InvalidInstruction(
+                "steps: handled by the agentic loop, not the single-file planner".to_string(),
+            ));
+        }
     };
     Ok((rel, before, after, operation))
 }
@@ -724,6 +760,40 @@ mod tests {
         assert!(outcome.patches.is_empty());
         assert!(outcome.apply_results.is_empty());
         assert_eq!(outcome.final_state, RunProjectionState::Completed);
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn steps_instruction_runs_the_agentic_loop_and_edits_multiple_files() {
+        // A single conversation turn carrying a multi-step instruction drives the
+        // REAL agentic loop end-to-end: an append to an existing file and a new
+        // file, each its own transactional step.
+        let ws = temp_workspace("steps");
+        std::fs::write(ws.join("NOTES.md"), "one\n").unwrap();
+        let adapter = LocalTestAdapter::new();
+        let sink = CollectingSink::new();
+        let prompt = r#"{"local_test":{"op":"steps","steps":[
+            {"tool":"append_line","path":"NOTES.md","value":"two"},
+            {"tool":"write_file","path":"sub/new.txt","content":"hello"}
+        ]}}"#;
+        let outcome = adapter.run(&request(&ws, prompt), &sink).unwrap();
+
+        assert_eq!(outcome.final_state, RunProjectionState::Completed);
+        assert_eq!(
+            std::fs::read_to_string(ws.join("NOTES.md")).unwrap(),
+            "one\ntwo\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join("sub/new.txt")).unwrap(),
+            "hello"
+        );
+        // Two steps → two transactional applies, both landed.
+        assert_eq!(outcome.apply_results.len(), 2);
+        assert!(outcome.apply_results.iter().all(|a| a.applied));
+        assert_eq!(
+            sink.kinds().last(),
+            Some(&AgentEventKind::AssistantTextCompleted)
+        );
         std::fs::remove_dir_all(&ws).ok();
     }
 
