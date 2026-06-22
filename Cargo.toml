@@ -4,6 +4,7 @@ members = [
   ".",
   "crates/opensks-artifacts",
   "crates/opensks-contracts",
+  "crates/opensks-conversation",
   "crates/opensks-cli",
   "crates/opensks-daemon",
   "crates/opensks-design",

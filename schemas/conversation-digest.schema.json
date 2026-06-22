@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ConversationDigest",
+  "description": "Sanitized conversation summary (the shared/portable record).",
+  "type": "object",
+  "required": [
+    "conversation_id",
+    "generated_at_ms",
+    "schema",
+    "source_message_sequence",
+    "summary_redacted"
+  ],
+  "properties": {
+    "conversation_id": {
+      "type": "string"
+    },
+    "generated_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "schema": {
+      "type": "string"
+    },
+    "source_message_sequence": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "summary_redacted": {
+      "type": "string"
+    }
+  }
+}

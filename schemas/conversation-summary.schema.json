@@ -1,0 +1,90 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ConversationSummary",
+  "type": "object",
+  "required": [
+    "archived",
+    "created_at_ms",
+    "id",
+    "message_count",
+    "pinned",
+    "project_id",
+    "schema",
+    "status",
+    "title",
+    "title_source",
+    "updated_at_ms"
+  ],
+  "properties": {
+    "archived": {
+      "type": "boolean"
+    },
+    "created_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "id": {
+      "type": "string"
+    },
+    "last_message_at_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "message_count": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "pinned": {
+      "type": "boolean"
+    },
+    "project_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/definitions/ConversationStatus"
+    },
+    "title": {
+      "type": "string"
+    },
+    "title_source": {
+      "$ref": "#/definitions/TitleSource"
+    },
+    "updated_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "ConversationStatus": {
+      "type": "string",
+      "enum": [
+        "idle",
+        "queued",
+        "running",
+        "waiting_for_input",
+        "waiting_for_approval",
+        "failed",
+        "completed"
+      ]
+    },
+    "TitleSource": {
+      "type": "string",
+      "enum": [
+        "generated",
+        "user",
+        "agent",
+        "imported"
+      ]
+    }
+  }
+}

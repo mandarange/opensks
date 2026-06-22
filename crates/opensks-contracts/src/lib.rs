@@ -1607,8 +1607,35 @@ pub struct ReleaseProof {
     pub status: TrustStatus,
 }
 
+pub mod conversation;
+pub mod project;
+
+pub use conversation::{
+    CONVERSATION_DIGEST_SCHEMA, CONVERSATION_MESSAGE_SCHEMA, CONVERSATION_SUMMARY_SCHEMA,
+    ConversationDeleteCounts, ConversationDigest, ConversationFilter, ConversationMessage,
+    ConversationRunRelation, ConversationStatus, ConversationSummary, MessageRole, MessageState,
+    TitleSource,
+};
+pub use project::{PROJECT_SUMMARY_SCHEMA, ProjectSummary};
+
 pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> {
     Ok(vec![
+        (
+            "project-summary.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ProjectSummary))?,
+        ),
+        (
+            "conversation-summary.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ConversationSummary))?,
+        ),
+        (
+            "conversation-message.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ConversationMessage))?,
+        ),
+        (
+            "conversation-digest.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ConversationDigest))?,
+        ),
         (
             "engine-request.schema.json",
             serde_json::to_string_pretty(&schema_for!(EngineRequest))?,

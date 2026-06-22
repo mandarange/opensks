@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProjectSummary",
+  "description": "A workspace-scoped project. `id` is a stable opaque identifier; `workspace_key` is the local registration key for an opened workspace.",
+  "type": "object",
+  "required": [
+    "created_at_ms",
+    "display_name",
+    "id",
+    "schema",
+    "updated_at_ms",
+    "workspace_key"
+  ],
+  "properties": {
+    "created_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "display_name": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "last_conversation_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema": {
+      "type": "string"
+    },
+    "updated_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "workspace_key": {
+      "type": "string"
+    }
+  }
+}

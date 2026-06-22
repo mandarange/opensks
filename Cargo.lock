@@ -178,6 +178,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "opensks-conversation"
+version = "0.1.0"
+dependencies = [
+ "opensks-contracts",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "opensks-daemon"
 version = "0.1.0"
 dependencies = [

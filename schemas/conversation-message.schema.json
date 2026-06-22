@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ConversationMessage",
+  "description": "A single message. `content_redacted` is the secret-scrubbed, locally searchable copy; the original may be held encrypted out of band.",
+  "type": "object",
+  "required": [
+    "content_redacted",
+    "conversation_id",
+    "created_at_ms",
+    "id",
+    "project_id",
+    "role",
+    "schema",
+    "sequence",
+    "state",
+    "turn_id",
+    "updated_at_ms"
+  ],
+  "properties": {
+    "content_redacted": {
+      "type": "string"
+    },
+    "conversation_id": {
+      "type": "string"
+    },
+    "created_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "id": {
+      "type": "string"
+    },
+    "project_id": {
+      "type": "string"
+    },
+    "role": {
+      "$ref": "#/definitions/MessageRole"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "sequence": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "state": {
+      "$ref": "#/definitions/MessageState"
+    },
+    "turn_id": {
+      "type": "string"
+    },
+    "updated_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "MessageRole": {
+      "type": "string",
+      "enum": [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "event"
+      ]
+    },
+    "MessageState": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "queued",
+        "streaming",
+        "complete",
+        "failed",
+        "cancelled"
+      ]
+    }
+  }
+}
