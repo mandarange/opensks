@@ -14,6 +14,9 @@ import AppKit
 
 struct EditorWorkspaceView: View {
     @ObservedObject var store: EditorWorkspaceStore
+    /// The dirty document a close was attempted on; drives the Save/Discard/
+    /// Cancel dialog so closing is never a silent no-op (EDIT-004).
+    @State private var pendingCloseDoc: EditorDocumentState?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,6 +29,30 @@ struct EditorWorkspaceView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Theme.editor)
         .accessibilityIdentifier("editor.workspace")
+        .confirmationDialog(
+            pendingCloseDoc.map { "Save changes to \($0.displayName)?" } ?? "",
+            isPresented: Binding(
+                get: { pendingCloseDoc != nil },
+                set: { if !$0 { pendingCloseDoc = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let doc = pendingCloseDoc {
+                Button("Save") {
+                    pendingCloseDoc = nil
+                    Task {
+                        if await store.save(doc) {
+                            _ = store.close(doc.id, force: true)
+                        }
+                    }
+                }
+                Button("Discard Changes", role: .destructive) {
+                    pendingCloseDoc = nil
+                    _ = store.close(doc.id, force: true)
+                }
+                Button("Cancel", role: .cancel) { pendingCloseDoc = nil }
+            }
+        }
     }
 
     // MARK: - Tab bar
@@ -38,7 +65,12 @@ struct EditorWorkspaceView: View {
                         document: doc,
                         isActive: store.activeDocumentID == doc.id,
                         onSelect: { store.activeDocumentID = doc.id },
-                        onClose: { _ = store.close(doc.id) }
+                        onClose: {
+                            // Dirty docs prompt instead of silently refusing to
+                            // close (the old `_ = close()` looked like a dead
+                            // button). Clean docs close immediately.
+                            if !store.close(doc.id) { pendingCloseDoc = doc }
+                        }
                     )
                 }
             }
@@ -175,7 +207,13 @@ private struct EditorDocumentPane: View {
                 CodeEditorRepresentable(document: document, diffMarkers: gutterMarkers)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .task(id: document.currentContentHash) {
-                        // Recompute gutter markers whenever the buffer changes.
+                        // Debounce: each content change cancels the prior task, so
+                        // a burst of keystrokes collapses to ONE diff after a quiet
+                        // pause instead of spawning a CLI child per keystroke
+                        // (EDIT-002 — no process storm). `Task.sleep` throws on
+                        // cancellation, ending the superseded task early.
+                        try? await Task.sleep(nanoseconds: 350_000_000)
+                        if Task.isCancelled { return }
                         await store.refreshDiff(document)
                     }
             }
