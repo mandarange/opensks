@@ -123,6 +123,7 @@ struct PrimaryButton: View {
                     .fill(LinearGradient(colors: [Theme.accent, Color(hex: "4FD3B6")],
                                          startPoint: .top, endPoint: .bottom))
             )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .opacity(enabled ? 1 : 0.4)
@@ -146,6 +147,7 @@ struct GhostButton: View {
             .padding(.vertical, 8)
             .background(RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous).fill(Theme.input))
             .overlay(RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous).strokeBorder(Theme.stroke, lineWidth: 1))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }

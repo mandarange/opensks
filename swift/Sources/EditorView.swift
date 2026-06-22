@@ -40,14 +40,25 @@ struct EditorView: View {
     private func tabChip(_ tab: FileTab) -> some View {
         let active = state.activeTab == tab.id
         return HStack(spacing: 7) {
-            Circle().fill(tab.lang.dotColor).frame(width: 6, height: 6)
-            Text(tab.name)
-                .font(Theme.ui(11.5, active ? .medium : .regular))
-                .foregroundStyle(active ? Theme.text : Theme.muted)
+            // Selecting the tab is a real Button (no onTapGesture); the close
+            // control is a sibling Button so both are individually accessible.
+            Button { state.activeTab = tab.id } label: {
+                HStack(spacing: 7) {
+                    Circle().fill(tab.lang.dotColor).frame(width: 6, height: 6)
+                    Text(tab.name)
+                        .font(Theme.ui(11.5, active ? .medium : .regular))
+                        .foregroundStyle(active ? Theme.text : Theme.muted)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Open \(tab.name)")
+
             Button { state.closeTab(tab.id) } label: {
                 Image(systemName: "xmark").font(.system(size: 8, weight: .bold)).foregroundStyle(Theme.muted)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Close \(tab.name)")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -60,8 +71,6 @@ struct EditorView: View {
                 Rectangle().fill(Theme.accent).frame(height: 2)
             }
         }
-        .contentShape(Rectangle())
-        .onTapGesture { state.activeTab = tab.id }
     }
 
     private func breadcrumb(_ tab: FileTab) -> some View {

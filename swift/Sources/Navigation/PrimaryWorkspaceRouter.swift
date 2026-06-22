@@ -96,26 +96,13 @@ struct CodeWorkspaceView: View {
 }
 
 /// Honest, labelled empty state for a routed surface that is not built yet.
+/// Delegates to the shared `EmptyStateView` (SharedUI).
 struct RoutePlaceholderView: View {
     let headline: String
     let detail: String
     let systemImage: String
 
     var body: some View {
-        VStack(spacing: Theme.s12) {
-            Image(systemName: systemImage)
-                .font(.system(size: 34, weight: .regular))
-                .foregroundStyle(Theme.muted)
-            Text(headline)
-                .font(Theme.ui(18, .semibold))
-                .foregroundStyle(Theme.text)
-            Text(detail)
-                .font(Theme.ui(12))
-                .foregroundStyle(Theme.muted)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 420)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(40)
+        EmptyStateView(headline: headline, detail: detail, systemImage: systemImage)
     }
 }

@@ -416,19 +416,22 @@ private struct FileRow: View {
     @EnvironmentObject private var state: AppState
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: node.isDir ? "folder.fill" : "doc.text")
-                .font(.system(size: 11))
-                .foregroundStyle(node.isDir ? Theme.blue : Theme.muted)
-            Text(node.name)
-                .font(Theme.ui(12))
-                .foregroundStyle(selected ? Theme.text : Theme.textSoft)
-                .lineLimit(1)
-            Spacer(minLength: 0)
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
+        Button {
             if !node.isDir { state.openFile(node.id) }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: node.isDir ? "folder.fill" : "doc.text")
+                    .font(.system(size: 11))
+                    .foregroundStyle(node.isDir ? Theme.blue : Theme.muted)
+                Text(node.name)
+                    .font(Theme.ui(12))
+                    .foregroundStyle(selected ? Theme.text : Theme.textSoft)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel(node.isDir ? "Folder \(node.name)" : "Open \(node.name)")
     }
 }
