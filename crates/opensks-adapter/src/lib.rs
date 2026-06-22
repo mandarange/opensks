@@ -309,28 +309,19 @@ impl AgentAdapter for LocalTestAdapter {
             serde_json::to_value(&proposal).unwrap_or(serde_json::Value::Null),
         );
 
-        // Apply the patch for real.
-        if let Some(parent) = abs.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| AgentAdapterError::Io {
-                path: parent.display().to_string(),
-                source,
-            })?;
-        }
-        std::fs::write(&abs, after.as_bytes()).map_err(|source| AgentAdapterError::Io {
-            path: abs.display().to_string(),
-            source,
-        })?;
-
-        let apply = PatchApplyResult {
-            schema: PATCH_APPLY_RESULT_SCHEMA.to_string(),
-            proposal_id: proposal.proposal_id.clone(),
-            applied: true,
-            applied_files: vec![rel.clone()],
-            conflict_paths: vec![],
-            rolled_back: false,
-            reason_code: "applied".to_string(),
-            evidence_refs: vec![format!("file:{rel}:{after_hash}")],
-        };
+        // Apply through the transactional writer: it re-validates the on-disk
+        // pre-image against before_hash (no silent overwrite of a file that
+        // changed since it was read — §10.5) and rolls back on any IO failure.
+        let apply = apply_file_writes(
+            &request.workspace,
+            &proposal.proposal_id,
+            &[PlannedWrite {
+                path: rel.clone(),
+                expected_before_hash: before_hash.clone(),
+                after_content: after.clone(),
+                operation,
+            }],
+        )?;
 
         self.emit(
             sink,
@@ -340,7 +331,17 @@ impl AgentAdapter for LocalTestAdapter {
             serde_json::to_value(&apply).unwrap_or(serde_json::Value::Null),
         );
 
-        let assistant_text = format!("Edited `{rel}` (1 file changed).");
+        let (assistant_text, final_state) = if apply.applied {
+            (
+                format!("Edited `{rel}` (1 file changed)."),
+                RunProjectionState::Completed,
+            )
+        } else {
+            (
+                format!("Could not edit `{rel}`: it changed on disk since it was read."),
+                RunProjectionState::Failed,
+            )
+        };
         self.emit(
             sink,
             request,
@@ -353,8 +354,103 @@ impl AgentAdapter for LocalTestAdapter {
             assistant_text,
             patches: vec![proposal],
             apply_results: vec![apply],
-            final_state: RunProjectionState::Completed,
+            final_state,
         })
+    }
+}
+
+/// A single planned file write with the pre-image hash it expects on disk.
+#[derive(Debug, Clone)]
+pub struct PlannedWrite {
+    pub path: String,
+    pub expected_before_hash: String,
+    pub after_content: String,
+    pub operation: FileOperation,
+}
+
+/// Apply a set of file writes as a transaction (recovery directive §10.4/§10.5):
+///
+/// 1. **Validate** every target's on-disk pre-image against
+///    `expected_before_hash`. If any file changed since it was read, nothing is
+///    written and the conflicting paths are returned — no silent overwrite.
+/// 2. **Apply with rollback**: snapshot each target's original content, then
+///    write all of them. Any IO failure restores every target to its pre-image
+///    so a multi-file patch never lands half-applied.
+///
+/// A path that escapes the workspace is a hard error (`PathEscape`).
+pub fn apply_file_writes(
+    workspace: &Path,
+    proposal_id: &str,
+    writes: &[PlannedWrite],
+) -> Result<PatchApplyResult, AgentAdapterError> {
+    let result = |applied: bool,
+                  applied_files: Vec<String>,
+                  conflict_paths: Vec<String>,
+                  rolled_back: bool,
+                  reason: &str| PatchApplyResult {
+        schema: PATCH_APPLY_RESULT_SCHEMA.to_string(),
+        proposal_id: proposal_id.to_string(),
+        applied,
+        applied_files,
+        conflict_paths,
+        rolled_back,
+        reason_code: reason.to_string(),
+        evidence_refs: vec![],
+    };
+
+    // Phase 1: resolve + validate pre-images.
+    let mut targets: Vec<(String, PathBuf, Option<String>)> = Vec::with_capacity(writes.len());
+    let mut conflicts = Vec::new();
+    for w in writes {
+        let abs = resolve_in_workspace(workspace, &w.path)?;
+        let current = std::fs::read_to_string(&abs).ok();
+        let current_hash = content_hash(current.as_deref().unwrap_or(""));
+        if current_hash != w.expected_before_hash {
+            conflicts.push(w.path.clone());
+        }
+        targets.push((w.path.clone(), abs, current));
+    }
+    if !conflicts.is_empty() {
+        return Ok(result(
+            false,
+            vec![],
+            conflicts,
+            false,
+            "stale_precondition",
+        ));
+    }
+
+    // Phase 2: apply, rolling every target back on the first failure.
+    let mut applied_files = Vec::new();
+    for (index, w) in writes.iter().enumerate() {
+        let (_, abs, _) = &targets[index];
+        let attempt = (|| -> std::io::Result<()> {
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(abs, w.after_content.as_bytes())
+        })();
+        if attempt.is_err() {
+            rollback(&targets[..=index]);
+            return Ok(result(false, vec![], vec![], true, "io_rolled_back"));
+        }
+        applied_files.push(w.path.clone());
+    }
+    Ok(result(true, applied_files, vec![], false, "applied"))
+}
+
+/// Restore each target to its pre-image: rewrite the snapshot, or remove the
+/// file if it did not exist before.
+fn rollback(targets: &[(String, PathBuf, Option<String>)]) {
+    for (_, abs, snapshot) in targets {
+        match snapshot {
+            Some(original) => {
+                let _ = std::fs::write(abs, original.as_bytes());
+            }
+            None => {
+                let _ = std::fs::remove_file(abs);
+            }
+        }
     }
 }
 
@@ -489,6 +585,61 @@ mod tests {
         assert!(outcome.patches.is_empty());
         assert!(outcome.apply_results.is_empty());
         assert_eq!(outcome.final_state, RunProjectionState::Completed);
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn transaction_rejects_stale_precondition_without_writing() {
+        // §10.5: a file that changed since it was read is NOT silently
+        // overwritten — the write is refused and the original is preserved.
+        let ws = temp_workspace("tx-stale");
+        let file = ws.join("f.txt");
+        std::fs::write(&file, "original").unwrap();
+        let writes = [PlannedWrite {
+            path: "f.txt".to_string(),
+            expected_before_hash: "h_does_not_match".to_string(),
+            after_content: "new".to_string(),
+            operation: FileOperation::Modify,
+        }];
+        let res = apply_file_writes(&ws, "pp-1", &writes).unwrap();
+        assert!(!res.applied);
+        assert_eq!(res.conflict_paths, vec!["f.txt".to_string()]);
+        assert_eq!(res.reason_code, "stale_precondition");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "original",
+            "file must be untouched on a precondition conflict"
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn transaction_applies_multiple_files_when_preimages_match() {
+        let ws = temp_workspace("tx-multi");
+        std::fs::write(ws.join("a.txt"), "A").unwrap();
+        let writes = [
+            PlannedWrite {
+                path: "a.txt".to_string(),
+                expected_before_hash: content_hash("A"),
+                after_content: "A2".to_string(),
+                operation: FileOperation::Modify,
+            },
+            PlannedWrite {
+                // b.txt is absent → its pre-image is the hash of "".
+                path: "nested/b.txt".to_string(),
+                expected_before_hash: content_hash(""),
+                after_content: "B".to_string(),
+                operation: FileOperation::Create,
+            },
+        ];
+        let res = apply_file_writes(&ws, "pp-2", &writes).unwrap();
+        assert!(res.applied);
+        assert_eq!(res.applied_files.len(), 2);
+        assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "A2");
+        assert_eq!(
+            std::fs::read_to_string(ws.join("nested/b.txt")).unwrap(),
+            "B"
+        );
         std::fs::remove_dir_all(&ws).ok();
     }
 }
