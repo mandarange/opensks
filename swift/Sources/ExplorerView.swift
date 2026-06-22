@@ -5,11 +5,12 @@ import SwiftUI
 
 struct ExplorerView: View {
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var nav: NavigationStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text(state.selectedRail.label.uppercased())
+                Text(nav.route.label.uppercased())
                     .font(Theme.ui(10.5, .semibold))
                     .tracking(0.8)
                     .foregroundStyle(Theme.muted)

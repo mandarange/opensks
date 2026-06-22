@@ -7,9 +7,9 @@ import AppKit
 
 struct RootView: View {
     @StateObject private var state = AppState()
+    @StateObject private var coordinator = AppCoordinator()
     @State private var explorerWidth: CGFloat = 240
     @State private var composerWidth: CGFloat = 352
-    @State private var editorFraction: CGFloat = 0.62
 
     var body: some View {
         ZStack {
@@ -26,6 +26,8 @@ struct RootView: View {
             }
         }
         .environmentObject(state)
+        .environmentObject(coordinator)
+        .environmentObject(coordinator.navigation)
         .onAppear {
             state.loadData()
             state.connectEngine()
@@ -35,30 +37,19 @@ struct RootView: View {
 
     private var mainBody: some View {
         HStack(spacing: 0) {
-            RailView()
-                .frame(width: 56)
+            LabeledNavigationRail()
             Divider().overlay(Theme.stroke)
 
             ExplorerView()
                 .frame(width: explorerWidth)
             DragDivider(width: $explorerWidth, range: 200...340)
 
-            VStack(spacing: 0) {
-                GeometryReader { geo in
-                    let h = geo.size.height
-                    let editorH = max(160, h * editorFraction)
-                    VStack(spacing: 0) {
-                        EditorView()
-                            .frame(height: state.terminalCollapsed ? h - 30 : editorH)
-                        if !state.terminalCollapsed {
-                            HorizontalDragDivider(fraction: $editorFraction, totalHeight: h)
-                        }
-                        TerminalView()
-                            .frame(maxHeight: .infinity)
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity)
+            // The central workspace is route-driven (PR-022): selecting a rail
+            // tile re-renders this region. No fixed max width — it fills the
+            // available space so the shell never letterboxes the center.
+            PrimaryWorkspaceRouter()
+                .frame(maxWidth: .infinity)
+                .layoutPriority(1)
 
             DragDivider(width: $composerWidth, range: 320...440, invert: true)
             ComposerView()
