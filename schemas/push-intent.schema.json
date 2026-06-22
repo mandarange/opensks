@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PushIntent",
+  "description": "A persisted push intent: the redacted remote, the ref, the local oid to be pushed, the remote's currently-observed oid (or `None`), and the `effect_digest` that binds them. Emitted by `push-enqueue` and recovered from the durable store by `push-status`.",
+  "type": "object",
+  "required": [
+    "effect_digest",
+    "intent_id",
+    "local_oid",
+    "protected",
+    "ref",
+    "remote",
+    "remote_url_redacted",
+    "schema"
+  ],
+  "properties": {
+    "effect_digest": {
+      "description": "Stable hash over {redacted remote url, ref, local_oid, remote_expected_oid}.",
+      "type": "string"
+    },
+    "intent_id": {
+      "type": "string"
+    },
+    "local_oid": {
+      "type": "string"
+    },
+    "protected": {
+      "description": "True when `ref` is a protected branch (`main`/`master`/…); execution then requires an approval recorded with `--ack-protected`.",
+      "type": "boolean"
+    },
+    "ref": {
+      "type": "string"
+    },
+    "remote": {
+      "type": "string"
+    },
+    "remote_expected_oid": {
+      "description": "The remote's observed oid for `ref` at enqueue time, or `None` when the ref does not yet exist on the remote (a create).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "remote_url_redacted": {
+      "description": "Credential-redacted remote URL; never carries userinfo.",
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    }
+  }
+}

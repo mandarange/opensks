@@ -7,9 +7,12 @@
 // composer flips to a STALE state and must be REFRESHED before committing again,
 // so a commit can only ever contain the exact paths the operator reviewed.
 //
-// LOCAL ONLY: there is no push button here, and the store this drives has no
-// push method to call. After a successful commit the receipt is shown and a
-// commit card is posted into the active conversation (wired by the host).
+// PR-036 adds an explicitly-approved push track ALONGSIDE the local commit. The
+// composer offers a "Commit & Push" action that commits first (to a COMMIT
+// receipt) and then enqueues a push, surfacing a `PushApprovalView` with the
+// EXACT effect; the push only runs after the operator approves it (and ack's a
+// protected branch). Commit and push are SEPARATE receipts here: the commit
+// receipt stands while a push is pending or has failed (and is retryable).
 
 import SwiftUI
 
@@ -17,6 +20,7 @@ struct CommitComposerView: View {
     @ObservedObject var store: GitStudioStore
 
     private var commit: GitCommitComposerState { store.commit }
+    private var push: GitPushOutboxState { store.push }
 
     private var messageBinding: Binding<String> {
         Binding(
@@ -36,6 +40,7 @@ struct CommitComposerView: View {
                     stagedSection
                     messageField
                     commitButton
+                    commitAndPushButton
                     if let receipt = commit.receipt {
                         CommitReceiptView(
                             commit: receipt.commit,
@@ -44,6 +49,7 @@ struct CommitComposerView: View {
                             onDismiss: { store.dismissReceipt() }
                         )
                     }
+                    pushSection
                 }
                 .padding(Theme.s12)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -52,6 +58,62 @@ struct CommitComposerView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Theme.panel)
         .accessibilityIdentifier("git.commit.composer")
+        .task { await store.refreshPushStatus() }
+    }
+
+    // MARK: - Push section (PR-036) — approval prompt + receipt + retry + outbox
+
+    @ViewBuilder
+    private var pushSection: some View {
+        // The explicit approval prompt: the push only runs after the operator
+        // approves the EXACT effect shown here.
+        if let prompt = push.prompt {
+            PushApprovalView(
+                prompt: prompt,
+                onAck: { store.setAckProtected($0) },
+                onApprove: { Task { await store.approveAndExecutePush() } },
+                onCancel: { store.dismissPushPrompt() }
+            )
+        }
+        // A failed push: the commit stands, the push is retryable (commit preserved).
+        if let retryable = push.retryable {
+            PushRetrySurface(
+                intent: retryable,
+                message: push.error,
+                onRetry: { store.retryPush() },
+                onDismiss: nil
+            )
+        }
+        // A successful push receipt (the pushed remote oid).
+        if let receipt = push.receipt {
+            PushReceiptView(
+                remote: pushReceiptRemote,
+                ref: pushReceiptRef,
+                remoteOid: receipt.remoteOid,
+                alreadyDone: receipt.alreadyDone,
+                onDismiss: { store.dismissPushReceipt() }
+            )
+        }
+        // A non-fatal push error not already shown by the retry surface.
+        if let error = push.error, push.retryable == nil, push.prompt == nil {
+            errorBanner(error)
+        }
+        // The relaunch-surviving push outbox (pending / approved / completed).
+        if !push.status.isEmpty {
+            PushOutboxSummary(status: push.status)
+        }
+    }
+
+    /// The remote shown on the push receipt — the completed intent's remote when
+    /// available, else the store's default remote.
+    private var pushReceiptRemote: String {
+        push.status.completed.last?.remote ?? store.defaultRemote
+    }
+
+    /// The ref shown on the push receipt — the completed intent's ref when
+    /// available, else the store's current push ref.
+    private var pushReceiptRef: String {
+        push.status.completed.last?.ref ?? (store.pushRef ?? "—")
     }
 
     // MARK: - Header
@@ -219,5 +281,34 @@ struct CommitComposerView: View {
         if !commit.hasStaged { return "Stage at least one file to commit" }
         if !commit.hasMessage { return "Enter a commit message" }
         return "Commit the reviewed staged files locally"
+    }
+
+    // MARK: - Commit & Push button (PR-036)
+
+    /// Commit locally AND prepare a push: this commits first (a COMMIT receipt),
+    /// then enqueues a push and opens the approval prompt. The push itself does NOT
+    /// run until the operator approves the exact effect — this button never pushes
+    /// silently.
+    private var commitAndPushButton: some View {
+        Button {
+            Task { await store.commitAndPush() }
+        } label: {
+            Label(
+                commit.isCommitting ? "Committing…" : "Commit & Push…",
+                systemImage: "arrow.up.circle"
+            )
+            .labelStyle(.titleAndIcon)
+        }
+        .buttonStyle(.secondaryAction)
+        .frame(maxWidth: .infinity)
+        .disabled(!store.canCommitAndPush)
+        .accessibilityIdentifier("git.commitAndPush.button")
+        .accessibilityHint(commitAndPushHint)
+    }
+
+    private var commitAndPushHint: String {
+        if store.pushRef == nil { return "A detached HEAD has no branch to push" }
+        if !commit.canCommit { return commitHint }
+        return "Commit locally, then review and approve the push to the remote"
     }
 }

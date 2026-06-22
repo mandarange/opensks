@@ -249,6 +249,7 @@ name = "opensks-git"
 version = "0.1.0"
 dependencies = [
  "opensks-contracts",
+ "rusqlite",
  "serde_json",
  "thiserror",
 ]

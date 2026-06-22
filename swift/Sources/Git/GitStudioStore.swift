@@ -13,8 +13,18 @@
 // unsaved buffers — a dirty result BLOCKS the switch, never a silent --force);
 // and a reviewed-hash commit (`commit-preview` → `commit`, where an
 // `index_changed` flips the composer to STALE so a commit only ever contains the
-// reviewed paths). There is NO push anywhere — the store never calls a push
-// method because none exists on `GitService`.
+// reviewed paths).
+//
+// PR-036 adds the EXPLICITLY-APPROVED push flow as a SEPARATE receipt track. A
+// "Commit & Push" runs the PR-035 commit to a COMMIT receipt FIRST, then enqueues
+// a push (`push-enqueue`) and surfaces a `GitPushPrompt` showing the EXACT effect
+// (redacted remote, ref, local oid → remote-expected oid, a protected-branch
+// warning). The push is NEVER executed until the operator approves from the
+// prompt — approve carries the intent's `effect_digest`; a `digest_mismatch`
+// keeps the prompt open to re-review; a protected ref needs the extra ack; a
+// `push_failed` preserves the LOCAL commit + the pending intent as RETRYABLE.
+// Commit and push are independent: a commit receipt can stand while a push is
+// still pending or failed.
 
 import SwiftUI
 
@@ -54,6 +64,14 @@ final class GitStudioStore: ObservableObject {
     /// disable Commit until there are staged paths + a message, send the reviewed
     /// `index_hash`, and flip to STALE on `index_changed`.
     @Published private(set) var commit = GitCommitComposerState()
+
+    // MARK: Push outbox state (PR-036)
+
+    /// The push outbox: the active approval prompt (the exact effect awaiting the
+    /// operator's approval), the most recent push receipt, a retryable failed push,
+    /// the recovered push status, and the last push error. Kept SEPARATE from
+    /// `commit` so a commit receipt stands independently of any pending/failed push.
+    @Published private(set) var push = GitPushOutboxState()
 
     private var service: GitService
     /// Debounce window for coalescing rapid refresh triggers.
@@ -378,8 +396,188 @@ final class GitStudioStore: ObservableObject {
     /// active conversation thread. Receives the commit result + the message used.
     var onCommitted: ((GitCommitResult, String) -> Void)?
 
+    /// The default remote to push to (the workspace's configured remote). The
+    /// executor only ever pushes to THIS remote; the UI shows the redacted URL.
+    let defaultRemote = "origin"
+
+    /// The ref a push would target — the current branch (or its upstream branch
+    /// name). A detached HEAD has no push ref, so Commit & Push is unavailable.
+    var pushRef: String? {
+        if status.detached { return nil }
+        return status.branch ?? branches.current
+    }
+
+    /// True when a "Commit & Push" is possible: a commit is allowed AND there is a
+    /// ref to push. (The push itself still requires explicit approval afterward.)
+    var canCommitAndPush: Bool {
+        commit.canCommit && pushRef != nil
+    }
+
+    // MARK: - Commit & Push (PR-036, explicitly-approved)
+
+    /// Convenience: "Commit & Push" using the configured remote + the current
+    /// branch as the ref. No-op if there is no push ref (detached HEAD).
+    func commitAndPush() async {
+        guard let ref = pushRef else { return }
+        await commitAndPush(remote: defaultRemote, ref: ref)
+    }
+
+    /// Run a LOCAL commit (PR-035) to a COMMIT receipt FIRST, then ENQUEUE a push
+    /// of `ref` to `remote` and open the approval prompt with the exact effect.
+    /// The push is NOT executed here — it waits for the operator to approve the
+    /// exact effect from the prompt. If the commit fails (stale / secret / busy)
+    /// NO push is enqueued. Commit and push are separate receipts: the commit
+    /// receipt stands even if the push is later abandoned or fails.
+    func commitAndPush(remote: String, ref: String) async {
+        // 1. Commit first — this records the COMMIT receipt + posts the commit card.
+        let committed = await performCommit()
+        guard committed != nil else { return }
+        // 2. Enqueue the push (durable intent + effect digest). No remote contact.
+        await enqueuePush(remote: remote, ref: ref)
+    }
+
+    /// Enqueue a push intent and open the approval prompt for its exact effect.
+    /// Persists durably (SQLite) on the CLI side so the intent survives relaunch.
+    /// Never contacts the remote — only records what a push WOULD do.
+    func enqueuePush(remote: String, ref: String) async {
+        push.error = nil
+        do {
+            let intent = try await service.pushEnqueue(remote: remote, ref: ref)
+            push.retryable = nil
+            push.prompt = GitPushPrompt(intent: intent)
+            await refreshPushStatus()
+        } catch {
+            push.error = Self.describePush(error)
+        }
+    }
+
+    /// Toggle the operator's explicit protected-branch acknowledgement in the open
+    /// prompt. Required before a protected push can be approved (never auto-set).
+    func setAckProtected(_ ack: Bool) {
+        guard push.prompt != nil else { return }
+        push.prompt?.ackProtected = ack
+    }
+
+    /// Approve the open push prompt's EXACT effect, then EXECUTE the push. Approval
+    /// carries the intent's `effect_digest`; the CLI records an approval only if it
+    /// still matches the intent's current digest. A `digest_mismatch` keeps the
+    /// prompt open (the effect moved — re-review). A protected ref requires the
+    /// extra ack (the prompt's Approve is disabled until then). On a successful
+    /// execute the receipt is recorded and `onPushed` fires (the conversation push
+    /// card). A `push_failed` keeps the COMMIT intact and marks the push RETRYABLE
+    /// (the local commit is preserved).
+    func approveAndExecutePush() async {
+        guard let prompt = push.prompt, prompt.canApprove else { return }
+        let intent = prompt.intent
+        push.error = nil
+        push.prompt?.notice = nil
+        push.prompt?.isWorking = true
+        defer { push.prompt?.isWorking = false }
+        do {
+            let approval = try await service.pushApprove(
+                intentId: intent.intentId,
+                effectDigest: intent.effectDigest,
+                ackProtected: prompt.ackProtected
+            )
+            guard approval.matched else {
+                // A non-matching approval is the same as a mismatch: do NOT push.
+                push.prompt?.notice = Self.digestMismatchNotice
+                await refreshPushStatus()
+                return
+            }
+            // Approved the exact effect → execute the push.
+            let receipt = try await service.pushExecute(intentId: intent.intentId)
+            push.receipt = receipt
+            push.retryable = nil
+            push.prompt = nil
+            await refreshPushStatus()
+            onPushed?(receipt, intent)
+        } catch let error as GitPushError {
+            handlePushError(error, intent: intent)
+        } catch {
+            push.error = Self.describePush(error)
+        }
+    }
+
+    /// Retry a push that FAILED at execute: re-open the approval prompt for the
+    /// SAME intent so the operator re-approves the (unchanged) exact effect. The
+    /// local commit is preserved — this never re-commits.
+    func retryPush() {
+        guard let intent = push.retryable else { return }
+        push.error = nil
+        push.prompt = GitPushPrompt(intent: intent)
+    }
+
+    /// Dismiss the open approval prompt WITHOUT pushing (the operator declined the
+    /// effect). The intent remains pending on the CLI side (durable) and the LOCAL
+    /// commit is untouched.
+    func dismissPushPrompt() {
+        push.prompt = nil
+    }
+
+    /// Dismiss the most recent push receipt after the operator has read it.
+    func dismissPushReceipt() {
+        push.receipt = nil
+    }
+
+    /// Refresh the push outbox (pending / approved / completed) from the CLI. Reads
+    /// state recovered from SQLite so the outbox survives relaunch.
+    func refreshPushStatus() async {
+        do {
+            push.status = try await service.pushStatus()
+        } catch {
+            // A status read failure is non-fatal — keep the last known outbox.
+            push.error = Self.describePush(error)
+        }
+    }
+
+    /// Fired after a successful push so the host can post a push card into the
+    /// active conversation thread. Receives the push receipt + the intent pushed.
+    var onPushed: ((GitPushReceipt, GitPushIntent) -> Void)?
+
+    /// Map a typed push error onto the prompt / outbox state. A digest mismatch or
+    /// missing ack keeps the prompt OPEN (re-review / re-ack); a failed push closes
+    /// the prompt but marks the push RETRYABLE with the commit preserved.
+    private func handlePushError(_ error: GitPushError, intent: GitPushIntent) {
+        switch error {
+        case .digestMismatch:
+            // The exact effect moved (oid/ref changed) — do NOT push. Keep the
+            // prompt open so the operator re-reviews; no usable approval was made.
+            push.prompt?.notice = Self.digestMismatchNotice
+        case .noMatchingApproval:
+            push.prompt?.notice = "No approval was recorded for this push. Approve the exact effect to push."
+        case .protectedBranch:
+            // The protected ref needs the explicit ack — re-prompt with the toggle.
+            push.prompt?.ackProtected = false
+            push.prompt?.notice = "This is a protected branch. Acknowledge the protected-branch push to continue."
+        case .pushFailed(let message):
+            // The commit is intact; the intent is preserved for retry.
+            push.prompt = nil
+            push.retryable = intent
+            let detail = message.map { ": \($0)" } ?? "."
+            push.error = "The push failed\(detail) Your commit is saved — retry the push when the remote is reachable."
+        }
+    }
+
+    private static let digestMismatchNotice =
+        "The push target moved since this effect was prepared (the commit or branch changed). Re-review the new effect before approving."
+
     private func handleMutationError(_ error: Error) {
         mutationError = Self.describe(error)
+    }
+
+    private static func describePush(_ error: Error) -> String {
+        if let pushError = error as? GitPushError {
+            switch pushError {
+            case .digestMismatch: return digestMismatchNotice
+            case .noMatchingApproval: return "No approval was recorded for this push."
+            case .protectedBranch: return "This is a protected branch; acknowledge the protected-branch push first."
+            case .pushFailed(let message):
+                let detail = message.map { ": \($0)" } ?? "."
+                return "The push failed\(detail) Your commit is saved — retry when the remote is reachable."
+            }
+        }
+        return Self.describe(error)
     }
 
     // MARK: - Internals

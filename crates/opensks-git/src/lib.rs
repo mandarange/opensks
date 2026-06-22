@@ -6,6 +6,12 @@ use std::process::{Command, Stdio};
 
 pub use opensks_contracts::{OutboxApproval, OutboxDispatchReport};
 
+pub mod push;
+pub use push::{
+    PUSH_OUTBOX_DB_RELATIVE_PATH, PUSH_OUTBOX_MIGRATION_VERSION, PushOutbox, is_protected_ref,
+    redact_remote,
+};
+
 use opensks_contracts::{
     GIT_ISOLATION_SCHEMA, GateResult, GateStatus, GitIsolationReport, IsolationMode,
     OUTBOX_DISPATCH_REPORT_SCHEMA, OUTBOX_ITEM_SCHEMA, OutboxAction, OutboxItem,

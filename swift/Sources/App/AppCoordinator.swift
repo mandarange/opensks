@@ -55,14 +55,19 @@ final class AppCoordinator: ObservableObject {
         git.rebind(service: LiveGitService(cli: cli, workspace: workspace))
     }
 
-    /// Wire the Git studio (PR-035) to the rest of the app: the editor store so a
-    /// dirty-buffer switch preflight can see unsaved work, and a commit-card sink
-    /// so a successful LOCAL commit posts a receipt into the active conversation
-    /// thread. Idempotent — safe to call again after a rebind.
+    /// Wire the Git studio (PR-035 + PR-036) to the rest of the app: the editor
+    /// store so a dirty-buffer switch preflight can see unsaved work, a commit-card
+    /// sink so a successful LOCAL commit posts a receipt into the active
+    /// conversation thread, and a push-card sink so a successful APPROVED push
+    /// posts a SEPARATE push receipt. Idempotent — safe to call again after a
+    /// rebind.
     func wireGit(editorStore: EditorWorkspaceStore) {
         git.editorStore = editorStore
         git.onCommitted = { [weak self] result, message in
             self?.conversations.postCommitCard(result, message: message)
+        }
+        git.onPushed = { [weak self] receipt, intent in
+            self?.conversations.postPushCard(receipt, intent: intent)
         }
     }
 

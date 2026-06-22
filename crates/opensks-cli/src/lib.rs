@@ -734,6 +734,10 @@ pub fn run_git_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliErro
         Some("unstage") => return run_git_unstage(&args[1..], cwd),
         Some("commit-preview") => return run_git_commit_preview(&args[1..], cwd),
         Some("commit") => return run_git_commit(&args[1..], cwd),
+        Some("push-enqueue") => return run_git_push_enqueue(&args[1..], cwd),
+        Some("push-approve") => return run_git_push_approve(&args[1..], cwd),
+        Some("push-execute") => return run_git_push_execute(&args[1..], cwd),
+        Some("push-status") => return run_git_push_status(&args[1..], cwd),
         _ => {}
     }
     require_exact_subcommand_cli(args, "outbox", git_usage())?;
@@ -827,7 +831,11 @@ pub fn git_usage() -> &'static str {
         "       opensks git stage --workspace <path> --path <relative> [--path <relative> ...]\n",
         "       opensks git unstage --workspace <path> --path <relative> [--path <relative> ...]\n",
         "       opensks git commit-preview --workspace <path>\n",
-        "       opensks git commit --workspace <path> --message <m> --expected-index-hash <hash>\n"
+        "       opensks git commit --workspace <path> --message <m> --expected-index-hash <hash>\n",
+        "       opensks git push-enqueue --workspace <path> --remote <name> --ref <branch>\n",
+        "       opensks git push-approve --workspace <path> --intent <id> --effect-digest <digest> [--ack-protected]\n",
+        "       opensks git push-execute --workspace <path> --intent <id>\n",
+        "       opensks git push-status --workspace <path>\n"
     )
 }
 
@@ -1154,6 +1162,209 @@ fn run_git_commit(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
         }
         Err(error) => Err(git_mutation_error(&error)),
     }
+}
+
+/// Flags for the PR-036 durable push-outbox subcommands. `workspace` defaults to
+/// the process `cwd`.
+#[derive(Debug, Default)]
+struct GitPushOptions {
+    workspace: Option<PathBuf>,
+    remote: Option<String>,
+    r#ref: Option<String>,
+    intent: Option<String>,
+    effect_digest: Option<String>,
+    ack_protected: bool,
+}
+
+/// Parse the flags shared by the push subcommands: `--workspace <p>`,
+/// `--remote <name>`, `--ref <branch>`, `--intent <id>`,
+/// `--effect-digest <digest>`, and `--ack-protected`.
+fn parse_git_push_options(args: &[String]) -> Result<GitPushOptions, CliError> {
+    let usage = git_usage();
+    let mut options = GitPushOptions::default();
+    let mut idx = 0;
+    while idx < args.len() {
+        let flag = args[idx].as_str();
+        let value = || -> Result<&str, CliError> {
+            args.get(idx + 1).map(String::as_str).ok_or_else(|| {
+                CliError::Usage(format!("flag `{flag}` requires a value\n\n{usage}"))
+            })
+        };
+        match flag {
+            "--workspace" => {
+                options.workspace = Some(PathBuf::from(value()?));
+                idx += 2;
+            }
+            "--remote" => {
+                options.remote = Some(value()?.to_string());
+                idx += 2;
+            }
+            "--ref" => {
+                options.r#ref = Some(value()?.to_string());
+                idx += 2;
+            }
+            "--intent" => {
+                options.intent = Some(value()?.to_string());
+                idx += 2;
+            }
+            "--effect-digest" => {
+                options.effect_digest = Some(value()?.to_string());
+                idx += 2;
+            }
+            "--ack-protected" => {
+                options.ack_protected = true;
+                idx += 1;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown argument `{other}`\n\n{usage}"
+                )));
+            }
+        }
+    }
+    Ok(options)
+}
+
+/// Resolve the `--workspace` for a push subcommand, defaulting to `cwd`.
+fn push_workspace(options: &GitPushOptions, cwd: &Path) -> PathBuf {
+    options
+        .workspace
+        .clone()
+        .unwrap_or_else(|| cwd.to_path_buf())
+}
+
+/// Map a typed [`opensks_contracts::PushError`] to a nonzero-exit CLI error whose
+/// message is the `opensks.git-error.v1` JSON. Upstream this becomes
+/// `OpenSksError::Invalid` → exit code 1, with the refusal contract on the wire.
+fn push_error(error: &opensks_contracts::PushError) -> CliError {
+    match serde_json::to_string(error) {
+        Ok(json) => CliError::Invalid(json),
+        Err(serialize_error) => {
+            CliError::Invalid(format!("serialize push error: {serialize_error}"))
+        }
+    }
+}
+
+/// Generate a stable, collision-resistant id from a prefix and the current
+/// clock. Used to mint approval ids when the caller does not supply one.
+fn push_generated_id(prefix: &str) -> Result<String, CliError> {
+    Ok(format!("{prefix}-{}", ClockStamp::now()?.compact_id()))
+}
+
+/// `opensks git push-enqueue --workspace <p> --remote <name> --ref <branch>` —
+/// compute the current local oid for `ref` and the remote's observed oid, persist
+/// a durable push intent with its `effect_digest`, and flag protected refs.
+fn run_git_push_enqueue(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let options = parse_git_push_options(args)?;
+    let workspace = push_workspace(&options, cwd);
+    let remote = options.remote.as_deref().ok_or_else(|| {
+        CliError::Usage(format!(
+            "git push-enqueue requires `--remote`\n\n{}",
+            git_usage()
+        ))
+    })?;
+    let r#ref = options.r#ref.as_deref().ok_or_else(|| {
+        CliError::Usage(format!(
+            "git push-enqueue requires `--ref`\n\n{}",
+            git_usage()
+        ))
+    })?;
+    let intent_id = options
+        .intent
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(|| push_generated_id("push-intent"))?;
+    let outbox = opensks_git::PushOutbox::open_workspace(&workspace)
+        .map_err(|error| CliError::Invalid(format!("open push outbox: {error}")))?;
+    let intent = outbox
+        .enqueue(&intent_id, remote, r#ref)
+        .map_err(|error| CliError::Invalid(format!("push enqueue: {error}")))?;
+    let body = serde_json::to_value(&intent)
+        .map_err(|error| CliError::Invalid(format!("serialize push intent: {error}")))?;
+    file_output(&body)
+}
+
+/// `opensks git push-approve --workspace <p> --intent <id> --effect-digest <d>
+/// [--ack-protected]` — record an approval only when `--effect-digest` equals the
+/// intent's current digest; otherwise refuse with `digest_mismatch` and a nonzero
+/// exit, recording no usable approval.
+fn run_git_push_approve(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let options = parse_git_push_options(args)?;
+    let workspace = push_workspace(&options, cwd);
+    let intent_id = options.intent.as_deref().ok_or_else(|| {
+        CliError::Usage(format!(
+            "git push-approve requires `--intent`\n\n{}",
+            git_usage()
+        ))
+    })?;
+    let effect_digest = options.effect_digest.as_deref().ok_or_else(|| {
+        CliError::Usage(format!(
+            "git push-approve requires `--effect-digest`\n\n{}",
+            git_usage()
+        ))
+    })?;
+    let approval_id = push_generated_id("push-approval")?;
+    let outbox = opensks_git::PushOutbox::open_workspace(&workspace)
+        .map_err(|error| CliError::Invalid(format!("open push outbox: {error}")))?;
+    match outbox
+        .approve(
+            &approval_id,
+            intent_id,
+            effect_digest,
+            options.ack_protected,
+        )
+        .map_err(|error| CliError::Invalid(format!("push approve: {error}")))?
+    {
+        Ok(approval) => {
+            let body = serde_json::to_value(&approval)
+                .map_err(|error| CliError::Invalid(format!("serialize push approval: {error}")))?;
+            file_output(&body)
+        }
+        Err(error) => Err(push_error(&error)),
+    }
+}
+
+/// `opensks git push-execute --workspace <p> --intent <id>` — execute the push if
+/// a still-valid approval exists. Refuses (nonzero) with `no_matching_approval`,
+/// `digest_mismatch`, `protected_branch`, or `push_failed`. A repeat execute with
+/// a completed receipt returns `already_done: true` without pushing again.
+fn run_git_push_execute(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let options = parse_git_push_options(args)?;
+    let workspace = push_workspace(&options, cwd);
+    let intent_id = options.intent.as_deref().ok_or_else(|| {
+        CliError::Usage(format!(
+            "git push-execute requires `--intent`\n\n{}",
+            git_usage()
+        ))
+    })?;
+    let outbox = opensks_git::PushOutbox::open_workspace(&workspace)
+        .map_err(|error| CliError::Invalid(format!("open push outbox: {error}")))?;
+    match outbox
+        .execute(intent_id)
+        .map_err(|error| CliError::Invalid(format!("push execute: {error}")))?
+    {
+        Ok(receipt) => {
+            let body = serde_json::to_value(&receipt)
+                .map_err(|error| CliError::Invalid(format!("serialize push receipt: {error}")))?;
+            file_output(&body)
+        }
+        Err(error) => Err(push_error(&error)),
+    }
+}
+
+/// `opensks git push-status --workspace <p>` — recover the durable outbox state
+/// (pending / approved / completed) from SQLite, surviving restart.
+fn run_git_push_status(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
+    let options = parse_git_push_options(args)?;
+    let workspace = push_workspace(&options, cwd);
+    let outbox = opensks_git::PushOutbox::open_workspace(&workspace)
+        .map_err(|error| CliError::Invalid(format!("open push outbox: {error}")))?;
+    let status = outbox
+        .status()
+        .map_err(|error| CliError::Invalid(format!("push status: {error}")))?;
+    let body = serde_json::to_value(&status)
+        .map_err(|error| CliError::Invalid(format!("serialize push status: {error}")))?;
+    file_output(&body)
 }
 
 pub fn run_gc_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
@@ -5542,5 +5753,225 @@ mod tests {
         assert_eq!(unstaged["unstaged"][0], "c.rs");
         assert!(staged_index_paths(&root).is_empty());
         fs::remove_dir_all(root).ok();
+    }
+
+    // --- PR-036 durable push outbox (CLI wire) -------------------------------
+
+    /// Run a push subcommand expecting success; parse its JSON body.
+    fn push_ok(root: &Path, args: &[&str]) -> serde_json::Value {
+        let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let output = run_git_command(&owned, root).expect("push subcommand ok");
+        serde_json::from_str(&output.stdout).expect("valid push json")
+    }
+
+    /// Run a push subcommand expecting a refusal; parse the `git-error.v1` JSON
+    /// carried by the nonzero-exit `CliError::Invalid`.
+    fn push_err(root: &Path, args: &[&str]) -> serde_json::Value {
+        let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        match run_git_command(&owned, root) {
+            Err(CliError::Invalid(message)) => {
+                serde_json::from_str(&message).expect("error message is git-error JSON")
+            }
+            other => panic!("expected a refusal CliError::Invalid, got {other:?}"),
+        }
+    }
+
+    /// Build a SAFE fixture: a source work repo on `branch` plus a SEPARATE LOCAL
+    /// BARE repo added as remote `origin` via an absolute file path. No network
+    /// remote is ever involved.
+    fn init_push_fixture(label: &str, branch: &str) -> (PathBuf, PathBuf) {
+        let root = temp_workspace(label).canonicalize().expect("canonicalize");
+        let source = root.join("source");
+        let bare = root.join("remote.git");
+        fs::create_dir_all(&source).expect("source dir");
+        run_repo_git(&source, &["init"]);
+        run_repo_git(&source, &["config", "user.email", "opensks@example.test"]);
+        run_repo_git(&source, &["config", "user.name", "OpenSKS Test"]);
+        run_repo_git(&source, &["config", "commit.gpgsign", "false"]);
+        run_repo_git(&source, &["checkout", "-B", branch]);
+        fs::write(source.join("file.txt"), "v1\n").expect("write");
+        run_repo_git(&source, &["add", "file.txt"]);
+        run_repo_git(&source, &["commit", "-m", "init"]);
+        // The bare repo dir does not exist yet; run init from the source cwd.
+        run_repo_git(&source, &["init", "--bare", bare.to_str().unwrap()]);
+        run_repo_git(
+            &source,
+            &["remote", "add", "origin", bare.to_str().unwrap()],
+        );
+        (source, bare)
+    }
+
+    fn bare_has_ref(bare: &Path, branch: &str) -> bool {
+        let output = process::Command::new("git")
+            .args(["for-each-ref", &format!("refs/heads/{branch}")])
+            .current_dir(bare)
+            .output()
+            .expect("git for-each-ref");
+        !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+    }
+
+    #[test]
+    fn push_cli_full_handshake_pushes_to_local_bare_remote_only() {
+        let (source, bare) = init_push_fixture("opensks-cli-push-happy", "feature");
+        let ws = source.to_string_lossy().into_owned();
+
+        // Enqueue → a push intent with an effect_digest and protected=false.
+        let intent = push_ok(
+            &source,
+            &[
+                "push-enqueue",
+                "--workspace",
+                &ws,
+                "--remote",
+                "origin",
+                "--ref",
+                "feature",
+                "--intent",
+                "intent-1",
+            ],
+        );
+        assert_eq!(intent["schema"], "opensks.push-intent.v1");
+        assert_eq!(intent["ref"], "feature");
+        assert_eq!(intent["protected"], false);
+        let digest = intent["effect_digest"]
+            .as_str()
+            .expect("digest")
+            .to_string();
+
+        // Execute BEFORE approval → no_matching_approval, remote ref unchanged.
+        let before = push_err(
+            &source,
+            &["push-execute", "--workspace", &ws, "--intent", "intent-1"],
+        );
+        assert_eq!(before["error"]["code"], "no_matching_approval");
+        assert!(
+            !bare_has_ref(&bare, "feature"),
+            "no remote write before approval"
+        );
+
+        // Approve with the matching digest → matched.
+        let approval = push_ok(
+            &source,
+            &[
+                "push-approve",
+                "--workspace",
+                &ws,
+                "--intent",
+                "intent-1",
+                "--effect-digest",
+                &digest,
+            ],
+        );
+        assert_eq!(approval["schema"], "opensks.push-approval.v1");
+        assert_eq!(approval["matched"], true);
+
+        // Execute → pushes to the LOCAL BARE remote.
+        let receipt = push_ok(
+            &source,
+            &["push-execute", "--workspace", &ws, "--intent", "intent-1"],
+        );
+        assert_eq!(receipt["schema"], "opensks.push-receipt.v1");
+        assert_eq!(receipt["pushed"], true);
+        assert_eq!(receipt["already_done"], false);
+        assert!(bare_has_ref(&bare, "feature"), "remote now has the ref");
+
+        // A second execute is idempotent: already_done, no second push.
+        let repeat = push_ok(
+            &source,
+            &["push-execute", "--workspace", &ws, "--intent", "intent-1"],
+        );
+        assert_eq!(repeat["already_done"], true);
+
+        // Status shows the completed receipt, recovered from SQLite.
+        let status = push_ok(&source, &["push-status", "--workspace", &ws]);
+        assert_eq!(status["schema"], "opensks.push-status.v1");
+        assert_eq!(status["completed"].as_array().expect("completed").len(), 1);
+        assert!(status["pending"].as_array().expect("pending").is_empty());
+
+        fs::remove_dir_all(source.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn push_cli_protected_ref_requires_ack_protected() {
+        let (source, bare) = init_push_fixture("opensks-cli-push-protected", "main");
+        let ws = source.to_string_lossy().into_owned();
+
+        let intent = push_ok(
+            &source,
+            &[
+                "push-enqueue",
+                "--workspace",
+                &ws,
+                "--remote",
+                "origin",
+                "--ref",
+                "main",
+                "--intent",
+                "intent-main",
+            ],
+        );
+        assert_eq!(intent["protected"], true);
+        let digest = intent["effect_digest"]
+            .as_str()
+            .expect("digest")
+            .to_string();
+
+        // Approve WITHOUT --ack-protected, then execute → protected_branch.
+        push_ok(
+            &source,
+            &[
+                "push-approve",
+                "--workspace",
+                &ws,
+                "--intent",
+                "intent-main",
+                "--effect-digest",
+                &digest,
+            ],
+        );
+        let refused = push_err(
+            &source,
+            &[
+                "push-execute",
+                "--workspace",
+                &ws,
+                "--intent",
+                "intent-main",
+            ],
+        );
+        assert_eq!(refused["error"]["code"], "protected_branch");
+        assert!(
+            !bare_has_ref(&bare, "main"),
+            "no write for un-acked protected ref"
+        );
+
+        // Re-approve WITH --ack-protected, then execute → pushes.
+        push_ok(
+            &source,
+            &[
+                "push-approve",
+                "--workspace",
+                &ws,
+                "--intent",
+                "intent-main",
+                "--effect-digest",
+                &digest,
+                "--ack-protected",
+            ],
+        );
+        let receipt = push_ok(
+            &source,
+            &[
+                "push-execute",
+                "--workspace",
+                &ws,
+                "--intent",
+                "intent-main",
+            ],
+        );
+        assert_eq!(receipt["pushed"], true);
+        assert!(bare_has_ref(&bare, "main"), "acked protected ref is pushed");
+
+        fs::remove_dir_all(source.parent().unwrap()).ok();
     }
 }

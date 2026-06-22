@@ -1,18 +1,25 @@
 // GitService.swift — the boundary between the Git studio and the bundled
-// `opensks git …` subcommands (PR-034 read-only + PR-035 LOCAL mutations).
+// `opensks git …` subcommands (PR-034 read-only + PR-035 LOCAL mutations +
+// PR-036 the EXPLICITLY-APPROVED push flow).
 //
 // `GitService` is the async-throwing protocol the store talks to. The reads —
 // status / branches / diff — are unchanged from PR-034. PR-035 adds the LOCAL
 // mutation surface: stage / unstage / switch-preflight / create-branch / switch
-// / commit-preview / commit. There is deliberately NO push method anywhere: the
-// surface is read-only-plus-LOCAL, and the tests assert no push exists.
+// / commit-preview / commit. PR-036 adds the PUSH flow as four explicit steps —
+// push-enqueue → push-approve → push-execute (+ push-status) — each a SUBCOMMAND
+// of the existing `git` verb. There is NO silent push: a push always requires the
+// operator to approve the EXACT effect, and the executor may run the real
+// `git push` ONLY to the workspace's configured remote (in tests/smoke a LOCAL
+// bare repo, never a network/external remote).
 //
 // The LIVE implementation shells the bundled CLI exactly like LiveEditorFileService
 // (off-main detached task, decode the shared snake_case JSON). A non-zero exit
 // carrying the `opensks.git-error.v1` envelope is mapped to a TYPED error
-// (`switchBlocked` / `indexChanged` / `secretRejected`) so the store can react
-// precisely. A MOCK drives the tests without touching disk or spawning a process
-// and COUNTS calls so behaviour is observable.
+// (`switchBlocked` / `indexChanged` / `secretRejected`; or, for the push steps,
+// `digestMismatch` / `noMatchingApproval` / `protectedBranch` / `pushFailed`) so
+// the store can react precisely. A MOCK drives the tests without touching disk or
+// spawning a process and COUNTS calls so behaviour — including the strict
+// enqueue → approve → execute ORDERING — is observable.
 
 import Foundation
 
@@ -36,11 +43,13 @@ enum GitServiceError: Error, Equatable {
     case secretRejected(rejected: [GitStageRejection])
 }
 
-// MARK: - Protocol (READ-ONLY + LOCAL-MUTATION surface)
+// MARK: - Protocol (READ-ONLY + LOCAL-MUTATION + APPROVED-PUSH surface)
 
 /// The git boundary. Reads — status / branches / diff (PR-034). Local mutations —
 /// stage / unstage / switch-preflight / create-branch / switch / commit-preview /
-/// commit (PR-035). There is NO push: this surface is read-only-plus-LOCAL.
+/// commit (PR-035). The PUSH flow (PR-036) — push-enqueue / push-approve /
+/// push-execute / push-status — is the ONLY remote-touching surface, and a push
+/// NEVER happens without an explicit approval of the exact effect.
 protocol GitService: Sendable {
     // Reads (PR-034).
 
@@ -71,6 +80,30 @@ protocol GitService: Sendable {
     /// A stale `expectedIndexHash` throws `.indexChanged`; a secret/data-plane
     /// staged path throws `.secretRejected`.
     func commit(message: String, expectedIndexHash: String) async throws -> GitCommitResult
+
+    // The push flow (PR-036) — NO silent push: every push is enqueued, approved
+    // against the exact effect, then executed. Only ever the workspace's
+    // configured remote.
+
+    /// `opensks git push-enqueue --workspace <p> --remote <name> --ref <branch>` —
+    /// persist a durable push INTENT (the exact effect + a stable `effect_digest`)
+    /// in SQLite. Touches no remote; it only records what a push WOULD do.
+    func pushEnqueue(remote: String, ref: String) async throws -> GitPushIntent
+    /// `opensks git push-approve --workspace <p> --intent <id> --effect-digest <d>
+    /// [--ack-protected]` — record an APPROVAL only if `effectDigest` still matches
+    /// the intent's current digest. A mismatch throws `.digestMismatch` and records
+    /// NO usable approval; a protected ref without `ackProtected` throws
+    /// `.protectedBranch`.
+    func pushApprove(intentId: String, effectDigest: String, ackProtected: Bool) async throws -> GitPushApproval
+    /// `opensks git push-execute --workspace <p> --intent <id>` — run the real
+    /// `git push` ONLY with a matching, still-valid approval. Throws
+    /// `.noMatchingApproval` / `.digestMismatch` / `.protectedBranch` on a refusal,
+    /// or `.pushFailed` on a remote failure (the local commit + intent are
+    /// preserved for retry). Idempotent: a repeat execute reports `alreadyDone`.
+    func pushExecute(intentId: String) async throws -> GitPushReceipt
+    /// `opensks git push-status --workspace <p>` — the push outbox (pending /
+    /// approved / completed), recovered from SQLite so it survives relaunch.
+    func pushStatus() async throws -> GitPushStatus
 }
 
 extension GitService {
@@ -162,6 +195,43 @@ struct LiveGitService: GitService {
             "--message", message, "--expected-index-hash", expectedIndexHash
         ])
         return try Self.decodeMutation(result, as: GitCommitResult.self)
+    }
+
+    // MARK: Push flow (PR-036) — enqueue → approve → execute → status
+    //
+    // Each step maps its `opensks.git-error.v1` envelope to a TYPED `GitPushError`
+    // (digest_mismatch / no_matching_approval / protected_branch / push_failed) so
+    // the store reacts precisely: a mismatch re-reviews the effect, a missing ack
+    // re-prompts, and a failed push leaves the commit + intent for retry.
+
+    func pushEnqueue(remote: String, ref: String) async throws -> GitPushIntent {
+        let result = try await run(args: [
+            "git", "push-enqueue", "--workspace", workspace.path,
+            "--remote", remote, "--ref", ref
+        ])
+        return try Self.decodePush(result, as: GitPushIntent.self)
+    }
+
+    func pushApprove(intentId: String, effectDigest: String, ackProtected: Bool) async throws -> GitPushApproval {
+        var args = [
+            "git", "push-approve", "--workspace", workspace.path,
+            "--intent", intentId, "--effect-digest", effectDigest
+        ]
+        if ackProtected { args.append("--ack-protected") }
+        let result = try await run(args: args)
+        return try Self.decodePush(result, as: GitPushApproval.self)
+    }
+
+    func pushExecute(intentId: String) async throws -> GitPushReceipt {
+        let result = try await run(args: [
+            "git", "push-execute", "--workspace", workspace.path, "--intent", intentId
+        ])
+        return try Self.decodePush(result, as: GitPushReceipt.self)
+    }
+
+    func pushStatus() async throws -> GitPushStatus {
+        let result = try await run(args: ["git", "push-status", "--workspace", workspace.path])
+        return try Self.decodePush(result, as: GitPushStatus.self)
     }
 
     // MARK: Process plumbing (mirrors LiveEditorFileService)
@@ -277,15 +347,70 @@ struct LiveGitService: GitService {
             return .service(message: envelope.error.message ?? "opensks git error: \(envelope.error.code)")
         }
     }
+
+    /// Decode a PUSH step result. On a non-zero exit the CLI emits the
+    /// `opensks.git-error.v1` envelope; map its push-specific `code` to a TYPED
+    /// `GitPushError` so the store reacts precisely (a digest mismatch re-reviews
+    /// the effect; a missing approval re-prompts; a protected ref without ack
+    /// re-prompts with the warning; a failed push leaves the commit + intent for
+    /// retry). A non-push code falls back to the generic `GitServiceError`.
+    private static func decodePush<T: Decodable>(
+        _ result: ProcessResult,
+        as type: T.Type
+    ) throws -> T {
+        let decoder = JSONDecoder()
+        if result.exitCode == 0, let value = try? decoder.decode(T.self, from: result.stdout) {
+            return value
+        }
+        if let envelope = decodeErrorEnvelope(result.stdout, decoder)
+            ?? decodeErrorEnvelope(result.stderr, decoder) {
+            if let pushError = Self.mapPushError(envelope) {
+                throw pushError
+            }
+            throw Self.mapError(envelope)
+        }
+        if result.exitCode == 0 {
+            throw GitServiceError.transport(
+                message: "could not decode \(T.self) from opensks git output"
+            )
+        }
+        let stderrText = String(decoding: result.stderr, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        throw GitServiceError.service(
+            message: stderrText.isEmpty
+                ? "opensks git exited \(result.exitCode)"
+                : "opensks git exited \(result.exitCode): \(stderrText)"
+        )
+    }
+
+    /// Map a decoded `opensks.git-error.v1` to a typed PUSH error, or nil when the
+    /// code is not a push code (the caller then falls back to `mapError`).
+    static func mapPushError(_ envelope: GitErrorEnvelope) -> GitPushError? {
+        switch envelope.error.code {
+        case "digest_mismatch":
+            return .digestMismatch
+        case "no_matching_approval":
+            return .noMatchingApproval
+        case "protected_branch":
+            return .protectedBranch
+        case "push_failed":
+            return .pushFailed(message: envelope.error.message)
+        default:
+            return nil
+        }
+    }
 }
 
 // MARK: - Mock implementation (tests)
 
 /// An in-memory git service for tests. Returns canned reads + scriptable LOCAL
-/// mutations and COUNTS each call so the store's debounce + mutation flow can be
-/// asserted (rapid triggers coalesce; a switch is/ isn't blocked; a commit goes
-/// stale on `index_changed`). It NEVER touches disk or spawns a process, and it
-/// has NO push entry point — the mutation surface here is local-only.
+/// mutations + a scriptable PUSH flow, and COUNTS each call so the store's
+/// debounce + mutation + push flow can be asserted (rapid triggers coalesce; a
+/// switch is/ isn't blocked; a commit goes stale on `index_changed`; a push stays
+/// pending until approved and is NEVER executed before approval; a digest
+/// mismatch / protected branch / failed push behave per the contract). It NEVER
+/// touches disk, spawns a process, or contacts a remote — `push-execute` records
+/// a synthetic receipt — so tests are hermetic.
 final class MockGitService: GitService, @unchecked Sendable {
     private let lock = NSLock()
     private var cannedStatus: GitStatus
@@ -326,6 +451,54 @@ final class MockGitService: GitService, @unchecked Sendable {
     private(set) var switchCalls: [(target: String, force: Bool)] = []
     private(set) var commitPreviewCallCount = 0
     private(set) var commitCalls: [(message: String, expectedIndexHash: String)] = []
+
+    // MARK: Push scripting + call records (PR-036)
+
+    /// The intent the next `pushEnqueue(...)` returns. When nil, the mock
+    /// synthesizes a deterministic intent from the remote + ref.
+    private var cannedPushIntent: GitPushIntent?
+    /// When true, the NEXT `pushApprove(...)` throws `.digestMismatch` regardless
+    /// of the supplied digest (the live index/ref moved out from under the
+    /// reviewed effect). Cleared after firing once.
+    private var failNextApproveDigestMismatch = false
+    /// When true, the NEXT `pushExecute(...)` throws `.pushFailed` (e.g. an
+    /// unreachable remote). The local commit + the pending intent are preserved.
+    /// Cleared after firing once.
+    private var failNextExecutePushFailed = false
+    /// The message carried by a scripted `.pushFailed`.
+    private var pushFailedMessage: String? = "remote unreachable"
+    /// Intent ids that have a recorded matching approval (set by `pushApprove`).
+    private var approvedIntentIds: Set<String> = []
+    /// The digest recorded at approval time per intent (execute refuses if the
+    /// intent's CURRENT digest differs — i.e. it moved after approval).
+    private var approvedDigestByIntent: [String: String] = [:]
+    /// The CURRENT digest per enqueued intent (so a test can move it after
+    /// approval to drive an execute-time `.digestMismatch`).
+    private var currentDigestByIntent: [String: String] = [:]
+    /// Intent ids that have already completed a push (drives idempotent
+    /// `alreadyDone:true` on a repeat execute).
+    private var completedIntentIds: Set<String> = []
+    /// The remote oid a completed push landed at, per intent.
+    private var completedRemoteOidByIntent: [String: String] = [:]
+    /// The scriptable push-status snapshot (what `pushStatus()` returns), e.g. to
+    /// simulate state recovered from SQLite after relaunch.
+    private var cannedPushStatus: GitPushStatus?
+
+    /// The strict, GLOBALLY-ORDERED log of push steps the mock saw. A test asserts
+    /// no `.execute` precedes its `.approve` for the same intent — proving the push
+    /// is never executed before it is approved.
+    enum PushStep: Equatable {
+        case enqueue(remote: String, ref: String)
+        case approve(intentId: String, digest: String, ackProtected: Bool)
+        case execute(intentId: String)
+        case status
+    }
+    private(set) var pushSteps: [PushStep] = []
+
+    private(set) var pushEnqueueCalls: [(remote: String, ref: String)] = []
+    private(set) var pushApproveCalls: [(intentId: String, digest: String, ackProtected: Bool)] = []
+    private(set) var pushExecuteCalls: [String] = []
+    private(set) var pushStatusCallCount = 0
 
     init(
         status: GitStatus = .empty,
@@ -394,6 +567,46 @@ final class MockGitService: GitService, @unchecked Sendable {
         cannedCommitResult = result
     }
 
+    // MARK: Push scripting (PR-036)
+
+    /// Script the intent the next `pushEnqueue(...)` returns (e.g. a protected
+    /// branch, or a specific digest). The mock tracks this intent's current digest
+    /// so a later `moveDigest` can drive an execute-time mismatch.
+    func setPushIntent(_ intent: GitPushIntent) {
+        lock.lock(); defer { lock.unlock() }
+        cannedPushIntent = intent
+        currentDigestByIntent[intent.intentId] = intent.effectDigest
+    }
+
+    /// Arm the NEXT `pushApprove(...)` to throw `.digestMismatch` once (the
+    /// supplied digest no longer matches the intent's current digest).
+    func armDigestMismatchOnNextApprove() {
+        lock.lock(); defer { lock.unlock() }
+        failNextApproveDigestMismatch = true
+    }
+
+    /// Arm the NEXT `pushExecute(...)` to throw `.pushFailed` once (the remote was
+    /// unreachable). The local commit + pending intent are preserved for retry.
+    func armPushFailedOnNextExecute(message: String? = "remote unreachable") {
+        lock.lock(); defer { lock.unlock() }
+        failNextExecutePushFailed = true
+        pushFailedMessage = message
+    }
+
+    /// Move an intent's CURRENT digest after approval so a later `pushExecute`
+    /// throws `.digestMismatch` (the reviewed effect changed since approval).
+    func moveDigest(forIntent intentId: String, to digest: String) {
+        lock.lock(); defer { lock.unlock() }
+        currentDigestByIntent[intentId] = digest
+    }
+
+    /// Script the push-status snapshot returned by `pushStatus()` (e.g. to model
+    /// state recovered from SQLite after a relaunch).
+    func setPushStatus(_ status: GitPushStatus) {
+        lock.lock(); defer { lock.unlock() }
+        cannedPushStatus = status
+    }
+
     // MARK: GitService (read-only)
     //
     // Each method takes its lock in a fully-scoped SYNCHRONOUS critical section
@@ -447,6 +660,29 @@ final class MockGitService: GitService, @unchecked Sendable {
 
     func commit(message: String, expectedIndexHash: String) async throws -> GitCommitResult {
         try commitLocked(message: message, expectedIndexHash: expectedIndexHash)
+    }
+
+    // MARK: GitService (push flow, PR-036)
+    //
+    // The mock NEVER contacts a remote: `pushExecute` records a synthetic receipt.
+    // Each step records itself in the GLOBALLY-ORDERED `pushSteps` log so a test
+    // can assert the strict enqueue → approve → execute ordering (no execute
+    // before approve), and scripted failures surface as thrown `GitPushError`s.
+
+    func pushEnqueue(remote: String, ref: String) async throws -> GitPushIntent {
+        pushEnqueueLocked(remote: remote, ref: ref)
+    }
+
+    func pushApprove(intentId: String, effectDigest: String, ackProtected: Bool) async throws -> GitPushApproval {
+        try pushApproveLocked(intentId: intentId, effectDigest: effectDigest, ackProtected: ackProtected)
+    }
+
+    func pushExecute(intentId: String) async throws -> GitPushReceipt {
+        try pushExecuteLocked(intentId: intentId)
+    }
+
+    func pushStatus() async throws -> GitPushStatus {
+        pushStatusLocked()
     }
 
     // MARK: Synchronous critical sections
@@ -528,6 +764,112 @@ final class MockGitService: GitService, @unchecked Sendable {
             commit: "deadbeefcafef00d",
             paths: cannedPreview.stagedPaths
         )
+    }
+
+    // MARK: Push critical sections (PR-036)
+
+    private func pushEnqueueLocked(remote: String, ref: String) -> GitPushIntent {
+        lock.lock(); defer { lock.unlock() }
+        pushEnqueueCalls.append((remote: remote, ref: ref))
+        pushSteps.append(.enqueue(remote: remote, ref: ref))
+        let intent: GitPushIntent
+        if let canned = cannedPushIntent {
+            intent = canned
+        } else {
+            intent = GitPushIntent(
+                intentId: "intent-\(pushEnqueueCalls.count)",
+                effectDigest: "digest-\(remote)-\(ref)",
+                remote: remote,
+                remoteUrlRedacted: "https://\(remote).example/<redacted>.git",
+                ref: ref,
+                localOid: "feedface00000000feedface00000000feedface",
+                remoteExpectedOid: nil,
+                protected: false
+            )
+        }
+        // Track the intent's current digest so a later approval/execute can detect
+        // a moved effect.
+        if currentDigestByIntent[intent.intentId] == nil {
+            currentDigestByIntent[intent.intentId] = intent.effectDigest
+        }
+        return intent
+    }
+
+    private func pushApproveLocked(intentId: String, effectDigest: String, ackProtected: Bool) throws -> GitPushApproval {
+        lock.lock(); defer { lock.unlock() }
+        pushApproveCalls.append((intentId: intentId, digest: effectDigest, ackProtected: ackProtected))
+        pushSteps.append(.approve(intentId: intentId, digest: effectDigest, ackProtected: ackProtected))
+        // A scripted one-shot mismatch (the index/ref moved out from under the
+        // reviewed effect). Records NO usable approval.
+        if failNextApproveDigestMismatch {
+            failNextApproveDigestMismatch = false
+            throw GitPushError.digestMismatch
+        }
+        // The supplied digest must match the intent's CURRENT digest.
+        if let current = currentDigestByIntent[intentId], current != effectDigest {
+            throw GitPushError.digestMismatch
+        }
+        // A protected ref requires the explicit ack (the store gates this too; the
+        // mock enforces it so an un-acked protected approval is refused honestly).
+        if let canned = cannedPushIntent, canned.intentId == intentId, canned.protected, !ackProtected {
+            throw GitPushError.protectedBranch
+        }
+        approvedIntentIds.insert(intentId)
+        approvedDigestByIntent[intentId] = effectDigest
+        return GitPushApproval(
+            approvalId: "approval-\(pushApproveCalls.count)",
+            intentId: intentId,
+            matched: true
+        )
+    }
+
+    private func pushExecuteLocked(intentId: String) throws -> GitPushReceipt {
+        lock.lock(); defer { lock.unlock() }
+        pushExecuteCalls.append(intentId)
+        pushSteps.append(.execute(intentId: intentId))
+        // Idempotent: a repeat execute with the same evidence reports already_done
+        // and pushes exactly once.
+        if completedIntentIds.contains(intentId) {
+            return GitPushReceipt(
+                pushed: true,
+                remoteOid: completedRemoteOidByIntent[intentId] ?? "",
+                idempotencyKey: "idem-\(intentId)",
+                alreadyDone: true
+            )
+        }
+        // Refuse without a recorded matching approval.
+        guard approvedIntentIds.contains(intentId) else {
+            throw GitPushError.noMatchingApproval
+        }
+        // Refuse if the digest changed since approval (the effect moved).
+        if let approved = approvedDigestByIntent[intentId],
+           let current = currentDigestByIntent[intentId],
+           approved != current {
+            throw GitPushError.digestMismatch
+        }
+        // A scripted one-shot push failure (e.g. unreachable remote). The local
+        // commit + the pending intent are preserved (the mock keeps the approval
+        // so a retry can re-execute the same effect).
+        if failNextExecutePushFailed {
+            failNextExecutePushFailed = false
+            throw GitPushError.pushFailed(message: pushFailedMessage)
+        }
+        let remoteOid = "cafe\(String(intentId.suffix(4)))babe0000cafebabe0000cafebabe0000"
+        completedIntentIds.insert(intentId)
+        completedRemoteOidByIntent[intentId] = remoteOid
+        return GitPushReceipt(
+            pushed: true,
+            remoteOid: remoteOid,
+            idempotencyKey: "idem-\(intentId)",
+            alreadyDone: false
+        )
+    }
+
+    private func pushStatusLocked() -> GitPushStatus {
+        lock.lock(); defer { lock.unlock() }
+        pushStatusCallCount += 1
+        pushSteps.append(.status)
+        return cannedPushStatus ?? .empty
     }
 
     private func recordStatusCall() -> UInt64 {

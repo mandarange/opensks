@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PushApproval",
+  "description": "A recorded approval for a specific intent at a specific digest. Only an approval whose `intent_id` and digest still match the intent's *current* digest authorizes a push.",
+  "type": "object",
+  "required": [
+    "approval_id",
+    "intent_id",
+    "matched",
+    "schema"
+  ],
+  "properties": {
+    "approval_id": {
+      "type": "string"
+    },
+    "intent_id": {
+      "type": "string"
+    },
+    "matched": {
+      "description": "Always true on a recorded approval; the wire shape carries it explicitly so a future deny path can reuse the contract.",
+      "type": "boolean"
+    },
+    "schema": {
+      "type": "string"
+    }
+  }
+}

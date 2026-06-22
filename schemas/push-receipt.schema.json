@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PushReceipt",
+  "description": "The receipt for an executed push. `already_done` is true when a prior completed receipt with the same idempotency key was reused (the push ran at most once).",
+  "type": "object",
+  "required": [
+    "already_done",
+    "idempotency_key",
+    "pushed",
+    "remote_oid",
+    "schema"
+  ],
+  "properties": {
+    "already_done": {
+      "type": "boolean"
+    },
+    "idempotency_key": {
+      "type": "string"
+    },
+    "pushed": {
+      "type": "boolean"
+    },
+    "remote_oid": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    }
+  }
+}

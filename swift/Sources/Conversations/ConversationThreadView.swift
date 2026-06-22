@@ -116,6 +116,13 @@ struct ConversationThreadView: View {
                     CommitReceiptCard(card: card)
                         .id("commit-\(card.id)")
                 }
+                // PUSH cards posted into this thread (PR-036): a SEPARATE receipt
+                // from the commit card, showing the pushed remote oid. A push card
+                // only appears after the operator approved the exact effect.
+                ForEach(store.pushCards(for: store.selectedConversationID ?? "")) { card in
+                    PushReceiptCard(card: card)
+                        .id("push-\(card.id)")
+                }
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 16)

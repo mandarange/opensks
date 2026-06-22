@@ -36,6 +36,13 @@ final class ConversationStore: ObservableObject {
     // persisted messages, so they never round-trip through the service.
     @Published private(set) var commitCardsByConversation: [String: [GitCommitCard]] = [:]
 
+    // Per-conversation push cards (PR-036). After a SUCCESSFUL approved push the
+    // Git studio posts one of these; the thread renders a `PushReceiptCard` with
+    // the pushed remote oid. Commit and push are SEPARATE receipts: a commit card
+    // can stand while a push card is absent (push pending or failed). Like commit
+    // cards, these are thread-attached UI affordances, never persisted messages.
+    @Published private(set) var pushCardsByConversation: [String: [GitPushCard]] = [:]
+
     // True while a send is in flight for the selected conversation (the
     // composer disables its Send button so one Send starts exactly one run).
     @Published private(set) var isSending = false
@@ -87,6 +94,9 @@ final class ConversationStore: ObservableObject {
     /// Commit cards posted into a conversation (most recent last).
     func commitCards(for id: String) -> [GitCommitCard] { commitCardsByConversation[id] ?? [] }
 
+    /// Push cards posted into a conversation (most recent last).
+    func pushCards(for id: String) -> [GitPushCard] { pushCardsByConversation[id] ?? [] }
+
     /// Post a LOCAL commit card into a conversation thread (PR-035). Records the
     /// commit sha + the EXACT paths committed so the thread renders an honest
     /// receipt. Returns the card. Posting to the currently-selected conversation
@@ -102,6 +112,27 @@ final class ConversationStore: ObservableObject {
             committedAtMs: Int64(Date().timeIntervalSince1970 * 1000)
         )
         commitCardsByConversation[id, default: []].append(card)
+        return card
+    }
+
+    /// Post a push card into a conversation thread (PR-036). Records the pushed
+    /// remote oid + the remote/ref + whether it was idempotently already done, so
+    /// the thread renders an honest push receipt SEPARATE from the commit card.
+    /// Returns the card. Posting to the selected conversation surfaces it
+    /// immediately under the thread's messages.
+    @discardableResult
+    func postPushCard(_ receipt: GitPushReceipt, intent: GitPushIntent, conversationID: String? = nil) -> GitPushCard? {
+        guard let id = conversationID ?? selectedConversationID else { return nil }
+        let card = GitPushCard(
+            id: UUID().uuidString,
+            remote: intent.remote,
+            ref: intent.ref,
+            remoteOid: receipt.remoteOid,
+            localOid: intent.localOid,
+            alreadyDone: receipt.alreadyDone,
+            pushedAtMs: Int64(Date().timeIntervalSince1970 * 1000)
+        )
+        pushCardsByConversation[id, default: []].append(card)
         return card
     }
 
@@ -292,6 +323,7 @@ final class ConversationStore: ObservableObject {
             drafts[id] = nil
             runsByConversation[id] = nil
             commitCardsByConversation[id] = nil
+            pushCardsByConversation[id] = nil
             if selectedConversationID == id {
                 selectedConversationID = nil
                 messages = []

@@ -1611,6 +1611,7 @@ pub mod conversation;
 pub mod file;
 pub mod git;
 pub mod git_mutation;
+pub mod git_push;
 pub mod project;
 pub mod projection;
 pub mod stream;
@@ -1638,6 +1639,11 @@ pub use git_mutation::{
     GitCommit, GitCommitPreview, GitCreateBranch, GitMutationError, GitMutationErrorBody,
     GitMutationErrorCode, GitStageRejectReason, GitStageRejection, GitStageResult, GitSwitch,
     GitSwitchBlocker, GitSwitchBlockerKind, GitSwitchPreflight, GitUnstageResult,
+};
+pub use git_push::{
+    PUSH_APPROVAL_SCHEMA, PUSH_ERROR_SCHEMA, PUSH_INTENT_SCHEMA, PUSH_RECEIPT_SCHEMA,
+    PUSH_STATUS_SCHEMA, PushApproval, PushError, PushErrorBody, PushErrorCode, PushIntent,
+    PushReceipt, PushStatus,
 };
 pub use project::{PROJECT_SUMMARY_SCHEMA, ProjectSummary};
 pub use projection::{
@@ -1867,6 +1873,26 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "git-mutation-error.schema.json",
             serde_json::to_string_pretty(&schema_for!(GitMutationError))?,
+        ),
+        (
+            "push-intent.schema.json",
+            serde_json::to_string_pretty(&schema_for!(PushIntent))?,
+        ),
+        (
+            "push-approval.schema.json",
+            serde_json::to_string_pretty(&schema_for!(PushApproval))?,
+        ),
+        (
+            "push-receipt.schema.json",
+            serde_json::to_string_pretty(&schema_for!(PushReceipt))?,
+        ),
+        (
+            "push-status.schema.json",
+            serde_json::to_string_pretty(&schema_for!(PushStatus))?,
+        ),
+        (
+            "push-error.schema.json",
+            serde_json::to_string_pretty(&schema_for!(PushError))?,
         ),
     ])
 }

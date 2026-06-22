@@ -13,7 +13,10 @@
 //     succeeds and the receipt lists exactly the staged paths;
 //   • the commit receipt / conversation commit card render (ImageRenderer
 //     non-nil) and fill width at 1024 / 1440 (no letterbox);
-//   • there is NO push method on GitService — the surface is read-only-plus-LOCAL.
+//   • the GitService surface is reads + LOCAL mutations + the EXPLICITLY-APPROVED
+//     push flow (PR-036): push exists only as enqueue → approve → execute (+
+//     status), never as a bare silent push. (The push flow itself is covered in
+//     PushOutboxTests.)
 
 import SwiftUI
 import XCTest
@@ -377,14 +380,18 @@ final class GitCommitTests: XCTestCase {
         }
     }
 
-    // MARK: - No push: surface is read-only-plus-LOCAL
+    // MARK: - Surface: reads + LOCAL mutations + the EXPLICITLY-APPROVED push
 
     /// Enumerate the ENTIRE callable surface of `GitService` through a mock that
     /// records every call. After exercising every method, the recorded calls are
-    /// exactly the reads + the LOCAL mutations — there is no push entry point. A
-    /// push method would have to be added to the protocol (and witnessed here);
-    /// it is not, and this test pins that surface.
-    func testGitServiceHasNoPushOnlyReadsAndLocalMutations() async throws {
+    /// exactly the reads + the LOCAL mutations (PR-035) + the push flow (PR-036).
+    ///
+    /// PR-036 added push, but ONLY as the explicitly-approved multi-step flow:
+    /// there is NO single "push" verb that pushes silently — a push is ENQUEUED,
+    /// then APPROVED against the exact effect, then EXECUTED. This test pins that
+    /// shape: the only push entry points are push-enqueue / push-approve /
+    /// push-execute / push-status, and the mock never exposes a bare `push`.
+    func testGitServiceSurfaceIsReadsLocalMutationsAndApprovedPush() async throws {
         let service: GitService = MockGitService(
             status: GitStatus(inRepo: true, branch: "main"),
             branches: GitBranches(current: "main", branches: []),
@@ -405,10 +412,15 @@ final class GitCommitTests: XCTestCase {
         _ = try await service.commitPreview()
         mock.setCommitPreview(GitCommitPreview(indexHash: "", stagedPaths: [], hasStaged: false))
         _ = try? await service.commit(message: "m", expectedIndexHash: "")
+        // The push flow — explicit enqueue → approve → execute (+ status).
+        let intent = try await service.pushEnqueue(remote: "origin", ref: "feature")
+        _ = try await service.pushApprove(
+            intentId: intent.intentId, effectDigest: intent.effectDigest, ackProtected: false
+        )
+        _ = try await service.pushExecute(intentId: intent.intentId)
+        _ = try await service.pushStatus()
 
-        // Exactly the reads + local mutations were exercised — and the mock has no
-        // push method to call (this file would not compile if `push` existed and
-        // we tried to assert against it).
+        // Exactly the reads + local mutations + the push steps were exercised.
         XCTAssertEqual(mock.statusCallCount, 1)
         XCTAssertEqual(mock.branchesCallCount, 1)
         XCTAssertEqual(mock.diffCallCount, 1)
@@ -418,12 +430,26 @@ final class GitCommitTests: XCTestCase {
         XCTAssertEqual(mock.createBranchCalls.count, 1)
         XCTAssertEqual(mock.switchCalls.count, 1)
         XCTAssertGreaterThanOrEqual(mock.commitPreviewCallCount, 1)
+        XCTAssertEqual(mock.pushEnqueueCalls.count, 1)
+        XCTAssertEqual(mock.pushApproveCalls.count, 1)
+        XCTAssertEqual(mock.pushExecuteCalls.count, 1)
+        XCTAssertEqual(mock.pushStatusCallCount, 1)
 
-        // Reflect over the protocol witness: the mock exposes no member whose name
-        // mentions "push". (A belt-and-suspenders guard alongside the compile-time
-        // protocol surface.)
-        let mirrorNames = Mirror(reflecting: mock).children.compactMap { $0.label?.lowercased() }
-        XCTAssertFalse(mirrorNames.contains { $0.contains("push") },
-                       "GitService / its mock must expose no push surface")
+        // The push surface is the APPROVED flow only — there is no bare "push"
+        // method that pushes silently. The execute step ran only AFTER an approve
+        // for the same intent (the no-silent-push invariant), and the recorded
+        // step log proves the enqueue → approve → execute ordering.
+        let steps = mock.pushSteps
+        let approveIndex = steps.firstIndex { step in
+            if case .approve(let id, _, _) = step { return id == intent.intentId }
+            return false
+        }
+        let executeIndex = steps.firstIndex { step in
+            if case .execute(let id) = step { return id == intent.intentId }
+            return false
+        }
+        let ai = try XCTUnwrap(approveIndex, "the push was approved")
+        let ei = try XCTUnwrap(executeIndex, "the push was executed")
+        XCTAssertLessThan(ai, ei, "execute must follow approve — no silent push")
     }
 }
