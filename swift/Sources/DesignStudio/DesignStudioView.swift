@@ -335,6 +335,10 @@ struct TokenEditorView: View {
         let tokens = store.tokenDraftsByPackage[package.packageId] ?? package.tokens
         ScrollView {
             LazyVStack(alignment: .leading, spacing: Theme.s6) {
+                toolbar
+                if let compile = store.compileByPackage[package.packageId] {
+                    compileStatus(compile)
+                }
                 HStack {
                     Text("Tokens")
                         .font(Theme.ui(11, .semibold))
@@ -361,6 +365,8 @@ struct TokenEditorView: View {
                             }
                         )
                     }
+                    Divider().overlay(Theme.stroke).padding(.vertical, Theme.s8)
+                    DesignTokenPreview(tokens: tokens)
                 }
             }
             .padding(Theme.s16)
@@ -368,6 +374,175 @@ struct TokenEditorView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityIdentifier("design.studio.tokens")
+    }
+
+    /// Save / Compile actions + the save/dirty status (DESIGN-002). Save persists
+    /// the draft to disk; Compile validates it in isolation; applying to the app is
+    /// the header's audit-gated Activate.
+    private var toolbar: some View {
+        HStack(spacing: Theme.s8) {
+            Button {
+                Task { await store.saveDraft(package: package.packageId) }
+            } label: {
+                Label("Save Draft", systemImage: "tray.and.arrow.down")
+            }
+            .buttonStyle(.primaryAction)
+            .frame(maxWidth: 150)
+            .disabled(store.isBusy || !store.dirtyPackages.contains(package.packageId))
+            .accessibilityIdentifier("design.studio.save-tokens")
+            .help("Persist the edited token values to this package's tokens.json.")
+
+            Button {
+                Task { await store.compile(package: package.packageId) }
+            } label: {
+                Label("Compile", systemImage: "hammer")
+            }
+            .buttonStyle(.secondaryAction)
+            .frame(maxWidth: 130)
+            .disabled(store.isBusy)
+            .accessibilityIdentifier("design.studio.compile-tokens")
+            .help("Validate the tokens compile, without activating them.")
+
+            if store.dirtyPackages.contains(package.packageId) {
+                Label("Unsaved edits", systemImage: "pencil.circle.fill")
+                    .font(Theme.ui(10.5, .semibold))
+                    .foregroundStyle(Theme.coral)
+                    .accessibilityIdentifier("design.studio.tokens-dirty")
+            } else if let save = store.lastSave, save.packageId == package.packageId {
+                Label(save.summary, systemImage: "checkmark.circle")
+                    .font(Theme.ui(10.5))
+                    .foregroundStyle(Theme.muted)
+                    .accessibilityIdentifier("design.studio.tokens-saved")
+            }
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.bottom, 2)
+        .accessibilityIdentifier("design.studio.tokens-toolbar")
+    }
+
+    private func compileStatus(_ compile: DesignCompileResult) -> some View {
+        HStack(spacing: Theme.s8) {
+            Image(systemName: compile.ok ? "checkmark.seal.fill" : "xmark.octagon.fill")
+                .foregroundStyle(compile.ok ? Theme.accent : Theme.coral)
+            Text(compile.ok
+                ? "Compiles cleanly · \(compile.swiftBytes) bytes generated"
+                : (compile.error ?? "Compile failed"))
+                .font(Theme.ui(11))
+                .foregroundStyle(compile.ok ? Theme.muted : Theme.coral)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+        }
+        .padding(Theme.s10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                .fill(Theme.panel)
+        )
+        .accessibilityIdentifier("design.studio.compile-status")
+    }
+}
+
+// MARK: - Live token preview (§16.4)
+
+/// A sandboxed preview of the DRAFT token values: it renders sample surfaces and a
+/// colour-swatch grid using the edited values DIRECTLY (not the global app Theme),
+/// so the operator sees the effect of edits before applying via Activate.
+private struct DesignTokenPreview: View {
+    let tokens: [DesignTokenEntry]
+
+    private func value(_ path: String, _ fallback: String) -> String {
+        tokens.first { $0.path == path }?.value ?? fallback
+    }
+    private func color(_ path: String, _ fallback: String) -> Color {
+        Color(hex: value(path, fallback))
+    }
+
+    var body: some View {
+        let colorTokens = tokens.filter { $0.isColor }
+        VStack(alignment: .leading, spacing: Theme.s10) {
+            Text("Live Preview")
+                .font(Theme.ui(11, .semibold))
+                .foregroundStyle(Theme.muted)
+
+            sampleSurface
+
+            if !colorTokens.isEmpty {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 130), spacing: Theme.s8)],
+                    alignment: .leading,
+                    spacing: Theme.s8
+                ) {
+                    ForEach(colorTokens) { token in
+                        HStack(spacing: 6) {
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(Color(hex: token.value))
+                                .frame(width: 16, height: 16)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        .strokeBorder(Theme.stroke, lineWidth: 1)
+                                )
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(token.path)
+                                    .font(Theme.mono(9))
+                                    .foregroundStyle(Theme.textSoft)
+                                    .lineLimit(1)
+                                Text(token.value)
+                                    .font(Theme.mono(8.5))
+                                    .foregroundStyle(Theme.faint)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+            }
+        }
+        .padding(.top, Theme.s8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityIdentifier("design.studio.token-preview")
+    }
+
+    private var sampleSurface: some View {
+        VStack(alignment: .leading, spacing: Theme.s8) {
+            Text("Aa Sample surface")
+                .font(Theme.ui(13, .semibold))
+                .foregroundStyle(color("color.text.primary", "#E9EDF3"))
+            Text("Secondary text rendered on the draft surface.")
+                .font(Theme.ui(11))
+                .foregroundStyle(color("color.text.secondary", "#BCC4D0"))
+            HStack(spacing: Theme.s8) {
+                Text("Accent")
+                    .font(Theme.ui(11, .semibold))
+                    .foregroundStyle(color("color.canvas", "#0E1015"))
+                    .padding(.horizontal, 12)
+                    .frame(height: 30)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(color("color.accent.primary", "#5EDEC4"))
+                    )
+                Text("Bordered")
+                    .font(Theme.ui(11))
+                    .foregroundStyle(color("color.text.muted", "#7E8796"))
+                    .padding(.horizontal, 12)
+                    .frame(height: 30)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(color("color.border.strong", "#2C313A"), lineWidth: 1)
+                    )
+            }
+        }
+        .padding(Theme.s12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: GeneratedDesignTokens.radiusCard, style: .continuous)
+                .fill(color("color.surface.base", "#13161B"))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: GeneratedDesignTokens.radiusCard, style: .continuous)
+                .strokeBorder(color("color.border.subtle", "#262A32"), lineWidth: 1)
+        )
+        .accessibilityIdentifier("design.studio.token-preview.surface")
     }
 }
 

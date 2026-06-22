@@ -127,10 +127,12 @@ final class AppCoordinator: ObservableObject {
         designImport.rebind(service: LiveDesignImportService(cli: cli, workspace: workspace))
     }
 
-    /// Rebind the Design Studio store to the resolved workspace + bundled CLI and
-    /// re-read the active design package.
+    /// Rebind the Design Studio store to the resolved workspace + bundled CLI,
+    /// re-read the active design package, and load the registry-driven catalog
+    /// (DESIGN-101) so the sidebar reflects the packages actually on disk.
     func bindDesignStudio(cli: URL, workspace: URL) {
         designStudio.rebind(service: LiveDesignStudioService(cli: cli, workspace: workspace))
+        Task { await designStudio.loadRegistryCatalog() }
     }
 
     /// Rebind the Project Intelligence store to the resolved workspace + bundled CLI

@@ -48,8 +48,19 @@ final class DesignStudioStore: ObservableObject {
     @Published private(set) var revisionsByPackage: [String: [DesignRevision]] = [:]
 
     /// The editable token drafts per package id (the Tokens tab edits these). Seeded
-    /// from the catalog package's tokens; edits stay local to the draft.
+    /// from the catalog package's tokens; edits stay local to the draft until saved.
     @Published private(set) var tokenDraftsByPackage: [String: [DesignTokenEntry]] = [:]
+
+    /// Package ids whose draft has unsaved edits (DESIGN-002). Drives the Save
+    /// button's enabled state and a "modified" indicator.
+    @Published private(set) var dirtyPackages: Set<String> = []
+
+    /// The most recent compile result per package id (the Tokens tab shows it so the
+    /// operator sees compile errors before applying).
+    @Published private(set) var compileByPackage: [String: DesignCompileResult] = [:]
+
+    /// The most recent successful save (DESIGN-002), surfaced as a transient status.
+    @Published private(set) var lastSave: DesignSaveResult?
 
     /// True while a service call is in flight (the view dims / disables actions).
     @Published private(set) var isBusy = false
@@ -120,6 +131,18 @@ final class DesignStudioStore: ObservableObject {
     var selectedTokens: [DesignTokenEntry] {
         guard let selectedPackageId else { return [] }
         return tokenDraftsByPackage[selectedPackageId] ?? []
+    }
+
+    /// The most recent compile result for the selected package, if compiled.
+    var selectedCompile: DesignCompileResult? {
+        guard let selectedPackageId else { return nil }
+        return compileByPackage[selectedPackageId]
+    }
+
+    /// True when the selected package's draft has unsaved edits.
+    var isSelectedDirty: Bool {
+        guard let selectedPackageId else { return false }
+        return dirtyPackages.contains(selectedPackageId)
     }
 
     /// True when the given package is the SHOWN active one.
@@ -286,13 +309,77 @@ final class DesignStudioStore: ObservableObject {
 
     // MARK: - Tokens (the Tokens-tab editor)
 
-    /// Edit a token's value in the selected package's draft. The studio is the
-    /// source of truth; this edits the in-UI draft so the editor is live.
+    /// Edit a token's value in the selected package's draft. The edit stays local
+    /// (the draft is marked dirty) until `saveDraft` persists it via the CLI.
     func setTokenValue(_ value: String, forPath path: String, package packageId: String) {
         var drafts = tokenDraftsByPackage[packageId] ?? []
-        if let index = drafts.firstIndex(where: { $0.path == path }) {
+        if let index = drafts.firstIndex(where: { $0.path == path }), drafts[index].value != value {
             drafts[index].value = value
             tokenDraftsByPackage[packageId] = drafts
+            dirtyPackages.insert(packageId)
+            // A new edit invalidates the previous compile/save status.
+            compileByPackage[packageId] = nil
+        }
+    }
+
+    /// Persist the package's edited token draft to disk via `design save-tokens`
+    /// (DESIGN-002). On success the draft is no longer dirty and `lastSave` carries
+    /// the receipt (updated count, any unknown paths skipped).
+    @discardableResult
+    func saveDraft(package packageId: String) async -> DesignSaveResult? {
+        lastError = nil
+        isBusy = true
+        defer { isBusy = false }
+        let tokens = tokenDraftsByPackage[packageId] ?? []
+        do {
+            let result = try await service.saveTokens(packageId: packageId, tokens: tokens)
+            lastSave = result
+            dirtyPackages.remove(packageId)
+            return result
+        } catch {
+            lastError = Self.describe(error)
+            return nil
+        }
+    }
+
+    /// Compile/validate the package's tokens in isolation via `design compile`
+    /// (no activation), so the editor shows compile errors before applying.
+    @discardableResult
+    func compile(package packageId: String) async -> DesignCompileResult? {
+        lastError = nil
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            let result = try await service.compile(packageId: packageId)
+            compileByPackage[packageId] = result
+            return result
+        } catch {
+            lastError = Self.describe(error)
+            return nil
+        }
+    }
+
+    /// Load the registry-driven catalog via `design list` (DESIGN-101): the package
+    /// SET, titles, and active flags come from disk, not a hard-coded seed. Tokens
+    /// already known for a package (from the seed) are preserved so the Tokens tab
+    /// keeps content. A read failure is non-fatal — the existing catalog stays.
+    func loadRegistryCatalog() async {
+        do {
+            let entries = try await service.listPackages()
+            guard !entries.isEmpty else { return }
+            let merged = entries.map { entry -> DesignPackage in
+                let existingTokens = catalog.first { $0.packageId == entry.packageId }?.tokens ?? []
+                return DesignPackage(packageId: entry.packageId, title: entry.title, tokens: existingTokens)
+            }
+            setCatalog(merged)
+            if let activeEntry = entries.first(where: { $0.active }) {
+                active = DesignActiveStatus(
+                    activePackage: activeEntry.packageId,
+                    activatedRevision: active.activatedRevision
+                )
+            }
+        } catch {
+            lastError = Self.describe(error)
         }
     }
 

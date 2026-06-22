@@ -442,6 +442,151 @@ struct DesignStudioErrorEnvelope: Codable, Sendable, Equatable {
     }
 }
 
+// MARK: - Save / compile / list results (PR-056 — DESIGN-002 / DESIGN-101)
+
+/// The result of `opensks design save-tokens …` (`opensks.design-save-tokens.v1`):
+/// how many token paths were updated, which were unknown (reported, never
+/// created), the total token count, and the new content hash of tokens.json.
+struct DesignSaveResult: Codable, Sendable, Equatable {
+    let schema: String
+    let packageId: String
+    let updated: Int
+    let unknownPaths: [String]
+    let total: Int
+    let contentHash: String
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case packageId = "package_id"
+        case updated
+        case unknownPaths = "unknown_paths"
+        case total
+        case contentHash = "content_hash"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try c.decodeIfPresent(String.self, forKey: .schema) ?? "opensks.design-save-tokens.v1"
+        packageId = try c.decodeIfPresent(String.self, forKey: .packageId) ?? ""
+        updated = try c.decodeIfPresent(Int.self, forKey: .updated) ?? 0
+        unknownPaths = try c.decodeIfPresent([String].self, forKey: .unknownPaths) ?? []
+        total = try c.decodeIfPresent(Int.self, forKey: .total) ?? 0
+        contentHash = try c.decodeIfPresent(String.self, forKey: .contentHash) ?? ""
+    }
+
+    init(
+        schema: String = "opensks.design-save-tokens.v1",
+        packageId: String,
+        updated: Int,
+        unknownPaths: [String] = [],
+        total: Int,
+        contentHash: String = ""
+    ) {
+        self.schema = schema
+        self.packageId = packageId
+        self.updated = updated
+        self.unknownPaths = unknownPaths
+        self.total = total
+        self.contentHash = contentHash
+    }
+
+    /// A short human summary for the editor's save status line.
+    var summary: String {
+        let base = "Saved \(updated) token\(updated == 1 ? "" : "s")"
+        return unknownPaths.isEmpty ? base : "\(base) · \(unknownPaths.count) unknown skipped"
+    }
+}
+
+/// The result of `opensks design compile …` (`opensks.design-compile.v1`): whether
+/// the package's tokens compile, the generated Swift byte count, and the compiler
+/// error (if any). Compiling is isolated — it does NOT activate.
+struct DesignCompileResult: Codable, Sendable, Equatable {
+    let schema: String
+    let packageId: String
+    let ok: Bool
+    let swiftBytes: Int
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case packageId = "package_id"
+        case ok
+        case swiftBytes = "swift_bytes"
+        case error
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try c.decodeIfPresent(String.self, forKey: .schema) ?? "opensks.design-compile.v1"
+        packageId = try c.decodeIfPresent(String.self, forKey: .packageId) ?? ""
+        ok = try c.decodeIfPresent(Bool.self, forKey: .ok) ?? false
+        swiftBytes = try c.decodeIfPresent(Int.self, forKey: .swiftBytes) ?? 0
+        error = try c.decodeIfPresent(String.self, forKey: .error)
+    }
+
+    init(
+        schema: String = "opensks.design-compile.v1",
+        packageId: String,
+        ok: Bool,
+        swiftBytes: Int,
+        error: String? = nil
+    ) {
+        self.schema = schema
+        self.packageId = packageId
+        self.ok = ok
+        self.swiftBytes = swiftBytes
+        self.error = error
+    }
+}
+
+/// One entry in `opensks design list` (`opensks.design-package-list.v1`): a package
+/// id, its display title, and whether it is the active package.
+struct DesignPackageListEntry: Codable, Sendable, Equatable {
+    let packageId: String
+    let title: String
+    let active: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case packageId = "package_id"
+        case title
+        case active
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        packageId = try c.decodeIfPresent(String.self, forKey: .packageId) ?? ""
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        active = try c.decodeIfPresent(Bool.self, forKey: .active) ?? false
+    }
+
+    init(packageId: String, title: String, active: Bool) {
+        self.packageId = packageId
+        self.title = title
+        self.active = active
+    }
+}
+
+/// The `opensks design list` envelope wrapping the registry-driven catalog.
+struct DesignPackageList: Codable, Sendable, Equatable {
+    let schema: String
+    let packages: [DesignPackageListEntry]
+
+    enum CodingKeys: String, CodingKey {
+        case schema, packages
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try c.decodeIfPresent(String.self, forKey: .schema) ?? "opensks.design-package-list.v1"
+        packages = try c.decodeIfPresent([DesignPackageListEntry].self, forKey: .packages) ?? []
+    }
+
+    init(schema: String = "opensks.design-package-list.v1", packages: [DesignPackageListEntry]) {
+        self.schema = schema
+        self.packages = packages
+    }
+}
+
 // MARK: - Design token (the Tokens tab editor model)
 
 /// One editable token in the Tokens tab: a dotted `path` (e.g. `color.text.muted`)

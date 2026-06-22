@@ -66,6 +66,27 @@ protocol DesignStudioService: Sendable {
     func rejectRevision(revisionId: String) async throws -> DesignRevision
     /// `opensks design revision-rollback --workspace <p> --revision <id>`.
     func rollbackRevision(revisionId: String) async throws -> DesignRevision
+
+    /// `opensks design save-tokens --workspace <p> --package <id>` (draft JSON on
+    /// stdin). Persists edited token values into the package's tokens.json — only
+    /// existing paths are updated, unknown ones reported (DESIGN-002).
+    func saveTokens(packageId: String, tokens: [DesignTokenEntry]) async throws -> DesignSaveResult
+
+    /// `opensks design compile --workspace <p> --package <id>`. Compiles/validates
+    /// the package's tokens in isolation (no activation), for editor feedback.
+    func compile(packageId: String) async throws -> DesignCompileResult
+
+    /// `opensks design list --workspace <p>`. The registry-driven catalog (DESIGN-101).
+    func listPackages() async throws -> [DesignPackageListEntry]
+}
+
+/// The stdin payload for `design save-tokens`: the edited token paths/values.
+private struct DesignSaveTokensRequest: Encodable {
+    struct Entry: Encodable {
+        let path: String
+        let value: String
+    }
+    let tokens: [Entry]
 }
 
 // MARK: - Live (CLI-backed) implementation
@@ -125,6 +146,32 @@ struct LiveDesignStudioService: DesignStudioService {
         return try Self.decodeOrThrow(result, as: DesignRevision.self)
     }
 
+    func saveTokens(packageId: String, tokens: [DesignTokenEntry]) async throws -> DesignSaveResult {
+        let payload = DesignSaveTokensRequest(
+            tokens: tokens.map { DesignSaveTokensRequest.Entry(path: $0.path, value: $0.value) }
+        )
+        let body = try JSONEncoder().encode(payload)
+        let result = try await run(
+            args: ["design", "save-tokens", "--workspace", workspace.path, "--package", packageId],
+            stdin: body
+        )
+        return try Self.decodeOrThrow(result, as: DesignSaveResult.self)
+    }
+
+    func compile(packageId: String) async throws -> DesignCompileResult {
+        let result = try await run(args: [
+            "design", "compile", "--workspace", workspace.path, "--package", packageId
+        ])
+        return try Self.decodeOrThrow(result, as: DesignCompileResult.self)
+    }
+
+    func listPackages() async throws -> [DesignPackageListEntry] {
+        let result = try await run(args: [
+            "design", "list", "--workspace", workspace.path
+        ])
+        return try Self.decodeOrThrow(result, as: DesignPackageList.self).packages
+    }
+
     // MARK: Process plumbing (mirrors LiveGitService / LiveDesignImportService)
 
     private struct ProcessResult {
@@ -136,13 +183,14 @@ struct LiveDesignStudioService: DesignStudioService {
     /// Shared child-process runner (concurrent drain + cancel-kill, §19.2).
     private let supervisor = ProcessSupervisor()
 
-    private func run(args: [String]) async throws -> ProcessResult {
+    private func run(args: [String], stdin: Data? = nil) async throws -> ProcessResult {
         do {
             let result = try await supervisor.run(
                 ProcessSupervisor.Spec(
                     executable: cli,
                     arguments: args,
-                    workingDirectory: workspace
+                    workingDirectory: workspace,
+                    stdin: stdin
                 )
             )
             return ProcessResult(
@@ -252,6 +300,11 @@ final class MockDesignStudioService: DesignStudioService, @unchecked Sendable {
     private(set) var acceptCalls: [String] = []
     private(set) var rejectCalls: [String] = []
     private(set) var rollbackCalls: [String] = []
+    private(set) var saveCalls: [(packageId: String, tokens: [DesignTokenEntry])] = []
+    private(set) var compileCalls: [String] = []
+    private(set) var listCallCount = 0
+    /// The packages the registry listing returns (settable per test).
+    private var registryPackages: [DesignPackageListEntry] = []
 
     init() {}
 
@@ -305,6 +358,36 @@ final class MockDesignStudioService: DesignStudioService, @unchecked Sendable {
 
     func rollbackRevision(revisionId: String) async throws -> DesignRevision {
         transitionLocked(revisionId: revisionId, to: .rolledBack, record: { self.rollbackCalls.append($0) })
+    }
+
+    /// Seed the packages the registry listing returns (DESIGN-101 test setup).
+    func setRegistryPackages(_ packages: [DesignPackageListEntry]) {
+        lock.lock(); defer { lock.unlock() }
+        registryPackages = packages
+    }
+
+    func saveTokens(packageId: String, tokens: [DesignTokenEntry]) async throws -> DesignSaveResult {
+        lock.lock(); defer { lock.unlock() }
+        saveCalls.append((packageId: packageId, tokens: tokens))
+        return DesignSaveResult(
+            packageId: packageId,
+            updated: tokens.count,
+            unknownPaths: [],
+            total: tokens.count,
+            contentHash: "mock"
+        )
+    }
+
+    func compile(packageId: String) async throws -> DesignCompileResult {
+        lock.lock(); defer { lock.unlock() }
+        compileCalls.append(packageId)
+        return DesignCompileResult(packageId: packageId, ok: true, swiftBytes: 100, error: nil)
+    }
+
+    func listPackages() async throws -> [DesignPackageListEntry] {
+        lock.lock(); defer { lock.unlock() }
+        listCallCount += 1
+        return registryPackages
     }
 
     // MARK: Synchronous critical sections

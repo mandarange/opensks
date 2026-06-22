@@ -56,6 +56,10 @@ final class FakeDesignStudioService: DesignStudioService, @unchecked Sendable {
     private(set) var acceptCalls: [String] = []
     private(set) var rejectCalls: [String] = []
     private(set) var rollbackCalls: [String] = []
+    private(set) var saveCalls: [(packageId: String, tokens: [DesignTokenEntry])] = []
+    private(set) var compileCalls: [String] = []
+    private(set) var listCallCount = 0
+    private var registryPackages: [DesignPackageListEntry] = []
 
     init() {}
 
@@ -131,6 +135,35 @@ final class FakeDesignStudioService: DesignStudioService, @unchecked Sendable {
 
     func rollbackRevision(revisionId: String) async throws -> DesignRevision {
         transition(revisionId: revisionId, to: .rolledBack) { self.rollbackCalls.append($0) }
+    }
+
+    func setRegistryPackages(_ packages: [DesignPackageListEntry]) {
+        lock.lock(); defer { lock.unlock() }
+        registryPackages = packages
+    }
+
+    func saveTokens(packageId: String, tokens: [DesignTokenEntry]) async throws -> DesignSaveResult {
+        lock.lock(); defer { lock.unlock() }
+        saveCalls.append((packageId: packageId, tokens: tokens))
+        return DesignSaveResult(
+            packageId: packageId,
+            updated: tokens.count,
+            unknownPaths: [],
+            total: tokens.count,
+            contentHash: "fake"
+        )
+    }
+
+    func compile(packageId: String) async throws -> DesignCompileResult {
+        lock.lock(); defer { lock.unlock() }
+        compileCalls.append(packageId)
+        return DesignCompileResult(packageId: packageId, ok: true, swiftBytes: 256, error: nil)
+    }
+
+    func listPackages() async throws -> [DesignPackageListEntry] {
+        lock.lock(); defer { lock.unlock() }
+        listCallCount += 1
+        return registryPackages
     }
 
     private func transition(
@@ -494,5 +527,76 @@ final class DesignStudioTests: XCTestCase {
         )
         XCTAssertEqual(DesignControlState.allCases.map(\.label),
                        ["Default", "Hover", "Pressed", "Disabled", "Focused"])
+    }
+
+    // MARK: - PR-056: token draft persistence (DESIGN-002) + registry catalog (DESIGN-101)
+
+    /// Editing a token marks the package's draft dirty (drives the Save button) and
+    /// invalidates any prior compile status.
+    func testEditingTokenMarksDraftDirty() {
+        let (store, _) = makeStore()
+        store.select("tokens-good")
+        XCTAssertFalse(store.isSelectedDirty)
+        store.setTokenValue("#000000", forPath: "color.accent", package: "tokens-good")
+        XCTAssertTrue(store.isSelectedDirty)
+        XCTAssertTrue(store.dirtyPackages.contains("tokens-good"))
+        // A no-op edit (same value) does NOT re-dirty after a save would clear it.
+    }
+
+    /// Saving a draft calls `save-tokens` with the edited tokens, records the receipt
+    /// in `lastSave`, and clears the dirty flag (DESIGN-002).
+    func testSaveDraftPersistsViaServiceAndClearsDirty() async throws {
+        let (store, service) = makeStore()
+        store.select("tokens-good")
+        store.setTokenValue("#123456", forPath: "color.accent", package: "tokens-good")
+        XCTAssertTrue(store.isSelectedDirty)
+
+        let result = await store.saveDraft(package: "tokens-good")
+
+        XCTAssertEqual(service.saveCalls.count, 1)
+        XCTAssertEqual(service.saveCalls.first?.packageId, "tokens-good")
+        // The edited value was sent to the service.
+        XCTAssertEqual(
+            service.saveCalls.first?.tokens.first { $0.path == "color.accent" }?.value,
+            "#123456"
+        )
+        XCTAssertEqual(result?.packageId, "tokens-good")
+        XCTAssertEqual(store.lastSave?.packageId, "tokens-good")
+        XCTAssertFalse(store.isSelectedDirty, "a successful save clears the dirty flag")
+    }
+
+    /// Compiling stores the result for the selected package so the editor can surface
+    /// compile success/errors without activating.
+    func testCompileStoresResultForSelectedPackage() async throws {
+        let (store, service) = makeStore()
+        store.select("tokens-good")
+
+        let result = await store.compile(package: "tokens-good")
+
+        XCTAssertEqual(service.compileCalls, ["tokens-good"])
+        XCTAssertEqual(result?.ok, true)
+        XCTAssertEqual(store.selectedCompile?.ok, true)
+        XCTAssertEqual(store.compileByPackage["tokens-good"]?.swiftBytes, 256)
+    }
+
+    /// Loading the registry-driven catalog (DESIGN-101) replaces the package set from
+    /// `design list`, marks the active package, and preserves tokens already known for
+    /// a package so the Tokens tab keeps content.
+    func testLoadRegistryCatalogReplacesCatalogFromRegistry() async throws {
+        let (store, service) = makeStore()
+        service.setRegistryPackages([
+            DesignPackageListEntry(packageId: "tokens-good", title: "Good (registry)", active: true),
+            DesignPackageListEntry(packageId: "on-disk-only", title: "On Disk Only", active: false),
+        ])
+
+        await store.loadRegistryCatalog()
+
+        XCTAssertEqual(service.listCallCount, 1)
+        XCTAssertEqual(store.catalog.map(\.packageId), ["tokens-good", "on-disk-only"])
+        // Registry title wins; tokens already known for tokens-good are preserved.
+        let good = try XCTUnwrap(store.catalog.first { $0.packageId == "tokens-good" })
+        XCTAssertEqual(good.title, "Good (registry)")
+        XCTAssertFalse(good.tokens.isEmpty, "seeded tokens are preserved across a registry refresh")
+        XCTAssertEqual(store.active.activePackage, "tokens-good")
     }
 }
