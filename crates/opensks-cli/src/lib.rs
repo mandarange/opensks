@@ -160,6 +160,32 @@ pub fn daemon_usage() -> &'static str {
     "usage: opensks daemon --stdio --workspace <path>\n"
 }
 
+/// `opensks capability report [--json]` / `opensks capability matrix` — emit the
+/// machine-readable runtime capability report (recovery directive §18.4) so CI,
+/// the app, and the generated truth matrix all read one honest source. The
+/// report is workspace-independent (the baseline maturity of each capability).
+pub fn run_capability_command(args: &[String], _cwd: &Path) -> Result<CliOutput, CliError> {
+    let subcommand = args.first().map(String::as_str).unwrap_or("report");
+    let report = opensks_contracts::baseline_capability_report();
+    match subcommand {
+        "report" => {
+            // JSON is the contract for §18.4; `--json` (if present) is implied.
+            let json = serde_json::to_string_pretty(&report).map_err(|error| {
+                CliError::Invalid(format!("serialize capability report: {error}"))
+            })?;
+            Ok(CliOutput {
+                stdout: format!("{json}\n"),
+            })
+        }
+        "matrix" => Ok(CliOutput {
+            stdout: report.render_truth_matrix_markdown(),
+        }),
+        other => Err(CliError::Usage(format!(
+            "unknown capability subcommand `{other}`\n\nusage: opensks capability report [--json]\n       opensks capability matrix\n"
+        ))),
+    }
+}
+
 pub fn run_history_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
     let subcommand = args
         .first()
@@ -5990,6 +6016,25 @@ mod tests {
         assert!(bad.is_err(), "invalid settings json must be rejected");
 
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn capability_report_emits_valid_json_and_matrix() {
+        let cwd = std::env::temp_dir();
+        let out = run_capability_command(&["report".to_string()], &cwd).expect("report");
+        let report: opensks_contracts::RuntimeCapabilityReport =
+            serde_json::from_str(&out.stdout).expect("valid json capability report");
+        report.validate().expect("report internally valid");
+        assert!(
+            report
+                .capabilities
+                .iter()
+                .any(|c| c.id == "agent.local_test_edit"),
+            "report must include known capabilities"
+        );
+        let matrix = run_capability_command(&["matrix".to_string()], &cwd).expect("matrix");
+        assert!(matrix.stdout.contains("Runtime Truth Matrix"));
+        assert!(run_capability_command(&["nope".to_string()], &cwd).is_err());
     }
 
     // --- file verb ---------------------------------------------------------

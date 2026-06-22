@@ -645,6 +645,7 @@ where
         "bench" => run_bench_command(&args[1..], cwd),
         "auth" => run_auth_command(&args[1..], cwd),
         "provider" => run_provider_command(&args[1..], cwd),
+        "capability" => run_capability_command(&args[1..], cwd),
         "daemon" => run_daemon_command(&args[1..], cwd),
         "updater" => run_updater_command(&args[1..], cwd),
         "acceptance" => run_acceptance_command(&args[1..], cwd),
@@ -1793,6 +1794,13 @@ fn run_scheduler_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenS
 
 fn run_perf_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
     let output = opensks_cli::run_perf_command(args, cwd).map_err(convert_cli_error)?;
+    Ok(CliOutput {
+        stdout: output.stdout,
+    })
+}
+
+fn run_capability_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
+    let output = opensks_cli::run_capability_command(args, cwd).map_err(convert_cli_error)?;
     Ok(CliOutput {
         stdout: output.stdout,
     })
