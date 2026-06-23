@@ -224,9 +224,20 @@ pub fn baseline_capability_report() -> RuntimeCapabilityReport {
             capability(
                 "agent.code_edit",
                 "Chat code edit",
-                Simulation,
-                "deterministic_worker_no_real_edits",
-                &[],
+                // The model-driven edit path now EXISTS end-to-end: an agentic tool
+                // loop (read/write/append) applies edits through the transactional
+                // writer, and an OpenRouter tool-calling driver turns model tool
+                // calls into those edits (proven with a scripted model). It is not
+                // yet wired to a LIVE model in the product turn (needs credentials +
+                // turn-start wiring), so it is Foundation, not Live — like
+                // `model.dispatch`. It is no longer a Simulation stand-in.
+                Foundation,
+                "agentic_loop_and_openrouter_tool_driver_present_need_model_credentials",
+                &[
+                    "crate:opensks-adapter",
+                    "loop:agentic",
+                    "driver:openrouter-tools",
+                ],
                 &["connect_model"],
             ),
             capability(
@@ -372,7 +383,23 @@ mod tests {
         let b = report.render_truth_matrix_markdown();
         assert_eq!(a, b);
         assert!(a.contains("| `agent.code_edit` |"));
-        assert!(a.contains("Simulation"));
+        // agent.code_edit is now Foundation (the agentic loop + OpenRouter tool
+        // driver exist; live model-driven edits need credentials) — no longer a
+        // Simulation stand-in.
+        let code_edit = report
+            .capabilities
+            .iter()
+            .find(|c| c.id == "agent.code_edit")
+            .expect("agent.code_edit present");
+        assert_eq!(code_edit.maturity, CapabilityMaturity::Foundation);
+        // Honesty milestone: NO baseline capability is a Simulation stand-in.
+        assert!(
+            report
+                .capabilities
+                .iter()
+                .all(|c| c.maturity != CapabilityMaturity::Simulation),
+            "no capability may remain a Simulation surface"
+        );
     }
 
     #[test]

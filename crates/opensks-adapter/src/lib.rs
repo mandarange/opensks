@@ -35,7 +35,10 @@ pub use agentic::{
     AgentStep, AgenticConfig, FnDriver, SequenceDriver, ToolCall, ToolDriver, ToolResult,
     run_agentic_loop,
 };
-pub use openrouter::OpenRouterAdapter;
+pub use openrouter::{
+    ChatCompleter, CurlChatCompleter, OpenRouterAdapter, OpenRouterToolDriver, parse_step,
+    tool_definitions,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentAdapterError {

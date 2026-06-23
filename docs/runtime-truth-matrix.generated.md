@@ -10,7 +10,7 @@ present a `Foundation`/`Simulation` surface as if it were `Live` (recovery direc
 | Capability | Surface | Maturity | User label | Available | Reason | Evidence |
 |---|---|---|---|:--:|---|---|
 | `chat.answer` | Chat assistant answer | Foundation | Needs setup | no | `real_answer_path_needs_model_configured` | crate:opensks-adapter, test:live_openrouter_returns_real_text |
-| `agent.code_edit` | Chat code edit | Simulation | Simulation | no | `deterministic_worker_no_real_edits` | — |
+| `agent.code_edit` | Chat code edit | Foundation | Needs setup | no | `agentic_loop_and_openrouter_tool_driver_present_need_model_credentials` | crate:opensks-adapter, loop:agentic, driver:openrouter-tools |
 | `agent.parallel_build` | Parallel subcontract build | Foundation | Needs setup | no | `scheduler_present_but_sync_deterministic_worker` | — |
 | `model.dispatch` | Model provider dispatch | Foundation | Needs setup | no | `openrouter_adapter_present_needs_api_key` | crate:opensks-adapter, adapter:openrouter |
 | `agent.local_test_edit` | Local test agent file edit | Live | Available | yes | `deterministic_adapter_performs_real_file_io` | crate:opensks-adapter, test:local_test_adapter_really_edits_a_file_on_disk |
