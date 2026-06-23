@@ -16010,9 +16010,7 @@ mod tests {
         assert!(matches!(error, OpenSksError::Usage(_)));
     }
 
-    // macOS-only: the empty-args default builds a SwiftUI `.app`, which requires
-    // the Swift toolchain (`compile_swift_app` returns an error off macOS). The
-    // ubuntu `ci-core` job would otherwise fail here; the macOS job still covers it.
+    // macOS-only (compile_swift_app errs off macOS; ci-core is ubuntu, ci-macos-app covers it).
     #[cfg(target_os = "macos")]
     #[test]
     fn empty_args_creates_native_app_bundle() {
