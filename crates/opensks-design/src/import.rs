@@ -1309,7 +1309,7 @@ mod zip {
             let name = String::from_utf8_lossy(name_bytes).to_string();
 
             // Unix mode lives in the high 16 bits of the external attributes.
-            let unix_mode = (external_attrs >> 16) as u32;
+            let unix_mode = external_attrs >> 16;
             let is_symlink = unix_mode & 0o170000 == 0o120000;
             let is_executable = unix_mode & 0o111 != 0;
             let is_dir = name.ends_with('/');
@@ -1354,7 +1354,7 @@ mod zip {
     fn inflate(input: &[u8], expected: usize) -> Result<Vec<u8>, ZipError> {
         let mut reader = BitReader::new(input);
         let mut out = Vec::with_capacity(expected.min(1 << 20));
-        let cap = expected.max(0).saturating_add(1);
+        let cap = expected.saturating_add(1);
         loop {
             let bfinal = reader.bit().ok_or(ZipError::Malformed)?;
             let btype = reader.bits(2).ok_or(ZipError::Malformed)?;
