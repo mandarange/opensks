@@ -143,7 +143,7 @@ impl RuntimeCapabilityReport {
         let mut out = String::new();
         out.push_str("# Runtime Truth Matrix (generated)\n\n");
         out.push_str(
-            "<!-- GENERATED FILE — do not edit by hand.\n     Regenerate with: cargo run -p xtask -- capability-matrix\n     Source of truth: opensks_contracts::baseline_capability_report() -->\n\n",
+            "<!-- GENERATED FILE — do not edit by hand.\n     Regenerate with: cargo run -p xtask -- capability-matrix\n     Source of truth: runtime capability report (contracts DTO + runtime registry evidence) -->\n\n",
         );
         out.push_str(
             "Each coding-agent capability declares how real it is at runtime. The app must never\n",
@@ -319,16 +319,24 @@ pub fn baseline_capability_report() -> RuntimeCapabilityReport {
                 "stream.protocol",
                 "Engine stream protocol",
                 Degraded,
-                "swift_quiet_window_still_in_product_path",
-                &["crate:opensks-stream", "schema:engine-stream-frame"],
+                "daemon_explicit_terminal_marker_protocol_v2_missing",
+                &[
+                    "daemon:request_completed",
+                    "swift:explicit-terminal-router",
+                    "schema:engine-stream-frame",
+                ],
                 &[],
             ),
             capability(
                 "pipeline.graph",
                 "Live pipeline graph",
                 Foundation,
-                "projection_present_no_ingest_or_edges",
-                &[],
+                "timeline_read_model_no_live_event_stream_projection",
+                &[
+                    "swift:pipeline-projection-ingest",
+                    "conversation:timeline-read-model",
+                    "swift:conversation-timeline-read-model",
+                ],
                 &[],
             ),
             capability(

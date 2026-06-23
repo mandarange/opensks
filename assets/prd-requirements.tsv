@@ -1,0 +1,66 @@
+# id	section	requirement	status	evidence
+P00-001	0	Rust-native autonomous coding OS metadata is represented.	implemented	Cargo package and CLI runtime
+P00-002	0	macOS first, Linux second, Windows later platform stance is represented.	artifact_mvp	platform-manifest.json records macOS first, Linux second, Windows later stance
+P00-003	0	Tokio/content-addressed cache/worktree/stage scheduler/event-sourced runtime are represented.	artifact_mvp	cache artifacts, local stage scheduler, stage-overlap-report.json, isolated workspace snapshots, and event-sourced JSONL
+P00-004	0	MCP, computer, browser, app, shell, file, design, QA, and security capability planes are represented.	artifact_mvp	tool-plan.json and CLI plane commands
+P01-001	1.1	Cache-stable context rather than blind token reduction.	artifact_mvp	cache-warm-report.json and cache-hit-report.json with hashed local stable/dynamic segments and warm-prefix reuse metrics
+P01-002	1.2	Automation from goal analysis through self-improve.	artifact_mvp	automation-loop.json represents goal analysis through self-improve stages with live/artifact status
+P01-003	1.3	Autonomous coding runtime with evidence-backed completion/blocking.	artifact_mvp	goal-loop.json and final-seal.json
+P01-004	1.4	Code, design, security, browser, and app QA in one goal loop.	artifact_mvp	qa-report.json with live local Rust checks and security-audit.json secret scan
+P01-005	1.5	Design/image generation QA loop.	artifact_mvp	design static scan artifacts plus design-visual-diff-report.json for source visual-signature diffs; live screenshot/gpt-image-2 review remains unverified
+P01-006	1.6	Voxel TriWiki accumulates repo/task/failure/provider/cache knowledge.	artifact_mvp	voxel index, voxel-triwiki.json, repo voxels, provider/security/design/cache classified voxels, and prd-coverage.json
+P01-007	1.7	Rust engine, bounded scheduler, content-addressed context, provider cache, overlap metrics.	artifact_mvp	local scheduler, timed local checks, stage-overlap-report.json overlap metrics, and content-addressed cache segments
+P01-008	1.8	Dynamic model-specific pipelines.	artifact_mvp	benchmark-report.json, multi-llm-roster.json, and collaboration-preflight.json model-family pipeline profiles
+P01-009	1.9	Multi-LLM collaboration roles.	artifact_mvp	role-assignments.json maps planner, worker, verifier, judge, finalizer, design, and security roles
+P01-010	1.10	OpenRouter first-class provider.	artifact_mvp	provider-capabilities.json marks OpenRouter as first-class multi-provider router
+P01-011	1.11	Codex LB optional adapter; core independent.	artifact_mvp	provider-capabilities.json marks Codex LB as optional with core_required=false
+P01-012	1.12	GPT and Claude OAuth where possible.	artifact_mvp	auth-policy.json lists OpenAI and Claude as OAuth candidates without exposing secrets
+P01-013	1.13	Local LLM support.	artifact_mvp	provider probe artifacts for Ollama, LM Studio, and OpenAI-compatible local endpoints
+P01-014	1.14	Authentication manager with Keychain/OAuth/API key/audit.	artifact_mvp	auth-registry.json, auth-policy.json, and auth-audit-log.jsonl cover key storage, OAuth candidates, API keys, and audit events
+P01-015	1.15	Token/cost/cache usage dashboard.	artifact_mvp	cache-dashboard.json, cache-hit-report.json, and provider usage-dashboard.json with zero-leak usage counters
+P01-016	1.16	Security threat model for MCP/tool poisoning/secrets/plugins/supply chain.	artifact_mvp	threat-model.json plus static scans for prompt injection, MCP allowlist bypass phrases, supply-chain shell pipes, unsafe actions, and secrets
+P01-017	1.17	Rust hot path.	implemented	Rust crate
+P01-018	1.18	Modular commercial/open-source concepts.	artifact_mvp	module-manifest.json records MCP servers, provider adapters, tool drivers, scheduler strategies, QA plugins, and design plugins
+P01-019	1.19	macOS-specific Keychain/accessibility/app automation/update posture.	artifact_mvp	macos-integration-manifest.json records Keychain, accessibility, app automation, Apple Silicon, menu bar, shortcut, and signed-update posture
+P01-020	1.20	Signed updater with channels and rollback.	artifact_mvp	updater plan writes update manifest, local signature proof, stable/latest channels, rollback plan, and update boundary artifacts
+P02-001	2.1	User request becomes machine-readable goal pipeline.	artifact_mvp	goal-loop.json
+P02-002	2.2	Goal schema includes id, text, kind, criteria, constraints, capabilities, risk, budget, stop policy.	artifact_mvp	goal-loop.json
+P02-003	2.3	All goal kinds are represented.	artifact_mvp	goal-kind-registry.json lists every PRD section 2.3 goal kind
+P02-004	2.4	Fourteen loop phases are represented.	artifact_mvp	goal-loop.json
+P02-005	2.5	Finite stop policy and terminal states.	artifact_mvp	stop-policy.json
+P02-006	2.6	Progress definition excludes mere text generation.	artifact_mvp	progress-ledger.json
+P02-007	2.7	Goal loop artifacts exist.	artifact_mvp	.opensks/missions/<mission>/
+P03-001	3.1	Proof-first artifacts for claims/stops/patches/tools.	artifact_mvp	final-seal.json and plane ledgers
+P03-002	3.2	Mutation safety via worktree or patch envelope and single-thread final apply.	artifact_mvp	worktree-isolation.json and patch-envelope.json
+P03-003	3.3	Route honesty for direct/naruto/browser/computer/app paths.	artifact_mvp	execution_mode and plane-specific commands
+P03-004	3.4	Evidence before completion.	artifact_mvp	final-seal.json
+P03-005	3.5	Final seal schema.	artifact_mvp	final-seal.json
+P04-001	4.1-4.5	Voxel TriWiki axes, types, schema, and graph links.	artifact_mvp	voxel-triwiki.json, voxels.jsonl, and triwiki-graph.json
+P04-002	4.6	Voxel TriWiki used in goal intake/context/worker/QA/repair/bench/self-improve.	artifact_mvp	voxel index repo context plus goal intake, cache, provider, security, design, QA, and bench artifacts
+P04-003	4.7	Voxel cache synergy with stable prefix and dynamic suffix.	artifact_mvp	voxel index stable/dynamic classification, voxel-triwiki.json, and cache-warm-report.json
+P04-004	4.8	Voxel GUI views.	artifact_mvp	dashboard.html and gui-data.json include Voxel TriWiki panel metrics
+P05-001	5.1-5.3	MCP host, client, server, tools, resources, prompts.	artifact_mvp	mcp-server-descriptor.json plus local stdio-jsonrpc-once tools/resources/prompts surface
+P05-002	5.4	MCP registry fields.	artifact_mvp	mcp-servers.json and mcp-server-descriptor.json
+P05-003	5.5	MCP security controls.	artifact_mvp	mcp-permission-ledger.json, mcp-risk-report.json, and mcp-broker-policy.json
+P05-004	5.6	Internal MCP broker.	artifact_mvp	mcp-broker-policy.json denies raw model tool calls by default
+P05-005	5.7	MCP audit artifacts.	artifact_mvp	.opensks/mcp artifacts
+P06-001	6.1-6.2	Browser-use engine taxonomy/actions/artifacts.	artifact_mvp	browser policy broker, network probe, page title/hash/link/form/meta snapshot, HAR-like log, action plan, and final-state artifacts
+P06-002	6.3	Computer-use screenshot/action loop/actions/security.	artifact_mvp	computer-use policy broker, safe observation screenshot capture attempt, isolated browser/container observation-loop artifacts, action plan, action ledger, and final-state artifacts
+P06-003	6.4-6.5	macOS app-use layers/artifacts/safety.	artifact_mvp	app-use policy broker, frontmost-app inspection, running-app inventory, accessibility artifact, action plan, and final-state artifacts
+P06-004	6.6	GUI for computer/browser/app use.	artifact_mvp	dashboard.html includes browser, computer-use, and app-use session panels
+P07-001	7	Goal-based tool planning and approval model.	artifact_mvp	tool-plan.json
+P08-001	8	Code, browser, app, design, security QA categories.	artifact_mvp	qa-report.json with live local code QA, security scan, browser/app artifacts, design static scan artifacts, and design-visual-diff-report.json
+P09-001	9	Dynamic model registry and pipeline profiles.	artifact_mvp	provider-registry.json model profiles and benchmark-report.json pipeline profiles
+P10-001	10	Token/cache strategy, warming, dashboard.	artifact_mvp	cache artifacts with local segment hashes, stability classes, counts, and bytes
+P11-001	11	Multi-LLM role assignment, artifacts, no hidden fallback.	artifact_mvp	multi-llm-roster.json, role-assignments.json, disagreement-report.json, quorum-report.json, and collaboration-preflight.json with no hidden fallback
+P12-001	12	Auth/provider manager and usage dashboard.	artifact_mvp	auth registry, provider registry, local provider probe report, and usage dashboard
+P13-001	13	Security boundaries, policy engine, dangerous-action approval.	artifact_mvp	security-audit.json, security-findings.jsonl, secret-leak-rate.json, secret-leak-gate.json, threat-model.json, live local secret scan, and approval policy
+P14-001	14	GUI mission, voxel, MCP, app, QA, token panels.	artifact_mvp	static dashboard.html, gui-data.json, worker-lanes.json, gui-manifest.json, and workspace-manifest.json
+P15-001	15	All CLI v3 commands exist.	artifact_mvp	run_cli command router including provider list/probe/usage and security audit
+P16-001	16	Rust workspace v3 crate map.	artifact_mvp	workspace-manifest.json plus scheduler/worktree/patch command surfaces
+P17-001	17	Implementation phases 0-6 are represented.	artifact_mvp	goal, voxel, scheduler, worktree, patch, QA, cache, MCP, provider, security, app, auth, bench, and PRD artifacts
+P18-001	18	MVP acceptance criteria.	missing_live_implementation	acceptance-summary.json and mvp-acceptance.json report remaining partial/failed MVP criteria
+P18-002	18	Beta acceptance criteria.	missing_live_implementation	acceptance-summary.json and beta-acceptance.json report remaining partial/failed beta criteria
+P18-003	18	Production acceptance criteria.	missing_live_implementation	acceptance-summary.json and production-acceptance.json report remaining partial/failed production criteria
+P19-001	19	Source-note foundations are represented as implementation assumptions.	artifact_mvp	source-notes-ledger.json maps PRD source-note foundations to local artifacts
+P20-001	20	Final product statement direction is preserved.	artifact_mvp	product-statement.json preserves the PRD final product statement with artifact-MVP honesty

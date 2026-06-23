@@ -16,6 +16,10 @@ jobs:
         run: cargo build --workspace
       - name: Swift package build
         run: swift build --package-path swift
+      - name: Install swift-format
+        run: brew install swift-format
+      - name: Swift format lint
+        run: swift-format lint --recursive swift/Sources swift/Tests
       - name: Swift package tests
         run: swift test --package-path swift
       - name: Daemon persistent stdio test
@@ -70,3 +74,12 @@ jobs:
           file .opensks/macos/OpenSKS.app/Contents/MacOS/OpenSKS | grep 'Mach-O'
           test -x .opensks/macos/OpenSKS.app/Contents/Resources/opensks-cli
           test -f .opensks/macos/OpenSKS.app/Contents/Resources/workspace-path.txt
+      - name: Upload macOS evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opensks-macos-evidence
+          path: |
+            /tmp/opensks-macos-*.ndjson
+            .opensks/macos/OpenSKS.app/Contents/Resources/workspace-path.txt
+          if-no-files-found: warn

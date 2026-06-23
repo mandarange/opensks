@@ -1,9 +1,9 @@
 // ConversationTurnTests.swift — PR-027. Exercises the conversation send path
 // through `MockConversationService`: one Send persists the user message + an
-// assistant turn and records ONE run; the store-level send is idempotent in
-// effect (the mock de-dups a replayed idempotency key, so the run list never
-// grows on a reused turn); and the new UI (RunCard + ConversationComposer)
-// renders non-nil.
+// accepted assistant placeholder, advances it through one supervisor tick, and
+// records ONE run; the store-level send is idempotent in effect (the mock de-dups
+// a replayed idempotency key, so the run list never grows on a reused turn); and
+// the UI (RunCard + ConversationComposer) renders non-nil.
 
 import SwiftUI
 import XCTest
@@ -16,6 +16,7 @@ final class ConversationTurnTests: XCTestCase {
     private func summary(
         id: String,
         title: String = "Thread",
+        status: ConversationStatus = .idle,
         messageCount: Int = 0,
         activityMs: Int64 = 1_000
     ) -> ConversationSummary {
@@ -25,7 +26,7 @@ final class ConversationTurnTests: XCTestCase {
             projectId: "mock-project",
             title: title,
             titleSource: "manual",
-            status: .idle,
+            status: status,
             pinned: false,
             archived: false,
             messageCount: messageCount,
@@ -53,7 +54,7 @@ final class ConversationTurnTests: XCTestCase {
 
     private func makeStore(
         summaries: [ConversationSummary],
-        runStateOnTurn: RunState = .completed
+        runStateOnTurn: RunState = .queued
     ) -> (ConversationStore, MockConversationService) {
         let mock = MockConversationService(summaries: summaries, runStateOnTurn: runStateOnTurn)
         return (ConversationStore(service: mock, messagePageSize: 50), mock)
@@ -110,7 +111,7 @@ final class ConversationTurnTests: XCTestCase {
     // MARK: - Send appends user + assistant and records the run
 
     func testSendAppendsUserAndAssistantTurnAndRecordsRun() async {
-        let (store, _) = makeStore(summaries: [summary(id: "a")])
+        let (store, mock) = makeStore(summaries: [summary(id: "a")])
         await store.load()
         XCTAssertTrue(store.messages.isEmpty)
         XCTAssertTrue(store.runs(for: "a").isEmpty)
@@ -122,8 +123,14 @@ final class ConversationTurnTests: XCTestCase {
         XCTAssertEqual(store.messages.first?.role, .user)
         XCTAssertEqual(store.messages.first?.contentRedacted, "explain the parser")
         XCTAssertEqual(store.messages.last?.role, .assistant)
-        XCTAssertFalse(store.messages.last?.contentRedacted.isEmpty ?? true,
-                       "assistant content is set from the run result")
+        XCTAssertEqual(store.messages.last?.state, .complete)
+        XCTAssertEqual(store.messages.last?.contentRedacted, "Mock supervisor completed.")
+        XCTAssertEqual(mock.supervisorTickCount, 2, "send drains one claimed turn and confirms the queue is empty")
+        let timeline = store.timelineItems(for: "a")
+        XCTAssertEqual(timeline.map(\.kind), [.userMessage, .assistantMessage])
+        XCTAssertEqual(timeline.last?.payload.messageId, store.messages.last?.id)
+        XCTAssertEqual(timeline.last?.runId, store.runs(for: "a").first?.runId)
+        XCTAssertEqual(timeline.last?.state, "completed")
 
         // Exactly one run is recorded and linked to the assistant message.
         let runs = store.runs(for: "a")
@@ -133,6 +140,35 @@ final class ConversationTurnTests: XCTestCase {
         XCTAssertEqual(run.runState, .completed)
         XCTAssertEqual(run.messageId, store.messages.last?.id)
         XCTAssertNotNil(store.run(forMessageID: store.messages.last!.id))
+        XCTAssertEqual(store.selectedSummary?.status, .completed)
+    }
+
+    func testLoadDrainsQueuedTurnsRecoveredAfterRelaunch() async throws {
+        let mock = MockConversationService(summaries: [summary(id: "a")])
+        _ = try await mock.turnStart(
+            conversationID: "a",
+            projectID: "mock-project",
+            text: "first queued turn",
+            idempotencyKey: "queued-1"
+        )
+        _ = try await mock.turnStart(
+            conversationID: "a",
+            projectID: "mock-project",
+            text: "second queued turn",
+            idempotencyKey: "queued-2"
+        )
+
+        let relaunchedStore = ConversationStore(service: mock, messagePageSize: 50)
+        await relaunchedStore.load()
+
+        XCTAssertNil(relaunchedStore.errorMessage)
+        XCTAssertEqual(mock.supervisorTickCount, 3, "load drains both queued turns and stops on an empty tick")
+        XCTAssertEqual(relaunchedStore.messages.count, 4)
+        XCTAssertEqual(relaunchedStore.timelineItems(for: "a").count, 4)
+        XCTAssertEqual(relaunchedStore.timelineItems(for: "a").filter { $0.kind == .assistantMessage }.count, 2)
+        XCTAssertTrue(relaunchedStore.messages.filter { $0.role == .assistant }.allSatisfy { $0.state == .complete })
+        XCTAssertEqual(relaunchedStore.runs(for: "a").map(\.runState), [.completed, .completed])
+        XCTAssertEqual(relaunchedStore.selectedSummary?.status, .completed)
     }
 
     func testSendClearsDraftForThatConversation() async {
@@ -162,12 +198,22 @@ final class ConversationTurnTests: XCTestCase {
         await store.load()
 
         // First send starts a real turn + run.
-        let first = try? await mock.turnStart(conversationID: "a", text: "hi", idempotencyKey: "key-1")
+        let first = try? await mock.turnStart(
+            conversationID: "a",
+            projectID: "mock-project",
+            text: "hi",
+            idempotencyKey: "key-1"
+        )
         XCTAssertEqual(first?.reused, false)
 
         // Replaying the SAME key returns the same ids, reused, and does NOT add
         // a second run to the list.
-        let replay = try? await mock.turnStart(conversationID: "a", text: "hi", idempotencyKey: "key-1")
+        let replay = try? await mock.turnStart(
+            conversationID: "a",
+            projectID: "mock-project",
+            text: "hi",
+            idempotencyKey: "key-1"
+        )
         XCTAssertEqual(replay?.reused, true)
         XCTAssertEqual(replay?.runId, first?.runId)
         XCTAssertEqual(replay?.turnId, first?.turnId)
@@ -186,6 +232,7 @@ final class ConversationTurnTests: XCTestCase {
         // Two distinct sends (distinct generated keys) => two runs, four messages.
         XCTAssertEqual(store.runs(for: "a").count, 2)
         XCTAssertEqual(store.messages.count, 4)
+        XCTAssertEqual(store.timelineItems(for: "a").count, 4)
     }
 
     func testFailedRunSurfacesDangerPillKind() async {
@@ -197,6 +244,8 @@ final class ConversationTurnTests: XCTestCase {
         let run = try? XCTUnwrap(store.runs(for: "a").first)
         XCTAssertEqual(run?.runState, .failed)
         XCTAssertEqual(run?.runState.pillKind, .danger)
+        XCTAssertEqual(store.messages.last?.state, .failed)
+        XCTAssertEqual(store.selectedSummary?.status, .failed)
     }
 
     // MARK: - Render smoke tests
@@ -219,7 +268,7 @@ final class ConversationTurnTests: XCTestCase {
         let (store, _) = makeStore(summaries: [summary(id: "a")])
         await store.load()
         let composer = ConversationComposer(store: store, conversationID: "a")
-            .frame(width: 720, height: 90)
+            .frame(width: 720, height: 128)
         let renderer = ImageRenderer(content: composer)
         renderer.scale = 1
         XCTAssertNotNil(renderer.nsImage, "conversation composer must render non-nil")

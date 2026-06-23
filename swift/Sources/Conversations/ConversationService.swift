@@ -1,8 +1,9 @@
-// ConversationService.swift — the persistence boundary for PR-025. A
-// `LiveConversationService` shells the bundled `opensks-cli conversation <sub>`
-// exactly like `AppState` resolves and runs the CLI (same binary URL + workspace
-// path, `.convertFromSnakeCase` JSON decoding). A `MockConversationService`
-// backs tests and previews with in-memory arrays so the UI never needs a process.
+// ConversationService.swift — the persistence boundary for conversations. Most
+// CRUD verbs still shell the bundled `opensks-cli conversation <sub>` exactly
+// like `AppState` resolves and runs the CLI, but live turn-start now uses the
+// persistent daemon typed `conversation_turn_start` request and returns as soon
+// as the durable accepted handle is committed. A `MockConversationService` backs
+// tests and previews with in-memory arrays so the UI never needs a process.
 
 import Foundation
 
@@ -18,16 +19,39 @@ protocol ConversationService: Sendable {
     func fork(id: String, afterSequence: Int64?) async throws -> ConversationSummary
     func messages(id: String, beforeSequence: Int64?, limit: Int?) async throws -> MessagePage
     func append(id: String, role: MessageRole, text: String) async throws -> ConversationMessage
+    func timeline(conversationID: String, limit: Int?) async throws -> ConversationTimeline
+    func appendTimelineItem(
+        conversationID: String,
+        kind: ConversationTimelineItemKind,
+        state: String,
+        payloadJSON: String
+    ) async throws -> ConversationTimelineItem
 
-    /// Start ONE deterministic engine run for `id`: persist the redacted user
+    /// Start ONE conversation runtime run for `id`: persist the redacted user
     /// message + an assistant placeholder, run the engine, set the assistant
     /// content from the result, link the run, and return the ids. Passing the
     /// same `idempotencyKey` again returns the SAME ids with `reused == true`
     /// and does NOT start a second run.
-    func turnStart(conversationID: String, text: String, idempotencyKey: String) async throws -> ConversationTurn
+    func turnStart(
+        conversationID: String,
+        projectID: String,
+        text: String,
+        idempotencyKey: String
+    ) async throws -> ConversationTurn
+
+    /// Ask the daemon turn supervisor to recover expired leases, claim at most
+    /// one queued accepted turn, execute it, and persist its final projections.
+    func supervisorTick() async throws -> TurnSupervisorTickResult
 
     /// The runs linked to a conversation (`opensks.conversation-run-list.v1`).
     func runs(conversationID: String) async throws -> [ConversationRunRef]
+
+    /// Durable per-thread Chat settings (`opensks.thread-settings.v1`).
+    func threadSettings(conversationID: String) async throws -> ConversationThreadSettings
+    func setThreadSettings(
+        _ settings: ConversationThreadSettings,
+        conversationID: String
+    ) async throws -> ConversationThreadSettings
 }
 
 // MARK: - Errors
@@ -62,6 +86,9 @@ enum ConversationServiceError: LocalizedError {
 struct LiveConversationService: ConversationService {
     let cli: URL
     let workspace: URL
+    let engine = EngineProcess()
+    private static let chatSupervisorId = "swift-chat-supervisor"
+    private static let chatSupervisorLeaseTtlMs: UInt64 = 30_000
 
     func list(filter: ConversationFilter, limit: Int?) async throws -> ConversationList {
         var args = ["conversation", "list", "--workspace", workspace.path, "--filter", filter.rawValue]
@@ -127,13 +154,95 @@ struct LiveConversationService: ConversationService {
         )
     }
 
-    func turnStart(conversationID: String, text: String, idempotencyKey: String) async throws -> ConversationTurn {
+    func timeline(conversationID id: String, limit: Int?) async throws -> ConversationTimeline {
+        var args = ["conversation", "timeline", "--workspace", workspace.path, "--conversation", id]
+        if let limit { args += ["--limit", String(limit)] }
+        return try await run(args, verb: "timeline")
+    }
+
+    func appendTimelineItem(
+        conversationID id: String,
+        kind: ConversationTimelineItemKind,
+        state: String,
+        payloadJSON: String
+    ) async throws -> ConversationTimelineItem {
         try await run(
-            ["conversation", "turn-start", "--workspace", workspace.path,
-             "--conversation", conversationID, "--text", text,
-             "--idempotency-key", idempotencyKey],
-            verb: "turn-start"
+            ["conversation", "timeline-append", "--workspace", workspace.path,
+             "--conversation", id, "--kind", kind.rawValue, "--state", state, "--payload", payloadJSON],
+            verb: "timeline-append"
         )
+    }
+
+    func turnStart(
+        conversationID: String,
+        projectID: String,
+        text: String,
+        idempotencyKey: String
+    ) async throws -> ConversationTurn {
+        let requestId = "req-conversation-turn-\(UUID().uuidString)"
+        let request = ConversationTurnStartRequest(
+            schema: "opensks.conversation-turn-start-request.v1",
+            requestId: requestId,
+            projectId: projectID,
+            conversationId: conversationID,
+            clientTurnId: "client-\(UUID().uuidString)",
+            message: UserMessageInput(text: text, attachmentRefs: []),
+            settings: .defaultForTurn(),
+            context: .empty,
+            idempotencyKey: idempotencyKey
+        )
+        let result = await engine.conversationTurnStart(cli: cli, cwd: workspace, request: request)
+        if result.stream.exitCode != 0 {
+            throw ConversationServiceError.nonZeroExit(
+                result.stream.exitCode ?? 1,
+                stderr: Self.daemonErrorText(result.stream)
+            )
+        }
+        guard let accepted = result.accepted else {
+            throw ConversationServiceError.emptyOutput("turn-start")
+        }
+        guard accepted.requestId == requestId else {
+            throw ConversationServiceError.decodeFailed(
+                "turn-start",
+                underlying: "accepted request_id \(accepted.requestId) did not match \(requestId)"
+            )
+        }
+        return ConversationTurn(
+            schema: "opensks.conversation-turn.v1",
+            turnId: accepted.turnId,
+            userMessageId: accepted.userMessageId,
+            assistantMessageId: accepted.assistantMessageId,
+            runId: accepted.runId,
+            runState: accepted.state,
+            reused: false
+        )
+    }
+
+    func supervisorTick() async throws -> TurnSupervisorTickResult {
+        let requestId = "req-conversation-supervisor-\(UUID().uuidString)"
+        let result = await engine.conversationSupervisorTick(
+            cli: cli,
+            cwd: workspace,
+            requestId: requestId,
+            supervisorId: Self.chatSupervisorId,
+            leaseTtlMs: Self.chatSupervisorLeaseTtlMs
+        )
+        if result.stream.exitCode != 0 {
+            throw ConversationServiceError.nonZeroExit(
+                result.stream.exitCode ?? 1,
+                stderr: Self.daemonErrorText(result.stream)
+            )
+        }
+        guard let tick = result.tick else {
+            throw ConversationServiceError.emptyOutput("supervisor-tick")
+        }
+        guard tick.requestId == requestId else {
+            throw ConversationServiceError.decodeFailed(
+                "supervisor-tick",
+                underlying: "tick request_id \(tick.requestId) did not match \(requestId)"
+            )
+        }
+        return tick
     }
 
     func runs(conversationID: String) async throws -> [ConversationRunRef] {
@@ -142,6 +251,28 @@ struct LiveConversationService: ConversationService {
             verb: "runs"
         )
         return list.runs
+    }
+
+    func threadSettings(conversationID: String) async throws -> ConversationThreadSettings {
+        try await run(
+            ["conversation", "settings-get", "--workspace", workspace.path, "--conversation", conversationID],
+            verb: "settings-get"
+        )
+    }
+
+    func setThreadSettings(
+        _ settings: ConversationThreadSettings,
+        conversationID: String
+    ) async throws -> ConversationThreadSettings {
+        var normalized = settings
+        normalized.conversationId = conversationID
+        let encoded = try JSONEncoder.opensks.encode(normalized)
+        let json = String(decoding: encoded, as: UTF8.self)
+        return try await run(
+            ["conversation", "settings-set", "--workspace", workspace.path,
+             "--conversation", conversationID, "--settings", json],
+            verb: "settings-set"
+        )
     }
 
     // MARK: Process plumbing
@@ -159,6 +290,17 @@ struct LiveConversationService: ConversationService {
         } catch {
             throw ConversationServiceError.decodeFailed(verb, underlying: error.localizedDescription)
         }
+    }
+
+    private static func daemonErrorText(_ stream: EngineRunStream) -> String {
+        let eventText = stream.engineEvents
+            .filter { $0.severity.isError }
+            .map(\.message)
+            .joined(separator: "\n")
+        let pieces = [eventText, stream.stderr]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return pieces.joined(separator: "\n")
     }
 
     private struct CaptureResult {
@@ -198,25 +340,28 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
     private let lock = NSLock()
     private var summaries: [ConversationSummary]
     private var messagesByConversation: [String: [ConversationMessage]]
+    private var timelineItemsByConversation: [String: [ConversationTimelineItem]] = [:]
     private var runsByConversation: [String: [ConversationRunRef]] = [:]
+    private var settingsByConversation: [String: ConversationThreadSettings] = [:]
     /// Idempotency ledger: `"<conversationID>\u{1}<key>" -> turn` so a replayed
     /// key returns the same ids (reused) without starting a second run.
     private var turnsByIdempotencyKey: [String: ConversationTurn] = [:]
     private var nextId = 0
     private var clock: Int64 = 1_000
+    private(set) var supervisorTickCount = 0
 
     let projectId: String
 
-    /// Final state the mock reports for the deterministic run it "completes".
-    /// Defaults to `.completed`; a test can request `.failed` to exercise the
-    /// danger pill without touching the engine.
+    /// State the mock reports for the accepted run. Defaults to `.queued`,
+    /// matching the daemon accepted-handle path; a test can request `.failed` to
+    /// exercise the danger pill without touching the engine.
     let runStateOnTurn: RunState
 
     init(
         projectId: String = "mock-project",
         summaries: [ConversationSummary] = [],
         messages: [String: [ConversationMessage]] = [:],
-        runStateOnTurn: RunState = .completed
+        runStateOnTurn: RunState = .queued
     ) {
         self.projectId = projectId
         self.summaries = summaries
@@ -306,7 +451,9 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         withLock {
             summaries.removeAll { $0.id == id }
             messagesByConversation[id] = nil
+            timelineItemsByConversation[id] = nil
             runsByConversation[id] = nil
+            settingsByConversation[id] = nil
             turnsByIdempotencyKey = turnsByIdempotencyKey.filter { !$0.key.hasPrefix("\(id)\u{1}") }
         }
     }
@@ -362,6 +509,50 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         withLock { appendLocked(id: id, role: role, text: text) }
     }
 
+    func timeline(conversationID id: String, limit: Int?) async throws -> ConversationTimeline {
+        withLock { timelineLocked(conversationID: id, limit: limit) }
+    }
+
+    func appendTimelineItem(
+        conversationID id: String,
+        kind: ConversationTimelineItemKind,
+        state: String,
+        payloadJSON: String
+    ) async throws -> ConversationTimelineItem {
+        try withLock {
+            guard summaries.contains(where: { $0.id == id }) else {
+                throw ConversationServiceError.emptyOutput("timeline-append")
+            }
+            let payload = try JSONDecoder.opensks.decode(
+                ConversationTimelinePayload.self,
+                from: Data(payloadJSON.utf8)
+            )
+            let now = tick()
+            let existing = timelineItemsByConversation[id] ?? []
+            let messageMax = (messagesByConversation[id] ?? []).map(\.sequence).max() ?? 0
+            let timelineMax = existing.map(\.sequence).max() ?? 0
+            let item = ConversationTimelineItem(
+                schema: "opensks.timeline-item.v1",
+                id: mintId("timeline"),
+                projectId: projectId,
+                conversationId: id,
+                turnId: nil,
+                runId: nil,
+                sequence: max(messageMax, timelineMax) + 1,
+                kind: kind,
+                state: state,
+                payload: payload,
+                createdAtMs: now,
+                updatedAtMs: now
+            )
+            timelineItemsByConversation[id] = existing + [item]
+            if let idx = summaries.firstIndex(where: { $0.id == id }) {
+                summaries[idx] = summaries[idx].with(updatedAtMs: now)
+            }
+            return item
+        }
+    }
+
     private func appendLocked(id: String, role: MessageRole, text: String) -> ConversationMessage {
         let now = tick()
         let existing = messagesByConversation[id] ?? []
@@ -389,12 +580,105 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         return message
     }
 
-    func turnStart(conversationID: String, text: String, idempotencyKey: String) async throws -> ConversationTurn {
-        try withLock { try turnStartLocked(conversationID: conversationID, text: text, idempotencyKey: idempotencyKey) }
+    private func timelineLocked(conversationID id: String, limit: Int?) -> ConversationTimeline {
+        let page = messagesLocked(id: id, beforeSequence: nil, limit: limit)
+        var runsByMessage: [String: ConversationRunRef] = [:]
+        for run in runsByConversation[id] ?? [] {
+            runsByMessage[run.messageId] = run
+        }
+        var items = page.messages.map { message -> ConversationTimelineItem in
+            let run = runsByMessage[message.id]
+            let kind: ConversationTimelineItemKind
+            switch message.role {
+            case .user:
+                kind = .userMessage
+            case .assistant:
+                kind = .assistantMessage
+            case .tool:
+                kind = .toolCall
+            case .event, .system, .unknown:
+                kind = .warning
+            }
+            let state = run?.runState.rawValue ?? message.state.rawValue
+            return ConversationTimelineItem(
+                schema: "opensks.timeline-item.v1",
+                id: "timeline-\(message.id)",
+                projectId: message.projectId,
+                conversationId: message.conversationId,
+                turnId: message.turnId,
+                runId: run?.runId,
+                sequence: message.sequence,
+                kind: kind,
+                state: state,
+                payload: ConversationTimelinePayload(
+                    messageId: message.id,
+                    role: message.role,
+                    messageState: message.state,
+                    contentRedacted: message.contentRedacted,
+                    runRelation: run?.relation,
+                    commit: nil,
+                    paths: nil,
+                    message: nil,
+                    remote: nil,
+                    ref: nil,
+                    remoteOid: nil,
+                    localOid: nil,
+                    alreadyDone: nil,
+                    sourceSchema: nil,
+                    projection: nil,
+                    committed: nil,
+                    pushed: nil,
+                    intentId: nil,
+                    effectDigest: nil,
+                    idempotencyKey: nil,
+                    remoteUrlRedacted: nil,
+                    remoteExpectedOid: nil,
+                    protected: nil,
+                    approvalId: nil,
+                    approvalMatched: nil
+                ),
+                createdAtMs: message.createdAtMs,
+                updatedAtMs: message.updatedAtMs
+            )
+        }
+        items.append(contentsOf: timelineItemsByConversation[id] ?? [])
+        items.sort { lhs, rhs in
+            if lhs.sequence != rhs.sequence { return lhs.sequence < rhs.sequence }
+            return lhs.id < rhs.id
+        }
+        if let limit, items.count > limit {
+            items = Array(items.suffix(limit))
+        }
+        return ConversationTimeline(
+            schema: "opensks.conversation-timeline.v1",
+            conversationId: id,
+            items: items
+        )
     }
 
-    private func turnStartLocked(conversationID id: String, text: String, idempotencyKey: String) throws -> ConversationTurn {
-        guard summaries.contains(where: { $0.id == id }) else {
+    func turnStart(
+        conversationID: String,
+        projectID: String,
+        text: String,
+        idempotencyKey: String
+    ) async throws -> ConversationTurn {
+        try withLock {
+            try turnStartLocked(
+                conversationID: conversationID,
+                projectID: projectID,
+                text: text,
+                idempotencyKey: idempotencyKey
+            )
+        }
+    }
+
+    private func turnStartLocked(
+        conversationID id: String,
+        projectID: String,
+        text: String,
+        idempotencyKey: String
+    ) throws -> ConversationTurn {
+        guard summaries.contains(where: { $0.id == id && $0.projectId == projectID }) else {
             throw ConversationServiceError.emptyOutput("turn-start")
         }
         // Replayed idempotency key: return the SAME turn, mark reused, and do
@@ -420,17 +704,16 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         // 2. Persist the assistant placeholder BEFORE the run.
         let assistantPlaceholder = appendLocked(id: id, role: .assistant, text: "")
 
-        // 3. "Run" the deterministic engine and set the assistant content from
-        //    its result, linking both messages to the turn.
+        // 3. Link both messages to the accepted turn. The normal accepted path
+        //    leaves the assistant placeholder streaming; it does not fabricate a
+        //    completed adapter result.
         let runState = runStateOnTurn
-        let assistantContent = runState == .failed
-            ? "Run failed."
-            : "Deterministic run \(runId) completed."
+        let assistantContent = runState == .failed ? "Run failed." : "..."
         if var msgs = messagesByConversation[id],
            let idx = msgs.firstIndex(where: { $0.id == assistantPlaceholder.id }) {
             msgs[idx] = assistantPlaceholder.with(
                 turnId: turnId,
-                state: runState == .failed ? .failed : .complete,
+                state: runState == .failed ? .failed : .streaming,
                 contentRedacted: assistantContent
             )
             // Also link the user message to the turn.
@@ -449,6 +732,14 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
             runState: runState
         )
         runsByConversation[id, default: []].append(runRef)
+        if let summaryIndex = summaries.firstIndex(where: { $0.id == id }) {
+            let now = tick()
+            summaries[summaryIndex] = summaries[summaryIndex].with(
+                status: runState == .failed ? .failed : .running,
+                updatedAtMs: now,
+                lastMessageAtMs: now
+            )
+        }
 
         let turn = ConversationTurn(
             schema: "opensks.conversation-turn.v1",
@@ -463,8 +754,108 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         return turn
     }
 
+    func supervisorTick() async throws -> TurnSupervisorTickResult {
+        withLock { supervisorTickLocked() }
+    }
+
+    private func supervisorTickLocked() -> TurnSupervisorTickResult {
+        supervisorTickCount += 1
+        for conversationID in runsByConversation.keys.sorted() {
+            var runs = runsByConversation[conversationID] ?? []
+            guard let runIndex = runs.firstIndex(where: { $0.runState == .queued || $0.runState == .running }) else {
+                continue
+            }
+            let run = runs[runIndex]
+            let finalRunState: RunState = runStateOnTurn == .failed ? .failed : .completed
+            let now = tick()
+            let assistantState: MessageState = finalRunState == .failed ? .failed : .complete
+            let assistantText = finalRunState == .failed ? "Run failed." : "Mock supervisor completed."
+
+            if var messages = messagesByConversation[conversationID],
+               let messageIndex = messages.firstIndex(where: { $0.id == run.messageId }) {
+                messages[messageIndex] = messages[messageIndex].with(
+                    state: assistantState,
+                    contentRedacted: assistantText
+                )
+                messagesByConversation[conversationID] = messages
+            }
+
+            runs[runIndex] = ConversationRunRef(
+                turnId: run.turnId,
+                runId: run.runId,
+                messageId: run.messageId,
+                relation: run.relation,
+                runState: finalRunState
+            )
+            runsByConversation[conversationID] = runs
+
+            if let summaryIndex = summaries.firstIndex(where: { $0.id == conversationID }) {
+                summaries[summaryIndex] = summaries[summaryIndex].with(
+                    status: finalRunState == .failed ? .failed : .completed,
+                    updatedAtMs: now,
+                    lastMessageAtMs: now
+                )
+            }
+
+            return TurnSupervisorTickResult(
+                schema: "opensks.turn-supervisor-tick.v1",
+                requestId: "mock-supervisor-\(supervisorTickCount)",
+                supervisorId: "mock-supervisor",
+                recoveredExpiredLeases: 0,
+                claimed: TurnSupervisorClaimedTurn(
+                    turnId: run.turnId,
+                    runId: run.runId,
+                    projectId: projectId,
+                    conversationId: conversationID,
+                    assistantMessageId: run.messageId,
+                    leaseOwner: "mock-supervisor",
+                    leaseExpiresAtMs: UInt64(now + 30_000),
+                    hasModelRoutingDecision: true
+                ),
+                executed: TurnSupervisorExecution(
+                    status: "executed",
+                    runState: finalRunState,
+                    assistantMessageId: run.messageId,
+                    lastEventSequence: 1,
+                    patchCount: 0,
+                    applyResultCount: 0,
+                    error: nil
+                )
+            )
+        }
+
+        return TurnSupervisorTickResult(
+            schema: "opensks.turn-supervisor-tick.v1",
+            requestId: "mock-supervisor-\(supervisorTickCount)",
+            supervisorId: "mock-supervisor",
+            recoveredExpiredLeases: 0,
+            claimed: nil,
+            executed: nil
+        )
+    }
+
     func runs(conversationID id: String) async throws -> [ConversationRunRef] {
         withLock { runsByConversation[id] ?? [] }
+    }
+
+    func threadSettings(conversationID id: String) async throws -> ConversationThreadSettings {
+        withLock { settingsByConversation[id] ?? ConversationThreadSettings.defaultFor(conversationID: id, updatedAtMs: clock) }
+    }
+
+    func setThreadSettings(
+        _ settings: ConversationThreadSettings,
+        conversationID id: String
+    ) async throws -> ConversationThreadSettings {
+        try withLock {
+            guard summaries.contains(where: { $0.id == id }) else {
+                throw ConversationServiceError.emptyOutput("settings-set")
+            }
+            var normalized = settings
+            normalized.conversationId = id
+            normalized.updatedAtMs = tick()
+            settingsByConversation[id] = normalized
+            return normalized
+        }
     }
 
     private func mutate(_ id: String, _ transform: (ConversationSummary) -> ConversationSummary) throws {

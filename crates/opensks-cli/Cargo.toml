@@ -31,9 +31,18 @@ opensks-scheduler = { path = "../opensks-scheduler" }
 opensks-triwiki = { path = "../opensks-triwiki" }
 opensks-vault = { path = "../opensks-vault" }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 
+[features]
+default = []
+simulation = [
+  "opensks-adapter/simulation",
+  "opensks-daemon/simulation",
+]
+
 [dev-dependencies]
+opensks-adapter = { path = "../opensks-adapter", features = ["simulation"] }
 # Used only in tests to generate an age keypair and write an identity file when
 # exercising the `vault encrypt`/`decrypt` subcommands end to end.
 age = { workspace = true }

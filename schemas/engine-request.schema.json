@@ -31,12 +31,141 @@
     }
   },
   "definitions": {
+    "ConversationTurnSettings": {
+      "description": "Effective settings applied to one turn.",
+      "type": "object",
+      "required": [
+        "approval_policy_id",
+        "execution_mode",
+        "max_parallelism",
+        "model",
+        "pipeline_id",
+        "reasoning_effort",
+        "tool_policy_id",
+        "verifier_count"
+      ],
+      "properties": {
+        "approval_policy_id": {
+          "type": "string"
+        },
+        "cost_budget_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "execution_mode": {
+          "$ref": "#/definitions/ExecutionMode"
+        },
+        "graph_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image_model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_parallelism": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "model": {
+          "$ref": "#/definitions/ModelSelection"
+        },
+        "pipeline_id": {
+          "type": "string"
+        },
+        "reasoning_effort": {
+          "$ref": "#/definitions/ReasoningEffort"
+        },
+        "timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "token_budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "tool_policy_id": {
+          "type": "string"
+        },
+        "verifier_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ConversationTurnStartRequest": {
+      "description": "Submitted by the app to start a turn. The daemon validates and replies with [`ConversationTurnAccepted`] without waiting for the run to complete.",
+      "type": "object",
+      "required": [
+        "client_turn_id",
+        "conversation_id",
+        "idempotency_key",
+        "message",
+        "project_id",
+        "request_id",
+        "schema",
+        "settings"
+      ],
+      "properties": {
+        "client_turn_id": {
+          "type": "string"
+        },
+        "context": {
+          "default": {},
+          "allOf": [
+            {
+              "$ref": "#/definitions/TurnContextSelection"
+            }
+          ]
+        },
+        "conversation_id": {
+          "type": "string"
+        },
+        "idempotency_key": {
+          "type": "string"
+        },
+        "message": {
+          "$ref": "#/definitions/UserMessageInput"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/definitions/ConversationTurnSettings"
+        }
+      }
+    },
     "EngineRequestKind": {
       "type": "string",
       "enum": [
         "hello",
         "health",
         "subscribe_events",
+        "conversation_turn_start",
+        "conversation_supervisor_tick",
         "run_start",
         "run_pause",
         "run_resume",
@@ -57,11 +186,29 @@
             "null"
           ]
         },
+        "conversation_turn_start": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ConversationTurnStartRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "graph_path": {
           "type": [
             "string",
             "null"
           ]
+        },
+        "lease_ttl_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
         },
         "message": {
           "type": [
@@ -115,6 +262,12 @@
           "format": "uint64",
           "minimum": 0.0
         },
+        "supervisor_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "tail_ms": {
           "type": [
             "integer",
@@ -128,6 +281,88 @@
             "string",
             "null"
           ]
+        }
+      }
+    },
+    "ExecutionMode": {
+      "description": "Where a turn is allowed to write (§5.4). `Cloud` is reserved and hidden until a real adapter exists.",
+      "type": "string",
+      "enum": [
+        "local",
+        "worktree",
+        "read_only",
+        "cloud"
+      ]
+    },
+    "ModelSelection": {
+      "description": "Model choice for a turn/thread. A single configured model auto-selects.",
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "fallback_model_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mode": {
+          "$ref": "#/definitions/ModelSelectionMode"
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ModelSelectionMode": {
+      "description": "Whether the model is auto-routed or pinned by the user.",
+      "type": "string",
+      "enum": [
+        "auto",
+        "pinned"
+      ]
+    },
+    "ReasoningEffort": {
+      "description": "User-facing reasoning effort. Adapters map these to provider-specific knobs; an adapter that cannot honour a value reports `unsupported` rather than silently ignoring it (§5.3).",
+      "type": "string",
+      "enum": [
+        "quick",
+        "standard",
+        "deep",
+        "maximum"
+      ]
+    },
+    "TurnContextSelection": {
+      "description": "Context the user explicitly selected for this turn (files, ranges, symbols, diffs, etc.), carried as opaque refs the context assembler resolves.",
+      "type": "object",
+      "properties": {
+        "refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "UserMessageInput": {
+      "description": "The user's message text plus any attachment/context artifact refs.",
+      "type": "object",
+      "required": [
+        "text"
+      ],
+      "properties": {
+        "attachment_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "text": {
+          "type": "string"
         }
       }
     }

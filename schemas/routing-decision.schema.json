@@ -33,6 +33,16 @@
         "$ref": "#/definitions/ModelRejection"
       }
     },
+    "route_receipt": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ModelRouteReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "schema": {
       "type": "string"
     },
@@ -47,6 +57,86 @@
     }
   },
   "definitions": {
+    "CapabilityRequirements": {
+      "type": "object",
+      "required": [
+        "code",
+        "image_edit",
+        "image_output",
+        "structured_output",
+        "text",
+        "tool_use",
+        "vision_input"
+      ],
+      "properties": {
+        "code": {
+          "type": "boolean"
+        },
+        "image_edit": {
+          "type": "boolean"
+        },
+        "image_output": {
+          "type": "boolean"
+        },
+        "structured_output": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "boolean"
+        },
+        "tool_use": {
+          "type": "boolean"
+        },
+        "vision_input": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ModelLimits": {
+      "type": "object",
+      "properties": {
+        "max_concurrency": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "max_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "requests_per_minute": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "tokens_per_minute": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
     "ModelRejection": {
       "type": "object",
       "required": [
@@ -59,6 +149,49 @@
         },
         "reason_code": {
           "type": "string"
+        }
+      }
+    },
+    "ModelRouteReceipt": {
+      "type": "object",
+      "required": [
+        "effective_limits",
+        "reason_code",
+        "registry_revision",
+        "requested_capabilities"
+      ],
+      "properties": {
+        "effective_limits": {
+          "$ref": "#/definitions/ModelLimits"
+        },
+        "fallback_index": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "registry_revision": {
+          "type": "string"
+        },
+        "requested_capabilities": {
+          "$ref": "#/definitions/CapabilityRequirements"
         }
       }
     },

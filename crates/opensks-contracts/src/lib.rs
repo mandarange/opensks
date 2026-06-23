@@ -41,6 +41,8 @@ pub enum EngineRequestKind {
     Hello,
     Health,
     SubscribeEvents,
+    ConversationTurnStart,
+    ConversationSupervisorTick,
     RunStart,
     RunPause,
     RunResume,
@@ -200,7 +202,7 @@ impl EventKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EngineRequest {
     pub schema: String,
     pub id: String,
@@ -211,8 +213,14 @@ pub struct EngineRequest {
     pub params: EngineRequestParams,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct EngineRequestParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_turn_start: Option<ConversationTurnStartRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_ttl_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -275,6 +283,38 @@ impl EngineRequest {
                 graph_path: None,
                 objective: Some(objective.into()),
                 run_id: None,
+                ..EngineRequestParams::default()
+            },
+        }
+    }
+
+    pub fn conversation_turn_start(request: ConversationTurnStartRequest) -> Self {
+        Self {
+            schema: ENGINE_REQUEST_SCHEMA.to_string(),
+            id: request.request_id.clone(),
+            kind: EngineRequestKind::ConversationTurnStart,
+            protocol_version: CONTRACT_VERSION.to_string(),
+            params: EngineRequestParams {
+                conversation_turn_start: Some(request),
+                ..EngineRequestParams::default()
+            },
+        }
+    }
+
+    pub fn conversation_supervisor_tick(
+        id: impl Into<String>,
+        supervisor_id: impl Into<String>,
+        lease_ttl_ms: u64,
+    ) -> Self {
+        Self {
+            schema: ENGINE_REQUEST_SCHEMA.to_string(),
+            id: id.into(),
+            kind: EngineRequestKind::ConversationSupervisorTick,
+            protocol_version: CONTRACT_VERSION.to_string(),
+            params: EngineRequestParams {
+                supervisor_id: Some(supervisor_id.into()),
+                lease_ttl_ms: Some(lease_ttl_ms),
+                reason_code: Some("conversation_supervisor_tick_requested".to_string()),
                 ..EngineRequestParams::default()
             },
         }
@@ -688,6 +728,20 @@ pub struct ModelRejection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelRouteReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    pub registry_revision: String,
+    pub reason_code: String,
+    pub requested_capabilities: CapabilityRequirements,
+    pub effective_limits: ModelLimits,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_index: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RoutingDecision {
     pub schema: String,
     pub id: String,
@@ -700,6 +754,8 @@ pub struct RoutingDecision {
     #[serde(default)]
     pub rejected_models: Vec<ModelRejection>,
     pub model_snapshot_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_receipt: Option<ModelRouteReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1635,9 +1691,41 @@ pub struct RetentionPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReleaseArtifactDigest {
+    pub name: String,
+    pub path: String,
+    pub required: bool,
+    pub present: bool,
+    #[serde(default)]
+    pub digest: Option<String>,
+    #[serde(default)]
+    pub source_commit_sha: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReleaseProofBlocker {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ReleaseProof {
     pub schema: String,
     pub version: String,
+    #[serde(default)]
+    pub source_commit_sha: Option<String>,
+    #[serde(default)]
+    pub workspace_dirty: bool,
+    #[serde(default)]
+    pub artifact_digests: Vec<ReleaseArtifactDigest>,
+    #[serde(default)]
+    pub missing_artifacts: Vec<String>,
+    #[serde(default)]
+    pub same_sha_artifact_binding: bool,
+    #[serde(default)]
+    pub artifact_digest_gate_passed: bool,
+    #[serde(default)]
+    pub blockers: Vec<ReleaseProofBlocker>,
     pub signed_app: bool,
     pub notarized: bool,
     pub rollback_plan_ref: String,
@@ -2199,6 +2287,70 @@ mod tests {
             EventKind::parse_label("steering_requested"),
             EventKind::SteeringRequested
         );
+    }
+
+    #[test]
+    fn conversation_turn_start_request_roundtrips_as_engine_request() {
+        let turn_request = ConversationTurnStartRequest {
+            schema: CONVERSATION_TURN_START_REQUEST_SCHEMA.to_string(),
+            request_id: "req-conversation-turn".to_string(),
+            project_id: "proj-1".to_string(),
+            conversation_id: "conv-1".to_string(),
+            client_turn_id: "client-turn-1".to_string(),
+            message: UserMessageInput {
+                text: "make the daemon accept this turn".to_string(),
+                attachment_refs: vec![],
+            },
+            settings: ConversationTurnSettings {
+                model: ModelSelection {
+                    mode: ModelSelectionMode::Auto,
+                    model_id: None,
+                    fallback_model_ids: vec![],
+                },
+                reasoning_effort: ReasoningEffort::Standard,
+                execution_mode: ExecutionMode::Worktree,
+                pipeline_id: "auto".to_string(),
+                graph_revision: None,
+                max_parallelism: 4,
+                verifier_count: 1,
+                tool_policy_id: "project-default".to_string(),
+                approval_policy_id: "safe-interactive".to_string(),
+                token_budget: None,
+                cost_budget_usd: None,
+                timeout_ms: None,
+                image_model_id: None,
+            },
+            context: TurnContextSelection::default(),
+            idempotency_key: "idem-conversation-turn".to_string(),
+        };
+        let request = EngineRequest::conversation_turn_start(turn_request.clone());
+        let json = serde_json::to_string(&request).expect("conversation turn request json");
+        assert!(json.contains("\"kind\":\"conversation_turn_start\""));
+        assert!(json.contains("\"conversation_turn_start\""));
+        let decoded: EngineRequest =
+            serde_json::from_str(&json).expect("decode conversation turn request");
+        assert_eq!(decoded.kind, EngineRequestKind::ConversationTurnStart);
+        assert_eq!(
+            decoded.params.conversation_turn_start.as_ref(),
+            Some(&turn_request)
+        );
+    }
+
+    #[test]
+    fn conversation_supervisor_tick_request_roundtrips() {
+        let request =
+            EngineRequest::conversation_supervisor_tick("req-supervisor", "daemon-supervisor", 750);
+        let json = serde_json::to_string(&request).expect("supervisor tick request json");
+        assert!(json.contains("\"kind\":\"conversation_supervisor_tick\""));
+        assert!(json.contains("\"supervisor_id\":\"daemon-supervisor\""));
+        let decoded: EngineRequest =
+            serde_json::from_str(&json).expect("decode supervisor tick request");
+        assert_eq!(decoded.kind, EngineRequestKind::ConversationSupervisorTick);
+        assert_eq!(
+            decoded.params.supervisor_id.as_deref(),
+            Some("daemon-supervisor")
+        );
+        assert_eq!(decoded.params.lease_ttl_ms, Some(750));
     }
 
     #[test]

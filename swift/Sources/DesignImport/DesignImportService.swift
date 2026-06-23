@@ -11,11 +11,11 @@
 // nothing here sends the user's data anywhere. The promotion is gated on an
 // explicit `approve(quarantineId:)` call; `import(...)` never promotes.
 //
-// The LIVE implementation shells the bundled CLI exactly like LiveGitService (an
-// off-main detached task, decode the shared snake_case JSON). A MOCK drives the
-// tests without touching disk or spawning a process and COUNTS calls so the
-// quarantine → human-review → promote flow is observable — in particular a test
-// can assert that `import(...)` does NOT call `approve(...)`.
+// The LIVE implementation routes CLI execution through ProcessSupervisor and
+// decodes the shared snake_case JSON. A MOCK drives the tests without touching
+// disk or spawning a process and COUNTS calls so the quarantine → human-review →
+// promote flow is observable — in particular a test can assert that `import(...)`
+// does NOT call `approve(...)`.
 
 import Foundation
 
@@ -61,12 +61,13 @@ protocol DesignImportService: Sendable {
 
 // MARK: - Live (CLI-backed) implementation
 
-/// Shells the bundled `opensks design import…` subcommands. Process work runs on a
-/// detached cooperative task; decoding maps the shared snake_case contract. LOCAL
-/// only — there is no upload/network path anywhere in here.
+/// Runs the bundled `opensks design import…` subcommands through the shared
+/// ProcessSupervisor; decoding maps the shared snake_case contract. LOCAL only —
+/// there is no upload/network path anywhere in here.
 struct LiveDesignImportService: DesignImportService {
     let cli: URL
     let workspace: URL
+    private let supervisor = ProcessSupervisor()
 
     func importLocal(source: String, kind: DesignImportKind) async throws -> DesignImportResult {
         let result = try await run(args: [
@@ -104,7 +105,7 @@ struct LiveDesignImportService: DesignImportService {
         return try Self.decodeOrThrow(result, as: DesignImportStatusResult.self)
     }
 
-    // MARK: Process plumbing (mirrors LiveGitService)
+    // MARK: Process plumbing
 
     private struct ProcessResult {
         let exitCode: Int32
@@ -113,35 +114,29 @@ struct LiveDesignImportService: DesignImportService {
     }
 
     private func run(args: [String]) async throws -> ProcessResult {
-        let cli = self.cli
-        let workspace = self.workspace
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = cli
-                process.arguments = args
-                process.currentDirectoryURL = workspace
-                let outPipe = Pipe()
-                let errPipe = Pipe()
-                process.standardOutput = outPipe
-                process.standardError = errPipe
-                do {
-                    try process.run()
-                } catch {
-                    continuation.resume(throwing: DesignImportServiceError.transport(
-                        message: "could not launch opensks design: \(error.localizedDescription)"
-                    ))
-                    return
-                }
-                let out = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let err = errPipe.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-                continuation.resume(returning: ProcessResult(
-                    exitCode: process.terminationStatus,
-                    stdout: out,
-                    stderr: err
-                ))
+        do {
+            let result = try await supervisor.run(ProcessSupervisor.Spec(
+                executable: cli,
+                arguments: args,
+                workingDirectory: workspace,
+                timeoutSeconds: 120
+            ))
+            if result.timedOut {
+                throw DesignImportServiceError.transport(
+                    message: "opensks design timed out"
+                )
             }
+            return ProcessResult(
+                exitCode: result.exitCode,
+                stdout: result.stdout,
+                stderr: result.stderr
+            )
+        } catch let error as DesignImportServiceError {
+            throw error
+        } catch {
+            throw DesignImportServiceError.transport(
+                message: "could not launch opensks design: \(error.localizedDescription)"
+            )
         }
     }
 

@@ -7,9 +7,16 @@ license.workspace = true
 
 [dependencies]
 opensks-contracts = { path = "../opensks-contracts" }
+opensks-patch-engine = { path = "../opensks-patch-engine" }
+opensks-policy = { path = "../opensks-policy" }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[features]
+default = []
+simulation = []
 
 [lints]
 workspace = true

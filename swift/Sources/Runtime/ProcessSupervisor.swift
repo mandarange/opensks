@@ -31,6 +31,8 @@ actor ProcessSupervisor {
         let exitCode: Int32
         let stdout: Data
         let stderr: Data
+        let stdoutTruncated: Bool
+        let stderrTruncated: Bool
         let timedOut: Bool
     }
 
@@ -43,19 +45,33 @@ actor ProcessSupervisor {
     private final class BoundedBuffer: @unchecked Sendable {
         private let lock = NSLock()
         private var data = Data()
+        private var truncated = false
         private let cap: Int
         init(cap: Int) { self.cap = cap }
         func append(_ chunk: Data) {
             lock.lock()
             defer { lock.unlock() }
-            guard data.count < cap else { return }
+            guard data.count < cap else {
+                if !chunk.isEmpty { truncated = true }
+                return
+            }
             let room = cap - data.count
-            data.append(room >= chunk.count ? chunk : chunk.prefix(room))
+            if room >= chunk.count {
+                data.append(chunk)
+            } else {
+                data.append(chunk.prefix(room))
+                truncated = true
+            }
         }
         func snapshot() -> Data {
             lock.lock()
             defer { lock.unlock() }
             return data
+        }
+        var wasTruncated: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return truncated
         }
     }
 
@@ -103,6 +119,8 @@ actor ProcessSupervisor {
                             exitCode: proc.terminationStatus,
                             stdout: outBuf.snapshot(),
                             stderr: errBuf.snapshot(),
+                            stdoutTruncated: outBuf.wasTruncated,
+                            stderrTruncated: errBuf.wasTruncated,
                             timedOut: timedOut.value
                         ))
                 }

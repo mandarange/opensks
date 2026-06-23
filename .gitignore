@@ -91,3 +91,35 @@ swift/.build/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# BEGIN Sneakoscope Codex generated files
+.sneakoscope/missions/
+.sneakoscope/reports/
+.sneakoscope/tmp/
+.sneakoscope/cache/
+.sneakoscope/arenas/
+.sneakoscope/processes/
+.sneakoscope/bench/
+.sneakoscope/blackbox/
+.sneakoscope/logs/
+.sneakoscope/state/
+.sneakoscope/db/
+.sneakoscope/evidence/
+.sneakoscope/proof/
+.sneakoscope/perf/
+.sneakoscope/research/
+.sneakoscope/skills/
+.sneakoscope/smoke-archives/
+.sneakoscope/memory/
+.sneakoscope/wiki/indexes/
+.sneakoscope/wiki/context-packs/
+.sneakoscope/wiki/tmp/
+.sneakoscope/wiki/context-pack.json
+.sneakoscope/wiki/image-assets.json
+.sneakoscope/wiki/image-voxel-ledger.json
+.sneakoscope/wiki/visual-anchors.json
+.sneakoscope/wiki/last-sweep-report.json
+.codex/
+.agents/
+AGENTS.md
+# END Sneakoscope Codex generated files

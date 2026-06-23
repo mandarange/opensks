@@ -367,6 +367,20 @@ final class MockDesignStudioService: DesignStudioService, @unchecked Sendable {
     }
 
     func saveTokens(packageId: String, tokens: [DesignTokenEntry]) async throws -> DesignSaveResult {
+        saveTokensLocked(packageId: packageId, tokens: tokens)
+    }
+
+    func compile(packageId: String) async throws -> DesignCompileResult {
+        compileLocked(packageId: packageId)
+    }
+
+    func listPackages() async throws -> [DesignPackageListEntry] {
+        listPackagesLocked()
+    }
+
+    // MARK: Synchronous critical sections
+
+    private func saveTokensLocked(packageId: String, tokens: [DesignTokenEntry]) -> DesignSaveResult {
         lock.lock(); defer { lock.unlock() }
         saveCalls.append((packageId: packageId, tokens: tokens))
         return DesignSaveResult(
@@ -378,19 +392,17 @@ final class MockDesignStudioService: DesignStudioService, @unchecked Sendable {
         )
     }
 
-    func compile(packageId: String) async throws -> DesignCompileResult {
+    private func compileLocked(packageId: String) -> DesignCompileResult {
         lock.lock(); defer { lock.unlock() }
         compileCalls.append(packageId)
         return DesignCompileResult(packageId: packageId, ok: true, swiftBytes: 100, error: nil)
     }
 
-    func listPackages() async throws -> [DesignPackageListEntry] {
+    private func listPackagesLocked() -> [DesignPackageListEntry] {
         lock.lock(); defer { lock.unlock() }
         listCallCount += 1
         return registryPackages
     }
-
-    // MARK: Synchronous critical sections
 
     private func auditLocked(packageId: String) -> DesignAuditReport {
         lock.lock(); defer { lock.unlock() }

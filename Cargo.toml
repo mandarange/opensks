@@ -21,6 +21,7 @@ members = [
   "crates/opensks-context",
   "crates/opensks-image",
   "crates/opensks-intel",
+  "crates/opensks-patch-engine",
   "crates/opensks-policy",
   "crates/opensks-proof",
   "crates/opensks-provider",
@@ -46,6 +47,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "0.8"
 thiserror = "2"
+sha2 = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 # Well-vetted age encryption (X25519 recipients + authenticated ChaCha20-Poly1305
 # via the age format). All vault crypto MUST go through this crate — never roll
@@ -75,4 +78,12 @@ readme.workspace = true
 opensks-contracts = { path = "crates/opensks-contracts" }
 opensks-cli = { path = "crates/opensks-cli" }
 opensks-daemon = { path = "crates/opensks-daemon" }
+opensks-provider = { path = "crates/opensks-provider" }
 serde_json = { workspace = true }
+
+[features]
+default = []
+simulation = [
+  "opensks-cli/simulation",
+  "opensks-daemon/simulation",
+]

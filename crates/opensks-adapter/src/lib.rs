@@ -6,27 +6,29 @@
 //!
 //! * [`AgentAdapter`] — what the engine drives. An adapter streams typed
 //!   [`AgentEventEnvelope`]s and returns an [`AgentRunOutcome`].
-//! * [`LocalTestAdapter`] — a *deterministic but genuinely real* adapter. Unlike
-//!   the forbidden no-op worker, it performs actual file IO inside the request
-//!   workspace, produces a real [`PatchProposal`]/[`PatchApplyResult`] with
-//!   correct pre/post-image hashes, and reports an honest terminal state. It
-//!   needs no model credentials, so the Chat → real-code-edit vertical is
-//!   provable in tests.
+//! * `LocalTestAdapter` — an explicit deterministic simulation adapter. It
+//!   performs real file IO only when a caller provides a structured local-test
+//!   instruction; ordinary product chat must surface setup-required instead of
+//!   silently falling back to this adapter. It is compiled only for tests or the
+//!   explicit `simulation` feature.
 //!
 //! No model adapter lives here — that is the credentialed work deferred to the
 //! release gate. The local test adapter is what keeps the vertical honest and
 //! exercised in CI.
 
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use opensks_contracts::projection::RunProjectionState;
+#[cfg(any(test, feature = "simulation"))]
 use opensks_contracts::{
-    AGENT_ADAPTER_DESCRIPTOR_SCHEMA, AGENT_EVENT_ENVELOPE_SCHEMA, AgentAdapterDescriptor,
-    AgentAdapterKind, AgentEventEnvelope, AgentEventKind, FileOperation, FilePatch,
-    PATCH_APPLY_RESULT_SCHEMA, PATCH_PROPOSAL_SCHEMA, PatchApplyResult, PatchProposal, RiskLevel,
-    Sensitivity,
+    AGENT_ADAPTER_DESCRIPTOR_SCHEMA, AGENT_EVENT_ENVELOPE_SCHEMA, AgentAdapterKind, FilePatch,
+    PATCH_PROPOSAL_SCHEMA, RiskLevel, Sensitivity,
 };
+use opensks_contracts::{
+    AgentAdapterDescriptor, AgentEventEnvelope, AgentEventKind, FileOperation,
+    PATCH_APPLY_RESULT_SCHEMA, PatchApplyResult, PatchProposal,
+};
+use opensks_patch_engine::{PatchEngine, PlannedPatchWrite};
 use serde::{Deserialize, Serialize};
 
 pub mod agentic;
@@ -36,7 +38,7 @@ pub use agentic::{
     run_agentic_loop,
 };
 pub use openrouter::{
-    ChatCompleter, CurlChatCompleter, OpenRouterAdapter, OpenRouterToolDriver, parse_step,
+    ChatCompleter, NativeHttpChatCompleter, OpenRouterAdapter, OpenRouterToolDriver, parse_step,
     tool_definitions,
 };
 
@@ -172,10 +174,12 @@ impl LocalTestInstruction {
 }
 
 /// A deterministic adapter that performs real file edits. Use in tests and the
-/// zero-model "simulation" lane — never presented to the user as a live model.
+/// explicit "simulation" lane — never presented to the user as a live model.
+#[cfg(any(test, feature = "simulation"))]
 #[derive(Debug, Default, Clone)]
 pub struct LocalTestAdapter;
 
+#[cfg(any(test, feature = "simulation"))]
 impl LocalTestAdapter {
     pub fn new() -> Self {
         Self
@@ -210,6 +214,7 @@ impl LocalTestAdapter {
     }
 }
 
+#[cfg(any(test, feature = "simulation"))]
 impl AgentAdapter for LocalTestAdapter {
     fn descriptor(&self) -> AgentAdapterDescriptor {
         AgentAdapterDescriptor {
@@ -392,110 +397,53 @@ pub fn apply_file_writes(
     proposal_id: &str,
     writes: &[PlannedWrite],
 ) -> Result<PatchApplyResult, AgentAdapterError> {
-    let result = |applied: bool,
-                  applied_files: Vec<String>,
-                  conflict_paths: Vec<String>,
-                  rolled_back: bool,
-                  reason: &str| PatchApplyResult {
-        schema: PATCH_APPLY_RESULT_SCHEMA.to_string(),
-        proposal_id: proposal_id.to_string(),
-        applied,
-        applied_files,
-        conflict_paths,
-        rolled_back,
-        reason_code: reason.to_string(),
-        evidence_refs: vec![],
-    };
-
-    // Phase 1: resolve + validate pre-images.
-    let mut targets: Vec<(String, PathBuf, Option<String>)> = Vec::with_capacity(writes.len());
-    let mut conflicts = Vec::new();
-    for w in writes {
-        let abs = resolve_in_workspace(workspace, &w.path)?;
-        let current = std::fs::read_to_string(&abs).ok();
-        let current_hash = content_hash(current.as_deref().unwrap_or(""));
-        if current_hash != w.expected_before_hash {
-            conflicts.push(w.path.clone());
+    let engine = PatchEngine::open(workspace).map_err(|error| match error {
+        opensks_patch_engine::PatchEngineError::PathEscape(path)
+        | opensks_patch_engine::PatchEngineError::SymlinkRejected(path) => {
+            AgentAdapterError::PathEscape(path)
         }
-        targets.push((w.path.clone(), abs, current));
-    }
-    if !conflicts.is_empty() {
-        return Ok(result(
-            false,
-            vec![],
-            conflicts,
-            false,
-            "stale_precondition",
-        ));
-    }
-
-    // Phase 2: apply, rolling every target back on the first failure.
-    let mut applied_files = Vec::new();
-    for (index, w) in writes.iter().enumerate() {
-        let (_, abs, _) = &targets[index];
-        let attempt = (|| -> std::io::Result<()> {
-            if let Some(parent) = abs.parent() {
-                std::fs::create_dir_all(parent)?;
+        other => AgentAdapterError::InvalidInstruction(other.to_string()),
+    })?;
+    let planned: Vec<PlannedPatchWrite> = writes
+        .iter()
+        .map(|write| PlannedPatchWrite {
+            path: write.path.clone(),
+            expected_before_hash: write.expected_before_hash.clone(),
+            after_content: write.after_content.clone(),
+            operation: write.operation,
+            rename_to: None,
+        })
+        .collect();
+    engine
+        .apply(proposal_id, &planned)
+        .map_err(|error| match error {
+            opensks_patch_engine::PatchEngineError::PathEscape(path)
+            | opensks_patch_engine::PatchEngineError::SymlinkRejected(path) => {
+                AgentAdapterError::PathEscape(path)
             }
-            std::fs::write(abs, w.after_content.as_bytes())
-        })();
-        if attempt.is_err() {
-            rollback(&targets[..=index]);
-            return Ok(result(false, vec![], vec![], true, "io_rolled_back"));
-        }
-        applied_files.push(w.path.clone());
-    }
-    Ok(result(true, applied_files, vec![], false, "applied"))
+            other => AgentAdapterError::InvalidInstruction(other.to_string()),
+        })
 }
 
-/// Restore each target to its pre-image: rewrite the snapshot, or remove the
-/// file if it did not exist before.
-fn rollback(targets: &[(String, PathBuf, Option<String>)]) {
-    for (_, abs, snapshot) in targets {
-        match snapshot {
-            Some(original) => {
-                let _ = std::fs::write(abs, original.as_bytes());
-            }
-            None => {
-                let _ = std::fs::remove_file(abs);
-            }
-        }
-    }
-}
-
-/// Resolve a workspace-relative path, rejecting absolute paths and any `..`
-/// traversal (recovery directive §19.6 — no path escape).
+/// Resolve a workspace-relative path through the PatchEngine path guard.
 fn resolve_in_workspace(workspace: &Path, rel: &str) -> Result<PathBuf, AgentAdapterError> {
-    let candidate = Path::new(rel);
-    if candidate.is_absolute() {
-        return Err(AgentAdapterError::PathEscape(rel.to_string()));
-    }
-    for component in candidate.components() {
-        use std::path::Component;
-        match component {
-            Component::Normal(_) | Component::CurDir => {}
-            _ => return Err(AgentAdapterError::PathEscape(rel.to_string())),
+    let engine = PatchEngine::open(workspace)
+        .map_err(|error| AgentAdapterError::InvalidInstruction(error.to_string()))?;
+    engine.resolve(rel).map_err(|error| match error {
+        opensks_patch_engine::PatchEngineError::PathEscape(path)
+        | opensks_patch_engine::PatchEngineError::SymlinkRejected(path) => {
+            AgentAdapterError::PathEscape(path)
         }
-    }
-    Ok(workspace.join(candidate))
+        other => AgentAdapterError::InvalidInstruction(other.to_string()),
+    })
 }
 
-/// A stable, non-cryptographic content hash. Sufficient for the test adapter's
-/// change detection; the production file service uses a real digest.
 fn content_hash(content: &str) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut hasher);
-    format!("h{:016x}", hasher.finish())
+    opensks_patch_engine::content_hash(content)
 }
 
-/// A minimal unified-diff-ish body for review/display. Not a full diff engine —
-/// the production path computes a real unified diff.
 fn minimal_unified_diff(path: &str, before: &str, after: &str) -> String {
-    format!(
-        "--- a/{path}\n+++ b/{path}\n@@ before {} bytes @@\n@@ after {} bytes @@\n",
-        before.len(),
-        after.len()
-    )
+    opensks_patch_engine::unified_diff(path, before, after)
 }
 
 /// Pure planning for a local-test edit (no writes, no events): resolve the path,

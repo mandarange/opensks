@@ -6,14 +6,50 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
   security:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
+      - name: Prepare security artifacts
+        run: mkdir -p artifacts/security/sbom
+      - name: Cargo deny policy
+        run: cargo deny check
+      - name: Cargo audit advisories
+        run: |
+          set -o pipefail
+          cargo audit 2>&1 | tee artifacts/security/cargo-audit.txt
+      - name: Generate CycloneDX SBOM
+        run: |
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --format json --spec-version 1.5 --all-features
+          find . -name bom.json -not -path './target/*' -exec cp --parents {} artifacts/security/sbom/ \;
+          test -n "$(find artifacts/security/sbom -name bom.json -print -quit)"
+      - name: Gitleaks secret scan
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo" \
+            ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            detect \
+            --source=/repo \
+            --config=/repo/.gitleaks.toml \
+            --no-git \
+            --redact \
+            --report-format=json \
+            --report-path=/repo/artifacts/security/gitleaks-report.json \
+            --exit-code=1
       - name: Secret scan command
-        run: cargo run -- security audit
+        run: |
+          set -o pipefail
+          cargo run -- security audit 2>&1 | tee artifacts/security/opensks-security-audit.txt
       - name: Path and rollback guards
         run: cargo test -p opensks-git --lib
       - name: Disabled model invariant
@@ -30,3 +66,10 @@ jobs:
         run: cargo test -p opensks-git outbox_dispatch_never_executes_push_without_matching_approval -- --exact
       - name: No broad OpenSKS ignore
         run: '! grep -n "^\\.opensks/$" .gitignore'
+      - name: Upload security evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opensks-security-evidence
+          path: artifacts/security
+          if-no-files-found: error

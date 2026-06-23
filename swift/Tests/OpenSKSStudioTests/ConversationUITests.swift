@@ -80,11 +80,30 @@ final class ConversationUITests: XCTestCase {
 
     func testUnknownEnumValuesFallBackInsteadOfThrowing() throws {
         let json = """
-        {"schema":"s","id":"m1","project_id":"p1","conversation_id":"c1","turn_id":null,"role":"tool","state":"buffering","content_redacted":"hi","sequence":1,"created_at_ms":1,"updated_at_ms":1}
+        {"schema":"s","id":"m1","project_id":"p1","conversation_id":"c1","turn_id":null,"role":"future_role","state":"buffering","content_redacted":"hi","sequence":1,"created_at_ms":1,"updated_at_ms":1}
         """
         let decoded = try JSONDecoder.opensks.decode(ConversationMessage.self, from: Data(json.utf8))
         XCTAssertEqual(decoded.role, .unknown)
         XCTAssertEqual(decoded.state, .unknown)
+    }
+
+    func testTimelineDecodesSnakeCaseWireContract() throws {
+        let json = """
+        {"schema":"opensks.conversation-timeline.v1","conversation_id":"c1","items":[{"schema":"opensks.timeline-item.v1","id":"timeline-m1","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":2000000,"kind":"assistant_message","state":"completed","payload":{"message_id":"m1","role":"assistant","message_state":"complete","content_redacted":"done","run_relation":"primary"},"created_at_ms":10,"updated_at_ms":20},{"schema":"opensks.timeline-item.v1","id":"timeline-event-e1","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":2000002,"kind":"error","state":"verification_failed","payload":{"event_id":"e1","event_kind":"verification_failed","event_sequence":2,"content_redacted":"Needs setup","payload_redacted":{"code":"setup_required"},"projection":"event_journal_replay"},"created_at_ms":11,"updated_at_ms":11}]}
+        """
+        let timeline = try JSONDecoder.opensks.decode(ConversationTimeline.self, from: Data(json.utf8))
+        XCTAssertEqual(timeline.schema, "opensks.conversation-timeline.v1")
+        XCTAssertEqual(timeline.conversationId, "c1")
+        let item = try XCTUnwrap(timeline.items.first)
+        XCTAssertEqual(item.kind, .assistantMessage)
+        XCTAssertEqual(item.runId, "r1")
+        XCTAssertEqual(item.payload.messageId, "m1")
+        XCTAssertEqual(item.payload.contentRedacted, "done")
+        XCTAssertEqual(item.message?.role, .assistant)
+        let event = try XCTUnwrap(timeline.items.last)
+        XCTAssertEqual(event.kind, .error)
+        XCTAssertNil(event.message)
+        XCTAssertEqual(event.payload.contentRedacted, "Needs setup")
     }
 
     func testMessagePageDecodesHasMore() throws {
@@ -219,6 +238,34 @@ final class ConversationUITests: XCTestCase {
         XCTAssertEqual(store.draft(for: "a"), "")
     }
 
+    // MARK: - Thread settings
+
+    func testThreadSettingsPersistAndReloadThroughStore() async {
+        let mock = MockConversationService(summaries: [summary(id: "a", title: "Alpha")])
+        let store = ConversationStore(service: mock, messagePageSize: 50)
+        await store.load()
+
+        XCTAssertEqual(store.threadSettings(for: "a").executionMode, .worktree)
+        XCTAssertEqual(store.threadSettings(for: "a").reasoningEffort, .standard)
+
+        await store.updateThreadSettings(for: "a") { settings in
+            settings.executionMode = .readOnly
+            settings.reasoningEffort = .deep
+            settings.pipelineId = "parallel-build"
+            settings.maxParallelism = 8
+            settings.toolPolicyId = "read-only"
+        }
+
+        let relaunched = ConversationStore(service: mock, messagePageSize: 50)
+        await relaunched.load()
+        let persisted = relaunched.threadSettings(for: "a")
+        XCTAssertEqual(persisted.executionMode, .readOnly)
+        XCTAssertEqual(persisted.reasoningEffort, .deep)
+        XCTAssertEqual(persisted.pipelineId, "parallel-build")
+        XCTAssertEqual(persisted.maxParallelism, 8)
+        XCTAssertEqual(persisted.toolPolicyId, "read-only")
+    }
+
     // MARK: - Pagination
 
     func testMessagePaginationAppendsOlderPages() async {
@@ -237,11 +284,13 @@ final class ConversationUITests: XCTestCase {
         await store.load()
 
         XCTAssertEqual(store.messages.map(\.sequence), [2, 3])
+        XCTAssertEqual(store.timelineItems(for: "a").map(\.sequence), [2, 3])
         XCTAssertTrue(store.hasMoreMessages)
 
         await store.loadOlderMessages()
 
         XCTAssertEqual(store.messages.map(\.sequence), [1, 2, 3], "older page prepends oldest->newest")
+        XCTAssertEqual(store.timelineItems(for: "a").map(\.sequence), [1, 2, 3])
         XCTAssertFalse(store.hasMoreMessages)
     }
 
@@ -255,6 +304,7 @@ final class ConversationUITests: XCTestCase {
         await store.select("a")
 
         XCTAssertEqual(store.messages.map(\.contentRedacted), ["seeded message"])
+        XCTAssertEqual(store.timelineItems(for: "a").map { $0.payload.contentRedacted ?? "" }, ["seeded message"])
     }
 
     // MARK: - Render smoke tests

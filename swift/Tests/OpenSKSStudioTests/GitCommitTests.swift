@@ -310,6 +310,12 @@ final class GitCommitTests: XCTestCase {
         XCTAssertEqual(cards.first?.paths, ["a.rs", "b.rs"],
                        "the card lists exactly the committed paths")
         XCTAssertEqual(cards.first?.message, "local commit")
+        let timeline = convStore.timelineItems(for: "conv-1")
+        XCTAssertEqual(timeline.last?.kind, .commitReceipt, "commit posts into the durable timeline read model")
+        XCTAssertEqual(timeline.last?.commitCard?.commit, result.commit)
+        XCTAssertEqual(timeline.last?.payload.sourceSchema, "opensks.git-commit.v1")
+        XCTAssertEqual(timeline.last?.payload.projection, "git_receipt")
+        XCTAssertEqual(timeline.last?.payload.committed, true)
     }
 
     // MARK: - Rendering: non-nil + fills width (no letterbox)

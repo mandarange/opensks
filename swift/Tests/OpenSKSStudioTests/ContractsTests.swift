@@ -383,6 +383,177 @@ final class ContractsTests: XCTestCase {
         XCTAssertEqual(params["graph_path"] as? String, ".opensks/pipelines/editor/current.graph.json")
     }
 
+    func testConversationTurnStartRequestEncodesTypedPayload() throws {
+        let turnRequest = ConversationTurnStartRequest(
+            schema: "opensks.conversation-turn-start-request.v1",
+            requestId: "req-conversation-turn",
+            projectId: "project-1",
+            conversationId: "conversation-1",
+            clientTurnId: "client-turn-1",
+            message: UserMessageInput(text: "start this turn", attachmentRefs: []),
+            settings: .defaultForTurn(),
+            context: .empty,
+            idempotencyKey: "idem-1"
+        )
+        let request = EngineRequestEnvelope.conversationTurnStart(turnRequest)
+        let data = try JSONEncoder.opensks.encode(request)
+        let json = String(decoding: data, as: UTF8.self)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let params = try XCTUnwrap(object["params"] as? [String: Any])
+        let nested = try XCTUnwrap(params["conversation_turn_start"] as? [String: Any])
+        let settings = try XCTUnwrap(nested["settings"] as? [String: Any])
+        let model = try XCTUnwrap(settings["model"] as? [String: Any])
+
+        XCTAssertTrue(json.contains("\"kind\":\"conversation_turn_start\""))
+        XCTAssertEqual(object["id"] as? String, "req-conversation-turn")
+        XCTAssertEqual(nested["request_id"] as? String, "req-conversation-turn")
+        XCTAssertEqual(nested["project_id"] as? String, "project-1")
+        XCTAssertEqual(nested["conversation_id"] as? String, "conversation-1")
+        XCTAssertEqual(nested["idempotency_key"] as? String, "idem-1")
+        XCTAssertEqual(settings["execution_mode"] as? String, "worktree")
+        XCTAssertEqual(settings["reasoning_effort"] as? String, "standard")
+        XCTAssertEqual(settings["pipeline_id"] as? String, "auto")
+        XCTAssertEqual(model["mode"] as? String, "auto")
+    }
+
+    func testConversationThreadSettingsRoundTripsSnakeCaseWireContract() throws {
+        let settings = ConversationThreadSettings(
+            schema: "opensks.thread-settings.v1",
+            conversationId: "conversation-1",
+            modelSelection: ModelSelection(
+                mode: .pinned,
+                modelId: "openai/gpt-4o-mini",
+                fallbackModelIds: []
+            ),
+            reasoningEffort: .deep,
+            executionMode: .readOnly,
+            pipelineId: "parallel-build",
+            maxParallelism: 8,
+            verifierCount: 2,
+            toolPolicyId: "read-only",
+            approvalPolicyId: "safe-interactive",
+            imageModelId: nil,
+            updatedAtMs: 42
+        )
+        let data = try JSONEncoder.opensks.encode(settings)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let model = try XCTUnwrap(object["model_selection"] as? [String: Any])
+
+        XCTAssertEqual(object["schema"] as? String, "opensks.thread-settings.v1")
+        XCTAssertEqual(object["conversation_id"] as? String, "conversation-1")
+        XCTAssertEqual(object["execution_mode"] as? String, "read_only")
+        XCTAssertEqual(object["reasoning_effort"] as? String, "deep")
+        XCTAssertEqual(object["pipeline_id"] as? String, "parallel-build")
+        XCTAssertEqual(object["tool_policy_id"] as? String, "read-only")
+        XCTAssertEqual(model["mode"] as? String, "pinned")
+        XCTAssertEqual(model["model_id"] as? String, "openai/gpt-4o-mini")
+
+        let decoded = try JSONDecoder.opensks.decode(ConversationThreadSettings.self, from: data)
+        XCTAssertEqual(decoded, settings)
+    }
+
+    func testConversationTurnAcceptedDecodesFromDaemonResponseLine() throws {
+        let lines = [
+            """
+            {"schema":"opensks.conversation-turn-accepted.v1","request_id":"req-conversation-turn","turn_id":"turn-1","run_id":"turn-turn-1","user_message_id":"user-1","assistant_message_id":"assistant-1","stream_id":"stream-turn-1","state":"queued"}
+            """
+        ]
+        let accepted = try XCTUnwrap(EngineProcess.decodeConversationTurnAccepted(lines))
+        XCTAssertEqual(accepted.requestId, "req-conversation-turn")
+        XCTAssertEqual(accepted.turnId, "turn-1")
+        XCTAssertEqual(accepted.runId, "turn-turn-1")
+        XCTAssertEqual(accepted.userMessageId, "user-1")
+        XCTAssertEqual(accepted.assistantMessageId, "assistant-1")
+        XCTAssertEqual(accepted.streamId, "stream-turn-1")
+        XCTAssertEqual(accepted.state, .queued)
+    }
+
+    func testConversationTurnAcceptedRoutesThroughPendingResponseRouter() throws {
+        let router = EnginePendingResponseRouter()
+        let turnRequest = ConversationTurnStartRequest(
+            schema: "opensks.conversation-turn-start-request.v1",
+            requestId: "req-conversation-turn",
+            projectId: "project-1",
+            conversationId: "conversation-1",
+            clientTurnId: "client-turn-1",
+            message: UserMessageInput(text: "start this turn", attachmentRefs: []),
+            settings: .defaultForTurn(),
+            context: .empty,
+            idempotencyKey: "idem-1"
+        )
+        router.register(.conversationTurnStart(turnRequest))
+        router.append(Data("""
+        {"schema":"opensks.conversation-turn-accepted.v1","request_id":"req-conversation-turn","turn_id":"turn-1","run_id":"turn-turn-1","user_message_id":"user-1","assistant_message_id":"assistant-1","stream_id":"stream-turn-1","state":"queued"}
+        {"schema":"opensks.engine-event.v1","event_id":"engine-request-completed-req-conversation-turn","request_id":"req-conversation-turn","event_type":"request_completed","severity":"info","message":"request completed","protocol_version":"opensks.contracts.v1","timestamp_ms":2,"evidence_refs":["daemon:request-completed"],"redacted":true}
+
+        """.utf8))
+
+        let snapshot = router.snapshot(for: "req-conversation-turn")
+        XCTAssertTrue(snapshot.sawRequestEvent)
+        XCTAssertTrue(snapshot.isComplete)
+        XCTAssertEqual(snapshot.lines.count, 1)
+        XCTAssertTrue(snapshot.lines[0].contains("opensks.conversation-turn-accepted.v1"))
+        let accepted = try XCTUnwrap(EngineProcess.decodeConversationTurnAccepted(snapshot.lines))
+        XCTAssertEqual(accepted.runId, "turn-turn-1")
+    }
+
+    func testConversationSupervisorTickRequestEncodesTypedParams() throws {
+        let request = EngineRequestEnvelope.conversationSupervisorTick(
+            id: "req-supervisor",
+            supervisorId: "swift-chat-supervisor",
+            leaseTtlMs: 30_000
+        )
+        let data = try JSONEncoder.opensks.encode(request)
+        let json = String(decoding: data, as: UTF8.self)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let params = try XCTUnwrap(object["params"] as? [String: Any])
+
+        XCTAssertTrue(json.contains("\"kind\":\"conversation_supervisor_tick\""))
+        XCTAssertEqual(object["id"] as? String, "req-supervisor")
+        XCTAssertEqual(params["supervisor_id"] as? String, "swift-chat-supervisor")
+        XCTAssertEqual(params["lease_ttl_ms"] as? Int, 30_000)
+        XCTAssertEqual(params["reason_code"] as? String, "conversation_supervisor_tick_requested")
+    }
+
+    func testConversationSupervisorTickResultDecodesFromDaemonResponseLine() throws {
+        let lines = [
+            """
+            {"schema":"opensks.turn-supervisor-tick.v1","request_id":"req-supervisor","supervisor_id":"swift-chat-supervisor","recovered_expired_leases":1,"claimed":{"turn_id":"turn-1","run_id":"turn-turn-1","project_id":"project-1","conversation_id":"conversation-1","assistant_message_id":"assistant-1","lease_owner":"swift-chat-supervisor","lease_expires_at_ms":12345,"has_model_routing_decision":true},"executed":{"status":"executed","run_state":"completed","assistant_message_id":"assistant-1","last_event_sequence":6,"patch_count":1,"apply_result_count":1}}
+            """
+        ]
+        let tick = try XCTUnwrap(EngineProcess.decodeTurnSupervisorTickResult(lines))
+        XCTAssertEqual(tick.requestId, "req-supervisor")
+        XCTAssertEqual(tick.supervisorId, "swift-chat-supervisor")
+        XCTAssertEqual(tick.recoveredExpiredLeases, 1)
+        XCTAssertEqual(tick.claimed?.runId, "turn-turn-1")
+        XCTAssertEqual(tick.claimed?.hasModelRoutingDecision, true)
+        XCTAssertEqual(tick.executed?.status, "executed")
+        XCTAssertEqual(tick.executed?.runState, .completed)
+        XCTAssertEqual(tick.executed?.lastEventSequence, 6)
+        XCTAssertEqual(tick.executed?.patchCount, 1)
+    }
+
+    func testConversationSupervisorTickRoutesThroughPendingResponseRouter() throws {
+        let router = EnginePendingResponseRouter()
+        router.register(.conversationSupervisorTick(
+            id: "req-supervisor",
+            supervisorId: "swift-chat-supervisor",
+            leaseTtlMs: 30_000
+        ))
+        router.append(Data("""
+        {"schema":"opensks.turn-supervisor-tick.v1","request_id":"req-supervisor","supervisor_id":"swift-chat-supervisor","recovered_expired_leases":0,"claimed":null,"executed":null}
+        {"schema":"opensks.engine-event.v1","event_id":"engine-request-completed-req-supervisor","request_id":"req-supervisor","event_type":"request_completed","severity":"info","message":"request completed","protocol_version":"opensks.contracts.v1","timestamp_ms":2,"evidence_refs":["daemon:request-completed"],"redacted":true}
+
+        """.utf8))
+
+        let snapshot = router.snapshot(for: "req-supervisor")
+        XCTAssertTrue(snapshot.sawRequestEvent)
+        XCTAssertTrue(snapshot.isComplete)
+        XCTAssertEqual(snapshot.lines.count, 1)
+        let tick = try XCTUnwrap(EngineProcess.decodeTurnSupervisorTickResult(snapshot.lines))
+        XCTAssertNil(tick.claimed)
+    }
+
     @MainActor
     func testSubscribeReplayStreamRebuildsExecutionStore() throws {
         let ndjson = """

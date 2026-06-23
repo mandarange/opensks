@@ -14,11 +14,36 @@
     "version"
   ],
   "properties": {
+    "artifact_digest_gate_passed": {
+      "default": false,
+      "type": "boolean"
+    },
+    "artifact_digests": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ReleaseArtifactDigest"
+      }
+    },
+    "blockers": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ReleaseProofBlocker"
+      }
+    },
     "fresh_clone_checked": {
       "type": "boolean"
     },
     "fresh_install_checked": {
       "type": "boolean"
+    },
+    "missing_artifacts": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     },
     "notarized": {
       "type": "boolean"
@@ -26,11 +51,22 @@
     "rollback_plan_ref": {
       "type": "string"
     },
+    "same_sha_artifact_binding": {
+      "default": false,
+      "type": "boolean"
+    },
     "schema": {
       "type": "string"
     },
     "signed_app": {
       "type": "boolean"
+    },
+    "source_commit_sha": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "status": {
       "$ref": "#/definitions/TrustStatus"
@@ -40,9 +76,65 @@
     },
     "version": {
       "type": "string"
+    },
+    "workspace_dirty": {
+      "default": false,
+      "type": "boolean"
     }
   },
   "definitions": {
+    "ReleaseArtifactDigest": {
+      "type": "object",
+      "required": [
+        "name",
+        "path",
+        "present",
+        "required"
+      ],
+      "properties": {
+        "digest": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "source_commit_sha": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ReleaseProofBlocker": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
     "TrustStatus": {
       "type": "string",
       "enum": [

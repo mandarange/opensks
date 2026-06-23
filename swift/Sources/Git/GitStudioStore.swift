@@ -516,7 +516,7 @@ final class GitStudioStore: ObservableObject {
             push.retryable = nil
             push.prompt = nil
             await refreshPushStatus()
-            onPushed?(receipt, intent)
+            onPushed?(receipt, intent, approval)
         } catch let error as GitPushError {
             handlePushError(error, intent: intent)
         } catch {
@@ -558,7 +558,7 @@ final class GitStudioStore: ObservableObject {
 
     /// Fired after a successful push so the host can post a push card into the
     /// active conversation thread. Receives the push receipt + the intent pushed.
-    var onPushed: ((GitPushReceipt, GitPushIntent) -> Void)?
+    var onPushed: ((GitPushReceipt, GitPushIntent, GitPushApproval) -> Void)?
 
     /// Map a typed push error onto the prompt / outbox state. A digest mismatch or
     /// missing ack keeps the prompt OPEN (re-review / re-ack); a failed push closes

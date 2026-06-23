@@ -368,7 +368,9 @@ final class PushOutboxTests: XCTestCase {
         await convStore.load()
         // Wire BOTH sinks exactly like AppCoordinator.wireGit does.
         gitStore.onCommitted = { result, message in convStore.postCommitCard(result, message: message) }
-        gitStore.onPushed = { receipt, intent in convStore.postPushCard(receipt, intent: intent) }
+        gitStore.onPushed = { receipt, intent, approval in
+            convStore.postPushCard(receipt, intent: intent, approval: approval)
+        }
 
         service.setPushIntent(intent())
         await gitStore.commitAndPush()
@@ -384,6 +386,14 @@ final class PushOutboxTests: XCTestCase {
         XCTAssertEqual(pushCards.first?.ref, "feature")
         // Commit and push are two separate receipts.
         XCTAssertEqual(convStore.commitCards(for: "conv-1").count, 1, "the commit card stands separately")
+        let timeline = convStore.timelineItems(for: "conv-1")
+        XCTAssertEqual(timeline.map(\.kind), [.commitReceipt, .pushReceipt])
+        XCTAssertEqual(timeline.last?.pushCard?.remoteOid, receipt.remoteOid)
+        XCTAssertEqual(timeline.last?.payload.intentId, "intent-1")
+        XCTAssertEqual(timeline.last?.payload.effectDigest, "digest-1")
+        XCTAssertEqual(timeline.last?.payload.idempotencyKey, receipt.idempotencyKey)
+        XCTAssertEqual(timeline.last?.payload.approvalMatched, true)
+        XCTAssertFalse(timeline.last?.payload.protected ?? true)
     }
 
     // MARK: - Rendering: approval prompt + both receipts non-nil + fill width

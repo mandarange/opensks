@@ -226,8 +226,8 @@ final class AppCoordinator: ObservableObject {
         git.onCommitted = { [weak self] result, message in
             self?.conversations.postCommitCard(result, message: message)
         }
-        git.onPushed = { [weak self] receipt, intent in
-            self?.conversations.postPushCard(receipt, intent: intent)
+        git.onPushed = { [weak self] receipt, intent, approval in
+            self?.conversations.postPushCard(receipt, intent: intent, approval: approval)
         }
     }
 

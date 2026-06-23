@@ -6,7 +6,8 @@ supply-chain risk. It is the human-readable companion to the machine-readable
 
 ## Scanners
 
-Two complementary scanners enforce this posture in CI:
+The CI security gate combines dependency advisory scanners, secret scanning, and
+release artifact generation:
 
 - **`cargo deny check`** — reads [`deny.toml`](../../deny.toml) and gates on four
   dimensions: known advisories, banned/duplicate crates, license allow-list, and
@@ -14,6 +15,12 @@ Two complementary scanners enforce this posture in CI:
 - **`cargo audit`** — cross-checks the dependency tree against the
   [RustSEC advisory database](https://github.com/rustsec/advisory-db) for known
   vulnerabilities and unmaintained crates.
+- **Gitleaks** — scans the checked-out tree with the repository
+  [`.gitleaks.toml`](../../.gitleaks.toml) allowlist and writes a redacted JSON
+  report artifact.
+- **`cargo cyclonedx`** — generates CycloneDX JSON SBOM files for the Cargo
+  workspace so release proof can bind dependency evidence to the candidate SHA.
+- **CodeQL** — analyzes Rust and Swift through the dedicated `codeql` workflow.
 
 Run them locally before pushing:
 
@@ -21,6 +28,9 @@ Run them locally before pushing:
 cargo install cargo-deny cargo-audit
 cargo deny check
 cargo audit
+docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 detect --source=/repo --config=/repo/.gitleaks.toml --no-git --redact
+cargo install cargo-cyclonedx --version 0.5.9 --locked
+cargo cyclonedx --format json --spec-version 1.5 --all-features
 ```
 
 A new advisory **fails CI** until it is either fixed (bump the dependency) or

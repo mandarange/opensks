@@ -4,15 +4,10 @@
 //!
 //! Secret handling (§7.5 / §19.5): the API key is read from an environment
 //! variable at call time — never hard-coded, never logged, never persisted, and
-//! never placed in process argv. The request is made by shelling out to the
-//! system `curl` (an allowlisted external tool, like git — no new crate, so the
-//! dependency/advisory gate is untouched). The key is handed to `curl` through
-//! its stdin config, so it appears in neither the command line (`ps`) nor any
-//! file on disk. Errors are scrubbed of any `sk-`-prefixed token before they
-//! surface.
+//! never placed in process argv. Transport is native HTTP over rustls-backed
+//! `reqwest`, so provider dispatch no longer depends on a subprocess.
 
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use opensks_contracts::projection::RunProjectionState;
 use opensks_contracts::{
@@ -78,59 +73,37 @@ impl OpenRouterAdapter {
     }
 
     /// POST a chat-completions `body` and return the parsed JSON response. The key
-    /// is read at call time and delivered via curl stdin — never argv, disk, or log.
-    /// A transport failure (curl error / non-JSON) is an `Err`; a provider `error`
-    /// field is left in the returned JSON for the caller to interpret.
+    /// is read at call time and used only as an authorization header in the native
+    /// HTTP request; it is never placed in argv, disk, or event payloads.
     fn post_chat(&self, body: &serde_json::Value) -> Result<serde_json::Value, AgentAdapterError> {
         let api_key = std::env::var(&self.api_key_env)
             .ok()
             .filter(|v| !v.trim().is_empty())
             .ok_or_else(|| AgentAdapterError::MissingApiKey(self.api_key_env.clone()))?;
 
-        let body = body.to_string();
-
-        // curl config delivered via stdin: the key lives only here (a pipe),
-        // never in argv or on disk.
-        let mut config = String::new();
-        config.push_str(&format!("url = \"{}\"\n", self.base_url));
-        config.push_str("request = \"POST\"\n");
-        config.push_str(&format!(
-            "header = \"Authorization: Bearer {}\"\n",
-            escape_curl_config(&api_key)
-        ));
-        config.push_str("header = \"Content-Type: application/json\"\n");
-        config.push_str(&format!("data-raw = \"{}\"\n", escape_curl_config(&body)));
-
-        let mut child = Command::new("curl")
-            .args(["-sS", "--max-time", "120", "--config", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| AgentAdapterError::Provider(format!("could not launch curl: {e}")))?;
-
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| AgentAdapterError::Provider("curl stdin unavailable".to_string()))?
-            .write_all(config.as_bytes())
-            .map_err(|e| AgentAdapterError::Provider(redact(&e.to_string())))?;
-
-        let output = child
-            .wait_with_output()
-            .map_err(|e| AgentAdapterError::Provider(redact(&e.to_string())))?;
-
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .user_agent("opensks-adapter/0.1")
+            .build()
+            .map_err(|error| AgentAdapterError::Provider(redact(&error.to_string())))?;
+        let response = client
+            .post(&self.base_url)
+            .bearer_auth(api_key)
+            .json(body)
+            .send()
+            .map_err(|error| AgentAdapterError::Provider(redact(&error.to_string())))?;
+        let status = response.status();
+        let response_body = response
+            .text()
+            .map_err(|error| AgentAdapterError::Provider(redact(&error.to_string())))?;
+        if !status.is_success() {
             return Err(AgentAdapterError::Provider(format!(
-                "curl exited with {}: {}",
-                output.status,
-                redact(err.trim())
+                "provider HTTP status {}: {}",
+                status.as_u16(),
+                redact(response_body.trim())
             )));
         }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        serde_json::from_str(&stdout)
+        serde_json::from_str(&response_body)
             .map_err(|_| AgentAdapterError::Provider("provider returned non-JSON".to_string()))
     }
 
@@ -250,18 +223,18 @@ pub trait ChatCompleter {
     fn complete(&self, body: &serde_json::Value) -> Result<serde_json::Value, AgentAdapterError>;
 }
 
-/// The real completer: a live OpenRouter call via curl (key via stdin only).
-pub struct CurlChatCompleter {
+/// The real completer: a live OpenRouter call through native HTTP.
+pub struct NativeHttpChatCompleter {
     adapter: OpenRouterAdapter,
 }
 
-impl CurlChatCompleter {
+impl NativeHttpChatCompleter {
     pub fn new(adapter: OpenRouterAdapter) -> Self {
         Self { adapter }
     }
 }
 
-impl ChatCompleter for CurlChatCompleter {
+impl ChatCompleter for NativeHttpChatCompleter {
     fn complete(&self, body: &serde_json::Value) -> Result<serde_json::Value, AgentAdapterError> {
         self.adapter.post_chat(body)
     }
@@ -317,59 +290,129 @@ pub fn tool_definitions() -> serde_json::Value {
 }
 
 /// Parse an OpenRouter chat-completions response into the loop's next step: tool
-/// calls if the model emitted any, otherwise its final text answer. A provider
-/// `error` field becomes a final answer carrying the (redacted) message.
+/// calls if the model emitted any, otherwise its final text answer. Provider and
+/// protocol failures become explicit failed steps so they cannot be recorded as
+/// successful assistant completions.
 pub fn parse_step(response: &serde_json::Value) -> AgentStep {
     if let Some(error) = response.get("error") {
         let message = error
             .get("message")
             .and_then(|m| m.as_str())
             .unwrap_or("unknown provider error");
-        return AgentStep::Final {
-            text: format!("The model returned an error: {}", redact(message)),
-        };
+        return failed_step(
+            "provider_error",
+            format!("The model returned an error: {}", redact(message)),
+            provider_error_retryable(message),
+        );
     }
     let message = response.pointer("/choices/0/message");
     if let Some(calls) = message
         .and_then(|m| m.get("tool_calls"))
         .and_then(|t| t.as_array())
     {
-        let parsed: Vec<ToolCall> = calls.iter().filter_map(parse_tool_call).collect();
-        if !parsed.is_empty() {
-            return AgentStep::Tools(parsed);
+        let mut parsed = Vec::with_capacity(calls.len());
+        for call in calls {
+            match parse_tool_call(call) {
+                Ok(tool_call) => parsed.push(tool_call),
+                Err(reason) => {
+                    return failed_step(
+                        "malformed_tool_call",
+                        format!("The model returned a malformed tool call: {reason}"),
+                        true,
+                    );
+                }
+            }
         }
+        if calls.is_empty() {
+            return failed_step(
+                "provider_protocol",
+                "The model returned an empty tool call list.".to_string(),
+                true,
+            );
+        }
+        return AgentStep::Tools(parsed);
     }
-    let text = message
+    let Some(text) = message
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_string();
-    AgentStep::Final { text }
+    else {
+        return failed_step(
+            "provider_protocol",
+            "The model response had no assistant content or tool calls.".to_string(),
+            true,
+        );
+    };
+    if text.trim().is_empty() {
+        return failed_step(
+            "empty_assistant_result",
+            "The model returned an empty assistant result.".to_string(),
+            true,
+        );
+    }
+    AgentStep::Final {
+        text: text.to_string(),
+    }
 }
 
 /// Map one OpenAI/OpenRouter `tool_calls[]` entry to a workspace [`ToolCall`].
 /// `arguments` arrives as a JSON-encoded STRING (or, defensively, an object).
-fn parse_tool_call(tc: &serde_json::Value) -> Option<ToolCall> {
-    let func = tc.get("function")?;
-    let name = func.get("name")?.as_str()?;
+fn parse_tool_call(tc: &serde_json::Value) -> Result<ToolCall, String> {
+    let func = tc
+        .get("function")
+        .ok_or_else(|| "missing function object".to_string())?;
+    let name = func
+        .get("name")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "missing function name".to_string())?;
     let args: serde_json::Value = match func.get("arguments") {
-        Some(serde_json::Value::String(s)) => serde_json::from_str(s).ok()?,
+        Some(serde_json::Value::String(s)) => {
+            serde_json::from_str(s).map_err(|_| "arguments were not valid JSON".to_string())?
+        }
         Some(other) => other.clone(),
-        None => return None,
+        None => return Err("missing arguments".to_string()),
     };
-    let path = args.get("path")?.as_str()?.to_string();
+    let path = args
+        .get("path")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "missing path".to_string())?
+        .to_string();
     match name {
-        "read_file" => Some(ToolCall::ReadFile { path }),
-        "write_file" => Some(ToolCall::WriteFile {
+        "read_file" => Ok(ToolCall::ReadFile { path }),
+        "write_file" => Ok(ToolCall::WriteFile {
             path,
-            content: args.get("content")?.as_str()?.to_string(),
+            content: args
+                .get("content")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "missing content".to_string())?
+                .to_string(),
         }),
-        "append_line" => Some(ToolCall::AppendLine {
+        "append_line" => Ok(ToolCall::AppendLine {
             path,
-            value: args.get("value")?.as_str()?.to_string(),
+            value: args
+                .get("value")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "missing value".to_string())?
+                .to_string(),
         }),
-        _ => None,
+        _ => Err(format!("unknown tool `{name}`")),
     }
+}
+
+fn failed_step(code: &str, message: String, retryable: bool) -> AgentStep {
+    AgentStep::Failed {
+        code: code.to_string(),
+        message,
+        retryable,
+    }
+}
+
+fn provider_error_retryable(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("rate")
+        || lower.contains("429")
+        || lower.contains("timeout")
+        || lower.contains("temporar")
+        || lower.contains("try again")
 }
 
 /// Render the previous step's tool results as a compact text block for the next
@@ -450,18 +493,13 @@ impl<C: ChatCompleter> ToolDriver for OpenRouterToolDriver<C> {
                 }
                 step
             }
-            Err(error) => AgentStep::Final {
-                text: format!("The model call failed: {}", redact(&error.to_string())),
-            },
+            Err(error) => failed_step(
+                "provider_call_failed",
+                format!("The model call failed: {}", redact(&error.to_string())),
+                true,
+            ),
         }
     }
-}
-
-/// Escape a value for a curl `--config` double-quoted field: backslash and quote
-/// only (curl interprets `\\` and `\"`). JSON serialized to a single line has no
-/// literal newlines, so this is sufficient.
-fn escape_curl_config(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Scrub any `sk-`-prefixed token from a diagnostic string so a provider/API key
@@ -499,14 +537,6 @@ mod tests {
     }
 
     #[test]
-    fn escape_handles_json_quotes_and_backslashes() {
-        let body = r#"{"a":"b\nc"}"#;
-        let escaped = escape_curl_config(body);
-        assert!(escaped.contains("\\\""));
-        assert!(escaped.contains("\\\\n"));
-    }
-
-    #[test]
     fn redact_scrubs_keys() {
         // Fixture deliberately uses a clearly-fake token (no real key prefix).
         let out = redact("error: Bearer sk-FAKEKEY-000 was rejected");
@@ -533,8 +563,8 @@ mod tests {
     }
 
     /// Live smoke check — ignored by default so `cargo test`/CI never needs a
-    /// key or network. Run manually with the key in env:
-    ///   OPENROUTER_API_KEY=… cargo test -p opensks-adapter -- --ignored live_
+    /// key or network. Export an OpenRouter API key, then run:
+    ///   cargo test -p opensks-adapter -- --ignored live_
     #[test]
     #[ignore = "requires OPENROUTER_API_KEY + network; run manually, costs a few tokens"]
     fn live_openrouter_returns_real_text() {
@@ -560,7 +590,8 @@ mod tests {
     use crate::{AgenticConfig, run_agentic_loop};
 
     /// A scripted `ChatCompleter` that replays canned responses, so the driver +
-    /// loop are tested with NO key/network (the live path only swaps this for curl).
+    /// loop are tested with no key/network. The live path swaps this for the
+    /// native HTTP completer.
     struct ScriptedCompleter {
         responses: std::cell::RefCell<std::collections::VecDeque<serde_json::Value>>,
     }
@@ -578,6 +609,19 @@ mod tests {
         ) -> Result<serde_json::Value, AgentAdapterError> {
             Ok(self.responses.borrow_mut().pop_front().unwrap_or_else(
                 || serde_json::json!({ "choices": [{ "message": { "content": "done" } }] }),
+            ))
+        }
+    }
+
+    struct FailingCompleter;
+
+    impl ChatCompleter for FailingCompleter {
+        fn complete(
+            &self,
+            _body: &serde_json::Value,
+        ) -> Result<serde_json::Value, AgentAdapterError> {
+            Err(AgentAdapterError::Provider(
+                "temporary provider outage".to_string(),
             ))
         }
     }
@@ -630,12 +674,89 @@ mod tests {
     }
 
     #[test]
-    fn parse_step_surfaces_provider_error_as_final() {
+    fn parse_step_surfaces_provider_error_as_failure() {
         let resp = serde_json::json!({ "error": { "message": "rate limited" } });
         match parse_step(&resp) {
-            AgentStep::Final { text } => assert!(text.contains("rate limited")),
-            other => panic!("expected final, got {other:?}"),
+            AgentStep::Failed {
+                code,
+                message,
+                retryable,
+            } => {
+                assert_eq!(code, "provider_error");
+                assert!(message.contains("rate limited"));
+                assert!(retryable);
+            }
+            other => panic!("expected failure, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_step_rejects_empty_assistant_result() {
+        let resp = final_response("");
+        match parse_step(&resp) {
+            AgentStep::Failed {
+                code, retryable, ..
+            } => {
+                assert_eq!(code, "empty_assistant_result");
+                assert!(retryable);
+            }
+            other => panic!("expected failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_step_rejects_malformed_tool_call() {
+        let resp = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": { "name": "append_line", "arguments": "{\"path\":\"NOTES.md\"" }
+                    }]
+                }
+            }]
+        });
+        match parse_step(&resp) {
+            AgentStep::Failed { code, message, .. } => {
+                assert_eq!(code, "malformed_tool_call");
+                assert!(message.contains("valid JSON"));
+            }
+            other => panic!("expected failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_http_error_fails_the_agentic_loop() {
+        let ws =
+            std::env::temp_dir().join(format!("opensks-or-provider-error-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let mut driver = OpenRouterToolDriver::new(
+            "test-model",
+            256,
+            FailingCompleter,
+            "You edit files in the workspace.",
+            "Edit NOTES.md",
+        );
+        let request = AgentRunRequest {
+            workspace: ws.clone(),
+            project_id: "p".to_string(),
+            conversation_id: "c".to_string(),
+            turn_id: "t".to_string(),
+            run_id: "r".to_string(),
+            stream_id: "s".to_string(),
+            now_ms: 1,
+            prompt: String::new(),
+        };
+        let sink = CollectingSink::new();
+        let outcome =
+            run_agentic_loop(&request, &mut driver, &AgenticConfig::default(), &sink).unwrap();
+
+        assert_eq!(outcome.final_state, RunProjectionState::Failed);
+        assert!(outcome.assistant_text.contains("model call failed"));
+        assert_eq!(sink.kinds().last(), Some(&AgentEventKind::Error));
+        std::fs::remove_dir_all(&ws).ok();
     }
 
     #[test]

@@ -91,29 +91,24 @@ struct RuntimeCapabilityReport: Codable, Sendable {
         try? JSONDecoder().decode(RuntimeCapabilityReport.self, from: data)
     }
 
+    private static let processSupervisor = ProcessSupervisor()
+
     /// Run the bundled CLI `capability report` and decode it. Returns `nil` if
     /// the CLI is unavailable or the output cannot be parsed (the caller shows a
     /// truthful "unavailable" state rather than inventing data).
     static func load(cli: URL, workspace: URL) async -> RuntimeCapabilityReport? {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = cli
-                process.arguments = ["capability", "report"]
-                process.currentDirectoryURL = workspace
-                let out = Pipe()
-                process.standardOutput = out
-                process.standardError = Pipe()
-                do {
-                    try process.run()
-                } catch {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                let data = out.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-                continuation.resume(returning: RuntimeCapabilityReport.decode(from: data))
-            }
+        do {
+            let result = try await processSupervisor.run(ProcessSupervisor.Spec(
+                executable: cli,
+                arguments: ["capability", "report"],
+                workingDirectory: workspace,
+                timeoutSeconds: 30,
+                maxCaptureBytes: 1024 * 1024
+            ))
+            guard result.exitCode == 0, !result.timedOut else { return nil }
+            return RuntimeCapabilityReport.decode(from: result.stdout)
+        } catch {
+            return nil
         }
     }
 }

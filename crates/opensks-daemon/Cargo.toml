@@ -6,14 +6,22 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+opensks-adapter = { path = "../opensks-adapter" }
 opensks-contracts = { path = "../opensks-contracts" }
+opensks-conversation = { path = "../opensks-conversation" }
 opensks-engine = { path = "../opensks-engine" }
 opensks-event-store = { path = "../opensks-event-store" }
 opensks-git = { path = "../opensks-git" }
+opensks-provider = { path = "../opensks-provider" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
+[features]
+default = []
+simulation = ["opensks-adapter/simulation"]
+
 [dev-dependencies]
+opensks-adapter = { path = "../opensks-adapter", features = ["simulation"] }
 opensks-graph = { path = "../opensks-graph" }
 
 [lints]

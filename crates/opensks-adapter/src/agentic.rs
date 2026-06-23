@@ -29,12 +29,14 @@ use opensks_contracts::projection::RunProjectionState;
 use opensks_contracts::{
     AGENT_EVENT_ENVELOPE_SCHEMA, AgentEventEnvelope, AgentEventKind, FileOperation, FilePatch,
     PATCH_PROPOSAL_SCHEMA, PatchApplyResult, PatchProposal, RiskLevel, Sensitivity,
+    TOOL_POLICY_SCHEMA, ToolPermission, ToolPolicy, ToolPolicyEntry,
 };
+use opensks_policy::{Capability, WorkspaceCapabilities};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentAdapterError, AgentEventSink, AgentRunOutcome, AgentRunRequest, PlannedWrite,
-    apply_file_writes, content_hash, minimal_unified_diff, resolve_in_workspace,
+    apply_file_writes, content_hash, minimal_unified_diff,
 };
 
 /// One tool the agent can call within the workspace. Writes are applied
@@ -58,6 +60,18 @@ impl ToolCall {
             | Self::WriteFile { path, .. }
             | Self::AppendLine { path, .. } => path,
         }
+    }
+
+    fn tool_name(&self) -> &'static str {
+        match self {
+            Self::ReadFile { .. } => "workspace.read_file",
+            Self::WriteFile { .. } => "workspace.write_file",
+            Self::AppendLine { .. } => "workspace.append_line",
+        }
+    }
+
+    fn is_write(&self) -> bool {
+        matches!(self, Self::WriteFile { .. } | Self::AppendLine { .. })
     }
 }
 
@@ -87,6 +101,12 @@ pub enum AgentStep {
     Tools(Vec<ToolCall>),
     /// Stop: the agent is done and this is its final answer.
     Final { text: String },
+    /// Stop: the provider/driver failed before a trustworthy final answer.
+    Failed {
+        code: String,
+        message: String,
+        retryable: bool,
+    },
 }
 
 /// The loop's decision-maker. A live model adapter implements this by parsing the
@@ -160,19 +180,229 @@ impl ToolDriver for SequenceDriver {
 #[derive(Debug, Clone)]
 pub struct AgenticConfig {
     pub max_steps: usize,
+    pub tool_policy: ToolPolicy,
+    pub allowed_paths: Vec<String>,
+    pub forbidden_paths: Vec<String>,
+    pub max_tool_output_bytes: usize,
 }
 
 impl Default for AgenticConfig {
     fn default() -> Self {
-        Self { max_steps: 16 }
+        Self {
+            max_steps: 16,
+            tool_policy: default_agentic_tool_policy(),
+            allowed_paths: vec![],
+            forbidden_paths: vec![],
+            max_tool_output_bytes: 64 * 1024,
+        }
     }
 }
 
-/// Drive `driver` until it returns [`AgentStep::Final`] or the step budget is
-/// exhausted, executing each tool against `request.workspace`, applying writes
-/// transactionally, and streaming typed events into `sink`. Returns the honest
-/// outcome (assistant text, every proposed patch, every apply result, terminal
-/// state).
+pub fn default_agentic_tool_policy() -> ToolPolicy {
+    ToolPolicy {
+        schema: TOOL_POLICY_SCHEMA.to_string(),
+        policy_id: "agentic-default-workspace-tools".to_string(),
+        entries: vec![
+            ToolPolicyEntry {
+                tool: "workspace.read_file".to_string(),
+                permission: ToolPermission::ReadOnly,
+            },
+            ToolPolicyEntry {
+                tool: "workspace.write_file".to_string(),
+                permission: ToolPermission::Allow,
+            },
+            ToolPolicyEntry {
+                tool: "workspace.append_line".to_string(),
+                permission: ToolPermission::Allow,
+            },
+        ],
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolScope {
+    pub allowed_paths: Vec<String>,
+    pub forbidden_paths: Vec<String>,
+    pub max_output_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolGateway {
+    capabilities: WorkspaceCapabilities,
+    policy: ToolPolicy,
+    scope: ToolScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolGatewayReceipt {
+    Read(ToolResult),
+    PlannedWrite {
+        path: String,
+        before: String,
+        after: String,
+        operation: FileOperation,
+    },
+}
+
+impl ToolGateway {
+    pub fn new(workspace: &std::path::Path, config: &AgenticConfig) -> Self {
+        Self {
+            capabilities: WorkspaceCapabilities::deny_by_default(workspace)
+                .grant(Capability::FilesystemWorkspace),
+            policy: config.tool_policy.clone(),
+            scope: ToolScope {
+                allowed_paths: config.allowed_paths.clone(),
+                forbidden_paths: config.forbidden_paths.clone(),
+                max_output_bytes: config.max_tool_output_bytes,
+            },
+        }
+    }
+
+    pub fn execute(&self, call: &ToolCall) -> Result<ToolGatewayReceipt, ToolResult> {
+        self.decide(call)?;
+        let abs = self.authorize_path(call)?;
+        match call {
+            ToolCall::ReadFile { path } => self.read_file(path, &abs),
+            ToolCall::WriteFile { path, content } => {
+                let before = self.read_existing_text_or_empty(&abs, call)?;
+                let operation = if abs.exists() {
+                    FileOperation::Modify
+                } else {
+                    FileOperation::Create
+                };
+                Ok(ToolGatewayReceipt::PlannedWrite {
+                    path: path.clone(),
+                    before,
+                    after: content.clone(),
+                    operation,
+                })
+            }
+            ToolCall::AppendLine { path, value } => {
+                let before = self.read_existing_text_or_empty(&abs, call)?;
+                let mut after = before.clone();
+                if !after.is_empty() && !after.ends_with('\n') {
+                    after.push('\n');
+                }
+                after.push_str(value);
+                after.push('\n');
+                let operation = if before.is_empty() && !abs.exists() {
+                    FileOperation::Create
+                } else {
+                    FileOperation::Modify
+                };
+                Ok(ToolGatewayReceipt::PlannedWrite {
+                    path: path.clone(),
+                    before,
+                    after,
+                    operation,
+                })
+            }
+        }
+    }
+
+    fn decide(&self, call: &ToolCall) -> Result<(), ToolResult> {
+        match self.policy.permission_for(call.tool_name()) {
+            ToolPermission::Deny => Err(failed(call, "blocked_tool_unlisted_or_denied")),
+            ToolPermission::Ask => Err(failed(call, "approval_required_for_tool")),
+            ToolPermission::ReadOnly if call.is_write() => {
+                Err(failed(call, "blocked_tool_read_only"))
+            }
+            ToolPermission::ReadOnly | ToolPermission::Allow => Ok(()),
+        }
+    }
+
+    fn authorize_path(&self, call: &ToolCall) -> Result<std::path::PathBuf, ToolResult> {
+        let abs = self
+            .capabilities
+            .check_path(call.path())
+            .map_err(|error| failed(call, &error.to_string()))?;
+        let rel = abs
+            .strip_prefix(&self.capabilities.workspace_root)
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .map_err(|_| failed(call, "blocked_path_escapes_workspace_root"))?;
+        if self
+            .scope
+            .forbidden_paths
+            .iter()
+            .any(|pattern| path_matches(pattern, &rel))
+        {
+            return Err(failed(call, "blocked_path_forbidden_by_tool_scope"));
+        }
+        if !self.scope.allowed_paths.is_empty()
+            && !self
+                .scope
+                .allowed_paths
+                .iter()
+                .any(|pattern| path_matches(pattern, &rel))
+        {
+            return Err(failed(call, "blocked_path_not_allowed_by_tool_scope"));
+        }
+        Ok(abs)
+    }
+
+    fn read_file(
+        &self,
+        path: &str,
+        abs: &std::path::Path,
+    ) -> Result<ToolGatewayReceipt, ToolResult> {
+        let bytes = match std::fs::read(abs) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ToolGatewayReceipt::Read(ToolResult::FileContent {
+                    path: path.to_string(),
+                    content: None,
+                }));
+            }
+            Err(error) => {
+                return Err(ToolResult::Failed {
+                    tool: "workspace.read_file".to_string(),
+                    message: format!("io_error:{error}"),
+                });
+            }
+        };
+        if bytes.contains(&0) {
+            return Err(ToolResult::Failed {
+                tool: "workspace.read_file".to_string(),
+                message: "blocked_binary_tool_output".to_string(),
+            });
+        }
+        let text = String::from_utf8(bytes).map_err(|_| ToolResult::Failed {
+            tool: "workspace.read_file".to_string(),
+            message: "blocked_non_utf8_tool_output".to_string(),
+        })?;
+        Ok(ToolGatewayReceipt::Read(ToolResult::FileContent {
+            path: path.to_string(),
+            content: Some(self.sanitize_output(&text)),
+        }))
+    }
+
+    fn read_existing_text_or_empty(
+        &self,
+        abs: &std::path::Path,
+        call: &ToolCall,
+    ) -> Result<String, ToolResult> {
+        if !abs.exists() {
+            return Ok(String::new());
+        }
+        std::fs::read_to_string(abs).map_err(|error| {
+            failed(
+                call,
+                &format!("blocked_existing_file_not_safe_text:{error}"),
+            )
+        })
+    }
+
+    fn sanitize_output(&self, raw: &str) -> String {
+        let redacted = redact_sensitive_text(raw);
+        truncate_utf8(&redacted, self.scope.max_output_bytes)
+    }
+}
+
+/// Drive `driver` until it returns [`AgentStep::Final`], reports
+/// [`AgentStep::Failed`], or exhausts the step budget. Executes each tool against
+/// `request.workspace`, applies writes transactionally, and streams typed events
+/// into `sink`. Returns the honest outcome (assistant text, every proposed patch,
+/// every apply result, terminal state).
 pub fn run_agentic_loop(
     request: &AgentRunRequest,
     driver: &mut dyn ToolDriver,
@@ -180,6 +410,7 @@ pub fn run_agentic_loop(
     sink: &dyn AgentEventSink,
 ) -> Result<AgentRunOutcome, AgentAdapterError> {
     let workspace = request.workspace.as_path();
+    let gateway = ToolGateway::new(workspace, config);
     let mut sequence: u64 = 0;
     let mut observations: Vec<ToolResult> = Vec::new();
     let mut patches: Vec<PatchProposal> = Vec::new();
@@ -187,6 +418,29 @@ pub fn run_agentic_loop(
 
     for step in 0..config.max_steps.max(1) {
         match driver.next_step(&observations) {
+            AgentStep::Failed {
+                code,
+                message,
+                retryable,
+            } => {
+                emit(
+                    sink,
+                    request,
+                    &mut sequence,
+                    AgentEventKind::Error,
+                    serde_json::json!({
+                        "code": code,
+                        "message": message,
+                        "retryable": retryable,
+                    }),
+                );
+                return Ok(AgentRunOutcome {
+                    assistant_text: message,
+                    patches,
+                    apply_results: applies,
+                    final_state: RunProjectionState::Failed,
+                });
+            }
             AgentStep::Final { text } => {
                 emit(
                     sink,
@@ -224,75 +478,68 @@ pub fn run_agentic_loop(
                 let mut planned: Vec<(String, String, String, FileOperation)> = Vec::new();
 
                 for call in &calls {
-                    match resolve_in_workspace(workspace, call.path()) {
-                        Ok(abs) => match call {
-                            ToolCall::ReadFile { path } => {
-                                emit(
-                                    sink,
-                                    request,
-                                    &mut sequence,
-                                    AgentEventKind::ToolCallStarted,
-                                    serde_json::json!({ "tool": "files.read", "path": path }),
-                                );
-                                let content = std::fs::read_to_string(&abs).ok();
-                                emit(
-                                    sink,
-                                    request,
-                                    &mut sequence,
-                                    AgentEventKind::ToolCallCompleted,
-                                    serde_json::json!({
-                                        "tool": "files.read",
-                                        "path": path,
-                                        "exists": content.is_some(),
-                                    }),
-                                );
-                                next_obs.push(ToolResult::FileContent {
-                                    path: path.clone(),
-                                    content,
-                                });
-                            }
-                            ToolCall::WriteFile { path, content } => {
-                                let before = std::fs::read_to_string(&abs).unwrap_or_default();
-                                let operation = if abs.exists() {
-                                    FileOperation::Modify
-                                } else {
-                                    FileOperation::Create
-                                };
-                                planned.push((path.clone(), before, content.clone(), operation));
-                            }
-                            ToolCall::AppendLine { path, value } => {
-                                let before = std::fs::read_to_string(&abs).unwrap_or_default();
-                                let mut after = before.clone();
-                                if !after.is_empty() && !after.ends_with('\n') {
-                                    after.push('\n');
+                    emit(
+                        sink,
+                        request,
+                        &mut sequence,
+                        AgentEventKind::ToolCallStarted,
+                        serde_json::json!({ "tool": call.tool_name(), "path": call.path() }),
+                    );
+                    match gateway.execute(call) {
+                        Ok(ToolGatewayReceipt::Read(result)) => {
+                            let exists = matches!(
+                                &result,
+                                ToolResult::FileContent {
+                                    content: Some(_),
+                                    ..
                                 }
-                                after.push_str(value);
-                                after.push('\n');
-                                let operation = if before.is_empty() && !abs.exists() {
-                                    FileOperation::Create
-                                } else {
-                                    FileOperation::Modify
-                                };
-                                planned.push((path.clone(), before, after, operation));
-                            }
-                        },
-                        Err(error) => {
-                            // A path escape is reported back to the driver, not a
-                            // hard loop abort — the agent can recover or give up.
+                            );
+                            emit(
+                                sink,
+                                request,
+                                &mut sequence,
+                                AgentEventKind::ToolCallCompleted,
+                                serde_json::json!({
+                                    "tool": call.tool_name(),
+                                    "path": call.path(),
+                                    "exists": exists,
+                                }),
+                            );
+                            next_obs.push(result);
+                        }
+                        Ok(ToolGatewayReceipt::PlannedWrite {
+                            path,
+                            before,
+                            after,
+                            operation,
+                        }) => {
+                            emit(
+                                sink,
+                                request,
+                                &mut sequence,
+                                AgentEventKind::ToolCallCompleted,
+                                serde_json::json!({
+                                    "tool": call.tool_name(),
+                                    "path": path,
+                                    "planned": true,
+                                }),
+                            );
+                            planned.push((path, before, after, operation));
+                        }
+                        Err(result) => {
+                            let message = tool_result_message(&result);
                             emit(
                                 sink,
                                 request,
                                 &mut sequence,
                                 AgentEventKind::Warning,
                                 serde_json::json!({
-                                    "tool": describe_call(call),
-                                    "error": error.to_string(),
+                                    "tool": call.tool_name(),
+                                    "path": call.path(),
+                                    "error": message,
                                 }),
                             );
-                            next_obs.push(ToolResult::Failed {
-                                tool: describe_call(call),
-                                message: error.to_string(),
-                            });
+                            next_obs.push(result);
                         }
                     }
                 }
@@ -368,6 +615,91 @@ fn describe_call(call: &ToolCall) -> String {
         ToolCall::WriteFile { path, .. } => format!("write {path}"),
         ToolCall::AppendLine { path, .. } => format!("append {path}"),
     }
+}
+
+fn failed(call: &ToolCall, message: &str) -> ToolResult {
+    ToolResult::Failed {
+        tool: call.tool_name().to_string(),
+        message: message.to_string(),
+    }
+}
+
+fn tool_result_message(result: &ToolResult) -> String {
+    match result {
+        ToolResult::Failed { message, .. } => message.clone(),
+        ToolResult::FileContent { content, .. } => {
+            format!(
+                "read:{}",
+                if content.is_some() {
+                    "exists"
+                } else {
+                    "missing"
+                }
+            )
+        }
+        ToolResult::Wrote {
+            applied, reason, ..
+        } => {
+            format!("write:{applied}:{reason}")
+        }
+    }
+}
+
+fn path_matches(pattern: &str, rel: &str) -> bool {
+    let pattern = pattern.trim().trim_start_matches("./").trim_matches('/');
+    let rel = rel.trim_start_matches("./").trim_matches('/');
+    if pattern.is_empty() || pattern == "*" || pattern == "**" {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        return rel == prefix || rel.starts_with(&format!("{prefix}/"));
+    }
+    if pattern.ends_with('*') {
+        let prefix = pattern.trim_end_matches('*').trim_end_matches('/');
+        return rel == prefix || rel.starts_with(&format!("{prefix}/"));
+    }
+    rel == pattern || rel.starts_with(&format!("{pattern}/"))
+}
+
+fn redact_sensitive_text(raw: &str) -> String {
+    let mut redacted = raw
+        .lines()
+        .map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("api_key")
+                || lower.contains("apikey")
+                || lower.contains("token")
+                || lower.contains("secret")
+                || lower.contains("password")
+            {
+                "[REDACTED]"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if raw.ends_with('\n') {
+        redacted.push('\n');
+    }
+    redacted
+}
+
+fn truncate_utf8(raw: &str, max_bytes: usize) -> String {
+    if max_bytes == 0 {
+        return String::new();
+    }
+    if raw.len() <= max_bytes {
+        return raw.to_string();
+    }
+    let mut end = max_bytes;
+    while !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n[truncated by ToolGateway: max_output_bytes={max_bytes}]",
+        &raw[..end]
+    )
 }
 
 /// Build a [`PatchProposal`] describing every write planned in one step.
@@ -574,7 +906,10 @@ mod tests {
         let outcome = run_agentic_loop(
             &request(&ws),
             &mut driver,
-            &AgenticConfig { max_steps: 3 },
+            &AgenticConfig {
+                max_steps: 3,
+                ..AgenticConfig::default()
+            },
             &sink,
         )
         .unwrap();
@@ -605,6 +940,145 @@ mod tests {
         assert_eq!(outcome.final_state, RunProjectionState::Completed);
         assert_eq!(outcome.assistant_text, "recovered");
         assert!(!ws.join("../escape.txt").exists());
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn tool_gateway_denies_unlisted_write_tool() {
+        let ws = temp_workspace("deny-unlisted");
+        let mut driver = FnDriver::new(|obs: &[ToolResult], step: usize| match step {
+            0 => AgentStep::Tools(vec![ToolCall::WriteFile {
+                path: "blocked.txt".to_string(),
+                content: "nope".to_string(),
+            }]),
+            _ => {
+                assert!(matches!(
+                    obs.first(),
+                    Some(ToolResult::Failed { message, .. })
+                        if message == "blocked_tool_unlisted_or_denied"
+                ));
+                AgentStep::Final {
+                    text: "denied as expected".to_string(),
+                }
+            }
+        });
+        let config = AgenticConfig {
+            tool_policy: ToolPolicy {
+                schema: TOOL_POLICY_SCHEMA.to_string(),
+                policy_id: "read-only".to_string(),
+                entries: vec![ToolPolicyEntry {
+                    tool: "workspace.read_file".to_string(),
+                    permission: ToolPermission::ReadOnly,
+                }],
+            },
+            ..AgenticConfig::default()
+        };
+        let sink = CollectingSink::new();
+        let outcome = run_agentic_loop(&request(&ws), &mut driver, &config, &sink).unwrap();
+        assert_eq!(outcome.final_state, RunProjectionState::Completed);
+        assert!(!ws.join("blocked.txt").exists());
+        assert!(sink.kinds().contains(&AgentEventKind::Warning));
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn read_only_permission_cannot_write_through_write_alias() {
+        let ws = temp_workspace("read-only-write");
+        let gateway = ToolGateway::new(
+            &ws,
+            &AgenticConfig {
+                tool_policy: ToolPolicy {
+                    schema: TOOL_POLICY_SCHEMA.to_string(),
+                    policy_id: "bad-alias".to_string(),
+                    entries: vec![ToolPolicyEntry {
+                        tool: "workspace.write_file".to_string(),
+                        permission: ToolPermission::ReadOnly,
+                    }],
+                },
+                ..AgenticConfig::default()
+            },
+        );
+        let result = gateway.execute(&ToolCall::WriteFile {
+            path: "alias.txt".to_string(),
+            content: "no".to_string(),
+        });
+        assert!(matches!(
+            result,
+            Err(ToolResult::Failed { message, .. }) if message == "blocked_tool_read_only"
+        ));
+        assert!(!ws.join("alias.txt").exists());
+        assert_eq!(
+            default_agentic_tool_policy().permission_for("git.push"),
+            ToolPermission::Deny,
+            "workers cannot call git push through the default tool policy"
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_path_cannot_bypass_workspace_scope() {
+        use std::os::unix::fs::symlink;
+
+        let ws = temp_workspace("gateway-symlink");
+        let outside = temp_workspace("gateway-outside");
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+        symlink(&outside, ws.join("escape")).unwrap();
+
+        let mut driver = FnDriver::new(|obs: &[ToolResult], step: usize| match step {
+            0 => AgentStep::Tools(vec![ToolCall::ReadFile {
+                path: "escape/secret.txt".to_string(),
+            }]),
+            _ => {
+                assert!(matches!(
+                    obs.first(),
+                    Some(ToolResult::Failed { message, .. })
+                        if message == "blocked_path_escapes_workspace_root"
+                ));
+                AgentStep::Final {
+                    text: "blocked symlink".to_string(),
+                }
+            }
+        });
+        let sink = CollectingSink::new();
+        let outcome =
+            run_agentic_loop(&request(&ws), &mut driver, &AgenticConfig::default(), &sink).unwrap();
+        assert_eq!(outcome.assistant_text, "blocked symlink");
+        std::fs::remove_dir_all(&ws).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn tool_gateway_redacts_and_truncates_read_output() {
+        let ws = temp_workspace("gateway-output");
+        let synthetic_secret = ["OPENAI", "_API_KEY=abc123"].concat();
+        std::fs::write(
+            ws.join("secrets.txt"),
+            format!("{synthetic_secret}\nsafe-line\nthis line is long\n"),
+        )
+        .unwrap();
+        let gateway = ToolGateway::new(
+            &ws,
+            &AgenticConfig {
+                max_tool_output_bytes: 24,
+                ..AgenticConfig::default()
+            },
+        );
+        let receipt = gateway
+            .execute(&ToolCall::ReadFile {
+                path: "secrets.txt".to_string(),
+            })
+            .unwrap();
+        let ToolGatewayReceipt::Read(ToolResult::FileContent {
+            content: Some(content),
+            ..
+        }) = receipt
+        else {
+            panic!("expected read receipt");
+        };
+        assert!(!content.contains("abc123"));
+        assert!(content.contains("[REDACTED]"));
+        assert!(content.contains("truncated by ToolGateway"));
         std::fs::remove_dir_all(&ws).ok();
     }
 

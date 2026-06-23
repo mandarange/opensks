@@ -40,6 +40,22 @@ final class ProcessSupervisorTests: XCTestCase {
         )
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertEqual(result.stdout.count, 200_000)
+        XCTAssertFalse(result.stdoutTruncated)
+        XCTAssertFalse(result.stderrTruncated)
+    }
+
+    func testBoundedCaptureReportsTruncation() async throws {
+        let result = try await supervisor.run(
+            ProcessSupervisor.Spec(
+                executable: URL(fileURLWithPath: "/usr/bin/head"),
+                arguments: ["-c", "2000", "/dev/zero"],
+                maxCaptureBytes: 128
+            )
+        )
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(result.stdout.count, 128)
+        XCTAssertTrue(result.stdoutTruncated)
+        XCTAssertFalse(result.stderrTruncated)
     }
 
     func testTimeoutTerminatesChild() async throws {

@@ -14,21 +14,40 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Architecture and path guard
         run: bash scripts/check-architecture-ownership.sh
+      - name: Architecture graph check
+        run: cargo run -p xtask -- architecture-graph --check
+      - name: Direct I/O audit
+        run: cargo run -p xtask -- direct-io-audit --check
       - name: Cargo metadata
-        run: cargo metadata --format-version 1 --no-deps
+        run: |
+          mkdir -p artifacts/core
+          cargo metadata --format-version 1 --no-deps > artifacts/core/cargo-metadata.json
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Release build excludes LocalTestAdapter
+        run: |
+          cargo build --release --no-default-features
+          ! strings target/release/opensks | grep -E 'Local test adapter|adapter:local-test|simulation lane'
       - name: Tests
-        run: cargo test --workspace
+        run: |
+          set -o pipefail
+          cargo test --workspace --locked 2>&1 | tee artifacts/core/cargo-test.txt
       - name: Generate schemas
         run: cargo run -p xtask -- schemas
       - name: Schema drift
         run: git diff --exit-code -- schemas
       - name: Generate capability matrix
-        run: cargo run -p xtask -- capability-matrix
+        run: cargo run -p xtask -- capability-matrix --runtime-fixture release
       - name: Capability truth drift
         run: git diff --exit-code -- docs/runtime-truth-matrix.generated.md
-      - name: Dependency audit placeholder
-        run: cargo tree --workspace --locked >/tmp/opensks-cargo-tree.txt
+      - name: Dependency tree lock check
+        run: cargo tree --workspace --locked > artifacts/core/cargo-tree.txt
+      - name: Upload core evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opensks-core-evidence
+          path: artifacts/core
+          if-no-files-found: error

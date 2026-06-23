@@ -6,22 +6,27 @@
 //! before it is stored in the searchable `content_redacted` column / FTS index;
 //! the original may be held encrypted out of band (content_ciphertext column).
 
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use opensks_contracts::{
-    CONVERSATION_MESSAGE_SCHEMA, CONVERSATION_SUMMARY_SCHEMA, ConversationDeleteCounts,
-    ConversationFilter, ConversationMessage, ConversationStatus, ConversationSummary, MessageRole,
-    MessageState, TitleSource,
+    CONVERSATION_MESSAGE_SCHEMA, CONVERSATION_SUMMARY_SCHEMA, CONVERSATION_TURN_ACCEPTED_SCHEMA,
+    ConversationDeleteCounts, ConversationFilter, ConversationMessage, ConversationStatus,
+    ConversationSummary, ConversationThreadSettings, ConversationTurnAccepted,
+    ConversationTurnSettings, ConversationTurnStartRequest, MessageRole, MessageState,
+    RunProjectionState, TIMELINE_ITEM_SCHEMA, TimelineItem, TimelineItemKind, TitleSource,
 };
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
+use sha2::{Digest, Sha256};
 
-const MIGRATION_VERSION: i32 = 2;
+const MIGRATION_VERSION: i32 = 4;
 const CONVERSATION_DB_RELATIVE_PATH: &str = ".opensks/runtime/conversations.sqlite3";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConversationError {
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("conversation not found: {0}")]
     NotFound(String),
     #[error("invalid stored enum value: {0}")]
@@ -51,6 +56,39 @@ pub struct TurnIdempotencyRecord {
     pub user_message_id: String,
     pub assistant_message_id: String,
     pub run_id: String,
+}
+
+/// Durable v2 turn/run snapshot recorded at accept time. This is the migration
+/// bridge from the v1 CLI shim to the asynchronous TurnSupervisor path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnRunSnapshot<'a> {
+    pub turn_id: &'a str,
+    pub run_id: &'a str,
+    pub project_id: &'a str,
+    pub conversation_id: &'a str,
+    pub client_turn_id: &'a str,
+    pub request_id: &'a str,
+    pub idempotency_key: &'a str,
+    pub state: &'a str,
+    pub effective_settings_json: &'a str,
+    pub settings_digest: &'a str,
+    pub model_routing_decision_json: Option<&'a str>,
+    pub now_ms: u64,
+}
+
+/// A queued turn claimed by a TurnSupervisor lease. This is the durable handoff
+/// boundary between immediate accept and later adapter/tool execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnSupervisorLease {
+    pub turn_id: String,
+    pub run_id: String,
+    pub project_id: String,
+    pub conversation_id: String,
+    pub assistant_message_id: String,
+    pub effective_settings_json: String,
+    pub model_routing_decision_json: Option<String>,
+    pub lease_owner: String,
+    pub lease_expires_at_ms: u64,
 }
 
 /// Redact secret-looking tokens from text before it is stored in the searchable
@@ -165,6 +203,37 @@ fn enum_to_str<T: serde::Serialize>(value: &T) -> String {
 fn enum_from_str<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
     serde_json::from_value(serde_json::Value::String(raw.to_string()))
         .map_err(|_| ConversationError::InvalidEnum(raw.to_string()))
+}
+
+fn run_projection_state_from_str(raw: &str) -> RunProjectionState {
+    match raw {
+        "queued" => RunProjectionState::Queued,
+        "running" => RunProjectionState::Running,
+        "paused" => RunProjectionState::Paused,
+        "completed" => RunProjectionState::Completed,
+        "failed" => RunProjectionState::Failed,
+        "cancelled" => RunProjectionState::Cancelled,
+        _ => RunProjectionState::Queued,
+    }
+}
+
+fn conversation_status_for_run_state(raw: &str) -> &'static str {
+    match raw {
+        "completed" => "completed",
+        "failed" => "failed",
+        "paused" | "cancelled" => "paused",
+        _ => "running",
+    }
+}
+
+fn sha256_v1(content: &str) -> String {
+    let digest = Sha256::digest(content.as_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    format!("sha256:v1:{hex}")
 }
 
 pub struct ConversationRepository {
@@ -324,10 +393,86 @@ impl ConversationRepository {
                 terminal_kind TEXT NULL,
                 updated_at_ms INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS turns (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                client_turn_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                state TEXT NOT NULL,
+                effective_settings_json TEXT NOT NULL,
+                settings_digest TEXT NOT NULL,
+                model_routing_decision_json TEXT NULL,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                UNIQUE(conversation_id, idempotency_key)
+            );
+            CREATE TABLE IF NOT EXISTS runs (
+                id TEXT PRIMARY KEY,
+                turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+                state TEXT NOT NULL,
+                last_event_sequence INTEGER NOT NULL DEFAULT -1,
+                lease_owner TEXT NULL,
+                lease_expires_at_ms INTEGER NULL,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
             ",
         )?;
+        self.ensure_turns_model_routing_column()?;
+        self.repair_conversation_statuses()?;
         self.conn
             .pragma_update(None, "user_version", MIGRATION_VERSION)?;
+        Ok(())
+    }
+
+    fn repair_conversation_statuses(&self) -> Result<()> {
+        self.conn.execute(
+            "UPDATE conversations
+             SET status = COALESCE((
+                 SELECT CASE r.state
+                     WHEN 'completed' THEN 'completed'
+                     WHEN 'failed' THEN 'failed'
+                     WHEN 'paused' THEN 'paused'
+                     WHEN 'cancelled' THEN 'paused'
+                     WHEN 'queued' THEN 'running'
+                     WHEN 'running' THEN 'running'
+                     ELSE 'idle'
+                 END
+                 FROM conversation_runs cr
+                 JOIN runs r ON r.id = cr.run_id
+                 WHERE cr.conversation_id = conversations.id
+                 ORDER BY cr.created_at_ms DESC, cr.run_id DESC
+                 LIMIT 1
+             ), 'idle')
+             WHERE archived = 0
+               AND status = 'running'
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM conversation_runs cr
+                   JOIN runs r ON r.id = cr.run_id
+                   WHERE cr.conversation_id = conversations.id
+                     AND r.state IN ('queued', 'running')
+               )",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn ensure_turns_model_routing_column(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(turns)")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == "model_routing_decision_json" {
+                return Ok(());
+            }
+        }
+        self.conn.execute(
+            "ALTER TABLE turns ADD COLUMN model_routing_decision_json TEXT NULL",
+            [],
+        )?;
         Ok(())
     }
 
@@ -637,6 +782,157 @@ impl ConversationRepository {
         Ok(out)
     }
 
+    /// Replay the current conversation read models as typed timeline items. This
+    /// bridges existing durable messages/run refs into the PR-068 timeline
+    /// contract before every event source has a first-class reducer.
+    pub fn timeline_items_for_conversation(
+        &self,
+        conversation_id: &str,
+        limit: usize,
+    ) -> Result<Vec<TimelineItem>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let messages = self.message_page(conversation_id, None, limit)?;
+        let runs_by_message: HashMap<String, ConversationRunRef> = self
+            .runs_for_conversation(conversation_id)?
+            .into_iter()
+            .map(|run| (run.message_id.clone(), run))
+            .collect();
+        let persisted = self.persisted_timeline_items_for_conversation(conversation_id, limit)?;
+        let mut items = Vec::with_capacity(messages.len() + persisted.len());
+        for message in messages {
+            let run = runs_by_message.get(&message.id);
+            let kind = match message.role {
+                MessageRole::User => TimelineItemKind::UserMessage,
+                MessageRole::Assistant => TimelineItemKind::AssistantMessage,
+                MessageRole::Tool => TimelineItemKind::ToolCall,
+                MessageRole::Event | MessageRole::System => TimelineItemKind::Warning,
+            };
+            let message_state = enum_to_str(&message.state);
+            let message_role = enum_to_str(&message.role);
+            let state = if let Some(run) = run {
+                run.run_state
+                    .clone()
+                    .unwrap_or_else(|| message_state.clone())
+            } else {
+                message_state.clone()
+            };
+            items.push(TimelineItem {
+                schema: TIMELINE_ITEM_SCHEMA.to_string(),
+                id: format!("timeline-{}", message.id),
+                project_id: message.project_id.clone(),
+                conversation_id: message.conversation_id.clone(),
+                turn_id: (!message.turn_id.is_empty()).then(|| message.turn_id.clone()),
+                run_id: run.map(|run| run.run_id.clone()),
+                sequence: message.sequence,
+                kind,
+                state,
+                payload: serde_json::json!({
+                    "message_id": message.id,
+                    "role": message_role,
+                    "message_state": message_state,
+                    "content_redacted": message.content_redacted,
+                    "run_relation": run.map(|run| run.relation.as_str()),
+                }),
+                created_at_ms: message.created_at_ms,
+                updated_at_ms: message.updated_at_ms,
+            });
+        }
+        items.extend(persisted);
+        items.sort_by(|lhs, rhs| {
+            lhs.sequence
+                .cmp(&rhs.sequence)
+                .then(lhs.created_at_ms.cmp(&rhs.created_at_ms))
+                .then(lhs.id.cmp(&rhs.id))
+        });
+        if items.len() > limit {
+            items = items.split_off(items.len() - limit);
+        }
+        Ok(items)
+    }
+
+    pub fn append_timeline_item(
+        &self,
+        project_id: &str,
+        conversation_id: &str,
+        kind: TimelineItemKind,
+        state: &str,
+        payload: serde_json::Value,
+        now_ms: u64,
+    ) -> Result<TimelineItem> {
+        if self.get_conversation(conversation_id)?.is_none() {
+            return Err(ConversationError::NotFound(conversation_id.to_string()));
+        }
+        let sequence: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) + 1
+             FROM (
+               SELECT sequence FROM messages WHERE conversation_id = ?1
+               UNION ALL
+               SELECT sequence FROM timeline_items WHERE conversation_id = ?1
+             )",
+            params![conversation_id],
+            |row| row.get(0),
+        )?;
+        let id = format!("timeline-{}", self.new_id()?);
+        let payload_json = serde_json::to_string(&payload)?;
+        self.conn.execute(
+            "INSERT INTO timeline_items(
+                id, project_id, conversation_id, turn_id, run_id, sequence,
+                kind, state, payload_redacted_json, created_at_ms, updated_at_ms
+             ) VALUES(?1, ?2, ?3, NULL, NULL, ?4, ?5, ?6, ?7, ?8, ?8)",
+            params![
+                id,
+                project_id,
+                conversation_id,
+                sequence,
+                enum_to_str(&kind),
+                state,
+                payload_json,
+                now_ms as i64,
+            ],
+        )?;
+        self.conn.execute(
+            "UPDATE conversations SET updated_at_ms = ?1 WHERE id = ?2",
+            params![now_ms as i64, conversation_id],
+        )?;
+        Ok(TimelineItem {
+            schema: TIMELINE_ITEM_SCHEMA.to_string(),
+            id,
+            project_id: project_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            turn_id: None,
+            run_id: None,
+            sequence,
+            kind,
+            state: state.to_string(),
+            payload,
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+        })
+    }
+
+    fn persisted_timeline_items_for_conversation(
+        &self,
+        conversation_id: &str,
+        limit: usize,
+    ) -> Result<Vec<TimelineItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project_id, conversation_id, turn_id, run_id, sequence,
+                    kind, state, payload_redacted_json, created_at_ms, updated_at_ms
+             FROM timeline_items
+             WHERE conversation_id = ?1
+             ORDER BY sequence DESC, id DESC
+             LIMIT ?2",
+        )?;
+        let mut rows = stmt.query(params![conversation_id, limit as i64])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push(timeline_item_from_row(row)?);
+        }
+        Ok(out)
+    }
+
     /// Record (or update) the real lifecycle state of a run. This is the single
     /// source of truth the runs list and idempotent replay read from; nothing
     /// may report a run's state without a projection row behind it.
@@ -650,13 +946,39 @@ impl ConversationRepository {
         state: &str,
         now_ms: u64,
     ) -> Result<()> {
+        self.upsert_run_projection_with_last_sequence(
+            run_id,
+            project_id,
+            conversation_id,
+            turn_id,
+            state,
+            0,
+            now_ms,
+        )
+    }
+
+    /// Record (or update) run lifecycle state with the last durable execution
+    /// event sequence known to the caller. The event journal itself is owned by
+    /// `opensks-event-store`; this table is a read model for conversation lists.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_run_projection_with_last_sequence(
+        &self,
+        run_id: &str,
+        project_id: &str,
+        conversation_id: &str,
+        turn_id: &str,
+        state: &str,
+        last_event_sequence: u64,
+        now_ms: u64,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO run_projections(
                  run_id, project_id, conversation_id, turn_id, state,
                  pipeline_id, graph_revision, last_sequence, projection_json, updated_at_ms)
-             VALUES(?1, ?2, ?3, ?4, ?5, NULL, NULL, 0, '{}', ?6)
+             VALUES(?1, ?2, ?3, ?4, ?5, NULL, NULL, ?6, '{}', ?7)
              ON CONFLICT(run_id) DO UPDATE SET
                  state = excluded.state,
+                 last_sequence = excluded.last_sequence,
                  updated_at_ms = excluded.updated_at_ms",
             params![
                 run_id,
@@ -664,6 +986,7 @@ impl ConversationRepository {
                 conversation_id,
                 turn_id,
                 state,
+                last_event_sequence as i64,
                 now_ms as i64
             ],
         )?;
@@ -731,6 +1054,647 @@ impl ConversationRepository {
             ],
         )?;
         Ok(())
+    }
+
+    /// Record the durable v2 turn/run accept snapshot. The old CLI shim calls
+    /// this before/around execution so crash recovery can see the accepted
+    /// identity even while the synchronous compatibility response still exists.
+    pub fn record_turn_run_snapshot(&self, snapshot: TurnRunSnapshot<'_>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO turns(
+                 id, project_id, conversation_id, client_turn_id, request_id,
+                 idempotency_key, state, effective_settings_json, settings_digest,
+                 model_routing_decision_json, created_at_ms, updated_at_ms)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+             ON CONFLICT(conversation_id, idempotency_key) DO UPDATE SET
+                 state = excluded.state,
+                 model_routing_decision_json = COALESCE(turns.model_routing_decision_json, excluded.model_routing_decision_json),
+                 updated_at_ms = excluded.updated_at_ms",
+            params![
+                snapshot.turn_id,
+                snapshot.project_id,
+                snapshot.conversation_id,
+                snapshot.client_turn_id,
+                snapshot.request_id,
+                snapshot.idempotency_key,
+                snapshot.state,
+                snapshot.effective_settings_json,
+                snapshot.settings_digest,
+                snapshot.model_routing_decision_json,
+                snapshot.now_ms as i64,
+            ],
+        )?;
+        self.conn.execute(
+            "INSERT INTO runs(
+                 id, turn_id, state, last_event_sequence, lease_owner,
+                 lease_expires_at_ms, created_at_ms, updated_at_ms)
+             VALUES(?1, ?2, ?3, -1, NULL, NULL, ?4, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                 state = excluded.state,
+                 updated_at_ms = excluded.updated_at_ms",
+            params![
+                snapshot.run_id,
+                snapshot.turn_id,
+                snapshot.state,
+                snapshot.now_ms as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_turn_run_state(
+        &self,
+        turn_id: &str,
+        run_id: &str,
+        state: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.set_turn_run_state_with_last_sequence(turn_id, run_id, state, None, now_ms)
+    }
+
+    pub fn set_turn_run_state_with_last_sequence(
+        &self,
+        turn_id: &str,
+        run_id: &str,
+        state: &str,
+        last_event_sequence: Option<u64>,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE turns SET state = ?1, updated_at_ms = ?2 WHERE id = ?3",
+            params![state, now_ms as i64, turn_id],
+        )?;
+        match last_event_sequence {
+            Some(last_event_sequence) => {
+                self.conn.execute(
+                    "UPDATE runs
+                     SET state = ?1,
+                         last_event_sequence = MAX(last_event_sequence, ?2),
+                         updated_at_ms = ?3
+                     WHERE id = ?4",
+                    params![state, last_event_sequence as i64, now_ms as i64, run_id],
+                )?;
+            }
+            None => {
+                self.conn.execute(
+                    "UPDATE runs SET state = ?1, updated_at_ms = ?2 WHERE id = ?3",
+                    params![state, now_ms as i64, run_id],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Finish a supervisor-owned lease and publish the terminal run state into
+    /// the conversation read models. This clears the lease so expired-lease
+    /// recovery never requeues an already terminal turn.
+    pub fn finish_turn_supervisor_lease(
+        &self,
+        turn_id: &str,
+        run_id: &str,
+        state: &str,
+        last_event_sequence: u64,
+        terminal_kind: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<()> {
+            self.conn.execute(
+                "UPDATE turns SET state = ?1, updated_at_ms = ?2 WHERE id = ?3",
+                params![state, now_ms as i64, turn_id],
+            )?;
+            self.conn.execute(
+                "UPDATE runs
+                 SET state = ?1,
+                     last_event_sequence = MAX(last_event_sequence, ?2),
+                     lease_owner = NULL,
+                     lease_expires_at_ms = NULL,
+                     updated_at_ms = ?3
+                 WHERE id = ?4",
+                params![state, last_event_sequence as i64, now_ms as i64, run_id],
+            )?;
+            self.conn.execute(
+                "UPDATE run_projections
+                 SET state = ?1,
+                     last_sequence = ?2,
+                     updated_at_ms = ?3
+                 WHERE run_id = ?4",
+                params![state, last_event_sequence as i64, now_ms as i64, run_id],
+            )?;
+            self.conn.execute(
+                "UPDATE stream_cursors
+                 SET last_sequence = ?1,
+                     terminal_kind = ?2,
+                     updated_at_ms = ?3
+                 WHERE run_id = ?4",
+                params![
+                    last_event_sequence as i64,
+                    terminal_kind,
+                    now_ms as i64,
+                    run_id
+                ],
+            )?;
+            let conversation_id = self
+                .conn
+                .query_row(
+                    "SELECT conversation_id FROM conversation_runs WHERE run_id = ?1",
+                    params![run_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if let Some(conversation_id) = conversation_id {
+                let active_runs: i64 = self.conn.query_row(
+                    "SELECT COUNT(*)
+                     FROM conversation_runs cr
+                     JOIN runs r ON r.id = cr.run_id
+                     WHERE cr.conversation_id = ?1
+                       AND cr.run_id <> ?2
+                       AND r.state IN ('queued', 'running')",
+                    params![conversation_id, run_id],
+                    |row| row.get(0),
+                )?;
+                if active_runs == 0 {
+                    self.conn.execute(
+                        "UPDATE conversations
+                         SET status = ?1,
+                             updated_at_ms = ?2
+                         WHERE id = ?3",
+                        params![
+                            conversation_status_for_run_state(state),
+                            now_ms as i64,
+                            conversation_id
+                        ],
+                    )?;
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn run_last_event_sequence(&self, run_id: &str) -> Result<Option<u64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT last_event_sequence FROM runs WHERE id = ?1")?;
+        let mut rows = stmt.query(params![run_id])?;
+        Ok(rows
+            .next()?
+            .map(|r| r.get::<_, i64>(0).map(|v| v as u64))
+            .transpose()?)
+    }
+
+    /// Effective settings JSON snapshotted for a turn at accept time.
+    pub fn turn_effective_settings_json(&self, turn_id: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT effective_settings_json FROM turns WHERE id = ?1")?;
+        let mut rows = stmt.query(params![turn_id])?;
+        Ok(rows.next()?.map(|r| r.get::<_, String>(0)).transpose()?)
+    }
+
+    /// Model routing decision JSON snapshotted for a turn, if routing has run.
+    pub fn turn_model_routing_decision_json(&self, turn_id: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT model_routing_decision_json FROM turns WHERE id = ?1")?;
+        let mut rows = stmt.query(params![turn_id])?;
+        Ok(rows
+            .next()?
+            .map(|r| r.get::<_, Option<String>>(0))
+            .transpose()?
+            .flatten())
+    }
+
+    /// Redacted user prompt associated with a turn. The commercial path will
+    /// replace this with encrypted raw content retrieval; for the current
+    /// supervisor foundation this is the only durable prompt copy available.
+    pub fn turn_user_message_text(&self, turn_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT content_redacted FROM messages
+             WHERE turn_id = ?1 AND role = 'user'
+             ORDER BY sequence ASC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![turn_id])?;
+        Ok(rows.next()?.map(|r| r.get::<_, String>(0)).transpose()?)
+    }
+
+    /// Attach model-routing provenance to an accepted turn before the caller
+    /// exposes it as ready for execution.
+    pub fn set_turn_model_routing_decision(
+        &self,
+        turn_id: &str,
+        decision_json: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE turns
+             SET model_routing_decision_json = ?1,
+                 updated_at_ms = ?2
+             WHERE id = ?3",
+            params![decision_json, now_ms as i64, turn_id],
+        )?;
+        Ok(())
+    }
+
+    /// Atomically claim the oldest queued turn for a supervisor. This does not
+    /// execute adapter/tool work; it is the durable lease boundary that prevents
+    /// two supervisors from running the same accepted turn.
+    pub fn claim_next_queued_turn(
+        &self,
+        supervisor_id: &str,
+        lease_ttl_ms: u64,
+        now_ms: u64,
+    ) -> Result<Option<TurnSupervisorLease>> {
+        let lease_ttl_ms = lease_ttl_ms.max(1);
+        let lease_expires_at_ms = now_ms.saturating_add(lease_ttl_ms);
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<Option<TurnSupervisorLease>> {
+            let claimed = {
+                let mut stmt = self.conn.prepare(
+                    "SELECT
+                         t.id,
+                         r.id,
+                         t.project_id,
+                         t.conversation_id,
+                         cr.message_id,
+                         t.effective_settings_json,
+                         t.model_routing_decision_json
+                     FROM turns t
+                     JOIN runs r ON r.turn_id = t.id
+                     JOIN conversation_runs cr
+                       ON cr.turn_id = t.id
+                      AND cr.run_id = r.id
+                      AND cr.relation = 'primary'
+                     WHERE t.state = 'queued'
+                       AND r.state = 'queued'
+                       AND (r.lease_expires_at_ms IS NULL OR r.lease_expires_at_ms <= ?1)
+                     ORDER BY t.created_at_ms ASC, t.id ASC
+                     LIMIT 1",
+                )?;
+                let mut rows = stmt.query(params![now_ms as i64])?;
+                rows.next()?
+                    .map(|row| {
+                        Ok::<TurnSupervisorLease, rusqlite::Error>(TurnSupervisorLease {
+                            turn_id: row.get(0)?,
+                            run_id: row.get(1)?,
+                            project_id: row.get(2)?,
+                            conversation_id: row.get(3)?,
+                            assistant_message_id: row.get(4)?,
+                            effective_settings_json: row.get(5)?,
+                            model_routing_decision_json: row.get(6)?,
+                            lease_owner: supervisor_id.to_string(),
+                            lease_expires_at_ms,
+                        })
+                    })
+                    .transpose()?
+            };
+            let Some(claimed) = claimed else {
+                return Ok(None);
+            };
+            self.conn.execute(
+                "UPDATE turns SET state = 'running', updated_at_ms = ?1 WHERE id = ?2",
+                params![now_ms as i64, claimed.turn_id],
+            )?;
+            self.conn.execute(
+                "UPDATE runs
+                 SET state = 'running',
+                     lease_owner = ?1,
+                     lease_expires_at_ms = ?2,
+                     updated_at_ms = ?3
+                 WHERE id = ?4",
+                params![
+                    supervisor_id,
+                    lease_expires_at_ms as i64,
+                    now_ms as i64,
+                    claimed.run_id
+                ],
+            )?;
+            self.conn.execute(
+                "UPDATE run_projections
+                 SET state = 'running',
+                     updated_at_ms = ?1
+                 WHERE run_id = ?2",
+                params![now_ms as i64, claimed.run_id],
+            )?;
+            Ok(Some(claimed))
+        })();
+        match result {
+            Ok(value) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Extend a running turn lease held by `supervisor_id`.
+    pub fn heartbeat_turn_supervisor_lease(
+        &self,
+        run_id: &str,
+        supervisor_id: &str,
+        lease_ttl_ms: u64,
+        now_ms: u64,
+    ) -> Result<bool> {
+        let lease_expires_at_ms = now_ms.saturating_add(lease_ttl_ms.max(1));
+        let updated = self.conn.execute(
+            "UPDATE runs
+             SET lease_expires_at_ms = ?1,
+                 updated_at_ms = ?2
+             WHERE id = ?3
+               AND lease_owner = ?4
+               AND state = 'running'",
+            params![
+                lease_expires_at_ms as i64,
+                now_ms as i64,
+                run_id,
+                supervisor_id
+            ],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// Requeue running turns whose supervisor lease has expired. The caller
+    /// should invoke this before attempting to claim new work.
+    pub fn recover_expired_turn_supervisor_leases(&self, now_ms: u64) -> Result<usize> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<usize> {
+            let run_ids: Vec<String> = {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id FROM runs
+                     WHERE state = 'running'
+                       AND lease_expires_at_ms IS NOT NULL
+                       AND lease_expires_at_ms <= ?1",
+                )?;
+                let rows = stmt.query_map(params![now_ms as i64], |row| row.get(0))?;
+                rows.collect::<std::result::Result<Vec<String>, _>>()?
+            };
+            for run_id in &run_ids {
+                self.conn.execute(
+                    "UPDATE runs
+                     SET state = 'queued',
+                         lease_owner = NULL,
+                         lease_expires_at_ms = NULL,
+                         updated_at_ms = ?1
+                     WHERE id = ?2",
+                    params![now_ms as i64, run_id],
+                )?;
+                self.conn.execute(
+                    "UPDATE turns
+                     SET state = 'queued',
+                         updated_at_ms = ?1
+                     WHERE id = (SELECT turn_id FROM runs WHERE id = ?2)",
+                    params![now_ms as i64, run_id],
+                )?;
+                self.conn.execute(
+                    "UPDATE run_projections
+                     SET state = 'queued',
+                         updated_at_ms = ?1
+                     WHERE run_id = ?2",
+                    params![now_ms as i64, run_id],
+                )?;
+            }
+            Ok(run_ids.len())
+        })();
+        match result {
+            Ok(value) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Pipeline id recorded in the conversation run projection read model.
+    pub fn run_projection_pipeline_id(&self, run_id: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT pipeline_id FROM run_projections WHERE run_id = ?1")?;
+        let mut rows = stmt.query(params![run_id])?;
+        Ok(rows
+            .next()?
+            .map(|r| r.get::<_, Option<String>>(0))
+            .transpose()?
+            .flatten())
+    }
+
+    /// Accept a v2 conversation turn in one durable transaction. This is the
+    /// daemon bridge for PR-063: it persists the user message, assistant
+    /// placeholder, turn/run snapshot, primary run link, idempotency key, queued
+    /// projection, and stream cursor before returning an accepted handle. It
+    /// intentionally does not execute the adapter; the future TurnSupervisor owns
+    /// runtime work after this commit point.
+    pub fn accept_conversation_turn(
+        &self,
+        request: &ConversationTurnStartRequest,
+        now_ms: u64,
+    ) -> Result<ConversationTurnAccepted> {
+        if let Some(existing) =
+            self.lookup_turn_idempotency(&request.idempotency_key, &request.conversation_id)?
+        {
+            let state = self
+                .run_projection_state(&existing.run_id)?
+                .as_deref()
+                .map(run_projection_state_from_str)
+                .unwrap_or(RunProjectionState::Queued);
+            return Ok(ConversationTurnAccepted {
+                schema: CONVERSATION_TURN_ACCEPTED_SCHEMA.to_string(),
+                request_id: request.request_id.clone(),
+                turn_id: existing.turn_id.clone(),
+                run_id: existing.run_id.clone(),
+                user_message_id: existing.user_message_id,
+                assistant_message_id: existing.assistant_message_id,
+                stream_id: format!("stream-{}", existing.turn_id),
+                state,
+            });
+        }
+
+        let turn_id = self.new_id()?;
+        let run_id = format!("turn-{turn_id}");
+        let stream_id = format!("stream-{turn_id}");
+        let user_message_id = self.new_id()?;
+        let assistant_message_id = self.new_id()?;
+        let user_content_redacted = redact_secrets(&request.message.text);
+        let assistant_content_redacted = "...".to_string();
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<()> {
+            let effective_settings =
+                self.effective_turn_settings_for_accept(&request.conversation_id, now_ms)?;
+            let effective_settings_json = serde_json::to_string(&effective_settings)?;
+            let settings_digest = sha256_v1(&effective_settings_json);
+            let user_sequence: i64 = self.conn.query_row(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM messages WHERE conversation_id = ?1",
+                params![request.conversation_id],
+                |r| r.get(0),
+            )?;
+            let assistant_sequence = user_sequence + 1;
+            self.conn.execute(
+                "INSERT INTO messages(id, project_id, conversation_id, turn_id, role, state, content_redacted, created_at_ms, updated_at_ms, sequence)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9)",
+                params![
+                    user_message_id,
+                    request.project_id,
+                    request.conversation_id,
+                    turn_id,
+                    enum_to_str(&MessageRole::User),
+                    enum_to_str(&MessageState::Complete),
+                    user_content_redacted,
+                    now_ms as i64,
+                    user_sequence,
+                ],
+            )?;
+            self.conn.execute(
+                "INSERT INTO messages_fts(conversation_id, message_id, content_redacted) VALUES(?1, ?2, ?3)",
+                params![request.conversation_id, user_message_id, user_content_redacted],
+            )?;
+            self.conn.execute(
+                "INSERT INTO messages(id, project_id, conversation_id, turn_id, role, state, content_redacted, created_at_ms, updated_at_ms, sequence)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9)",
+                params![
+                    assistant_message_id,
+                    request.project_id,
+                    request.conversation_id,
+                    turn_id,
+                    enum_to_str(&MessageRole::Assistant),
+                    enum_to_str(&MessageState::Streaming),
+                    assistant_content_redacted,
+                    now_ms as i64,
+                    assistant_sequence,
+                ],
+            )?;
+            self.conn.execute(
+                "INSERT INTO messages_fts(conversation_id, message_id, content_redacted) VALUES(?1, ?2, ?3)",
+                params![
+                    request.conversation_id,
+                    assistant_message_id,
+                    assistant_content_redacted
+                ],
+            )?;
+            self.conn.execute(
+                "INSERT INTO turns(
+                     id, project_id, conversation_id, client_turn_id, request_id,
+                     idempotency_key, state, effective_settings_json, settings_digest,
+                     model_routing_decision_json, created_at_ms, updated_at_ms)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, ?8, NULL, ?9, ?9)",
+                params![
+                    turn_id,
+                    request.project_id,
+                    request.conversation_id,
+                    request.client_turn_id,
+                    request.request_id,
+                    request.idempotency_key,
+                    effective_settings_json,
+                    settings_digest,
+                    now_ms as i64,
+                ],
+            )?;
+            self.conn.execute(
+                "INSERT INTO runs(
+                     id, turn_id, state, last_event_sequence, lease_owner,
+                     lease_expires_at_ms, created_at_ms, updated_at_ms)
+                 VALUES(?1, ?2, 'queued', 0, NULL, NULL, ?3, ?3)",
+                params![run_id, turn_id, now_ms as i64],
+            )?;
+            self.conn.execute(
+                "INSERT INTO conversation_runs(conversation_id, message_id, turn_id, run_id, relation, created_at_ms)
+                 VALUES(?1, ?2, ?3, ?4, 'primary', ?5)",
+                params![
+                    request.conversation_id,
+                    assistant_message_id,
+                    turn_id,
+                    run_id,
+                    now_ms as i64,
+                ],
+            )?;
+            self.conn.execute(
+                "INSERT INTO turn_idempotency(idempotency_key, conversation_id, turn_id, user_message_id, assistant_message_id, run_id, created_at_ms)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    request.idempotency_key,
+                    request.conversation_id,
+                    turn_id,
+                    user_message_id,
+                    assistant_message_id,
+                    run_id,
+                    now_ms as i64,
+                ],
+            )?;
+            self.conn.execute(
+                "INSERT INTO run_projections(
+                     run_id, project_id, conversation_id, turn_id, state,
+                     pipeline_id, graph_revision, last_sequence, projection_json, updated_at_ms)
+                 VALUES(?1, ?2, ?3, ?4, 'queued', ?5, ?6, 0, '{}', ?7)",
+                params![
+                    run_id,
+                    request.project_id,
+                    request.conversation_id,
+                    turn_id,
+                    effective_settings.pipeline_id,
+                    effective_settings.graph_revision,
+                    now_ms as i64,
+                ],
+            )?;
+            self.conn.execute(
+                "INSERT INTO stream_cursors(stream_id, run_id, last_sequence, terminal_kind, updated_at_ms)
+                 VALUES(?1, ?2, 0, NULL, ?3)",
+                params![stream_id, run_id, now_ms as i64],
+            )?;
+            self.conn.execute(
+                "UPDATE conversations
+                 SET status = 'running',
+                     last_message_at_ms = ?1,
+                     updated_at_ms = ?1
+                 WHERE id = ?2",
+                params![now_ms as i64, request.conversation_id],
+            )?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.conn.execute_batch("COMMIT")?,
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(error);
+            }
+        }
+
+        Ok(ConversationTurnAccepted {
+            schema: CONVERSATION_TURN_ACCEPTED_SCHEMA.to_string(),
+            request_id: request.request_id.clone(),
+            turn_id,
+            run_id,
+            user_message_id,
+            assistant_message_id,
+            stream_id,
+            state: RunProjectionState::Queued,
+        })
+    }
+
+    fn effective_turn_settings_for_accept(
+        &self,
+        conversation_id: &str,
+        now_ms: u64,
+    ) -> Result<ConversationTurnSettings> {
+        let thread_settings = match self.get_thread_settings(conversation_id)? {
+            Some(raw) => serde_json::from_str::<ConversationThreadSettings>(&raw)?,
+            None => ConversationThreadSettings::default_for(conversation_id, now_ms),
+        };
+        Ok(turn_settings_from_thread(&thread_settings))
     }
 
     /// Look up the identifiers previously recorded for an idempotency key within
@@ -901,6 +1865,43 @@ fn message_from_row(row: &Row<'_>) -> Result<ConversationMessage> {
     })
 }
 
+fn timeline_item_from_row(row: &Row<'_>) -> Result<TimelineItem> {
+    let kind: String = row.get(6)?;
+    let payload: String = row.get(8)?;
+    Ok(TimelineItem {
+        schema: TIMELINE_ITEM_SCHEMA.to_string(),
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        conversation_id: row.get(2)?,
+        turn_id: row.get(3)?,
+        run_id: row.get(4)?,
+        sequence: row.get(5)?,
+        kind: enum_from_str::<TimelineItemKind>(&kind)?,
+        state: row.get(7)?,
+        payload: serde_json::from_str(&payload)?,
+        created_at_ms: row.get::<_, i64>(9)? as u64,
+        updated_at_ms: row.get::<_, i64>(10)? as u64,
+    })
+}
+
+fn turn_settings_from_thread(settings: &ConversationThreadSettings) -> ConversationTurnSettings {
+    ConversationTurnSettings {
+        model: settings.model_selection.clone(),
+        reasoning_effort: settings.reasoning_effort,
+        execution_mode: settings.execution_mode,
+        pipeline_id: settings.pipeline_id.clone(),
+        graph_revision: None,
+        max_parallelism: settings.max_parallelism,
+        verifier_count: settings.verifier_count,
+        tool_policy_id: settings.tool_policy_id.clone(),
+        approval_policy_id: settings.approval_policy_id.clone(),
+        token_budget: None,
+        cost_budget_usd: None,
+        timeout_ms: None,
+        image_model_id: settings.image_model_id.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1009,6 +2010,411 @@ mod tests {
         assert_eq!(
             repo.run_projection_state("run-1").unwrap().as_deref(),
             Some("completed")
+        );
+    }
+
+    fn sample_turn_start_request(
+        project_id: &str,
+        conversation_id: &str,
+        request_id: &str,
+        idempotency_key: &str,
+    ) -> ConversationTurnStartRequest {
+        ConversationTurnStartRequest {
+            schema: opensks_contracts::CONVERSATION_TURN_START_REQUEST_SCHEMA.to_string(),
+            request_id: request_id.to_string(),
+            project_id: project_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            client_turn_id: format!("client-{request_id}"),
+            message: opensks_contracts::UserMessageInput {
+                text: "accept this turn".to_string(),
+                attachment_refs: vec![],
+            },
+            settings: opensks_contracts::ConversationTurnSettings {
+                model: opensks_contracts::ModelSelection {
+                    mode: opensks_contracts::ModelSelectionMode::Auto,
+                    model_id: None,
+                    fallback_model_ids: vec![],
+                },
+                reasoning_effort: opensks_contracts::ReasoningEffort::Standard,
+                execution_mode: opensks_contracts::ExecutionMode::Worktree,
+                pipeline_id: "auto".to_string(),
+                graph_revision: None,
+                max_parallelism: 4,
+                verifier_count: 1,
+                tool_policy_id: "project-default".to_string(),
+                approval_policy_id: "safe-interactive".to_string(),
+                token_budget: None,
+                cost_budget_usd: None,
+                timeout_ms: None,
+                image_model_id: None,
+            },
+            context: opensks_contracts::TurnContextSelection::default(),
+            idempotency_key: idempotency_key.to_string(),
+        }
+    }
+
+    #[test]
+    fn accept_conversation_turn_is_durable_and_idempotent() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let (pid, cid) = project_and_conversation(&repo);
+        let request = sample_turn_start_request(&pid, &cid, "req-accept-1", "idem-accept-1");
+
+        let accepted = repo.accept_conversation_turn(&request, 2_000).unwrap();
+        assert_eq!(accepted.schema, CONVERSATION_TURN_ACCEPTED_SCHEMA);
+        assert_eq!(accepted.request_id, "req-accept-1");
+        assert_eq!(accepted.state, RunProjectionState::Queued);
+        assert!(accepted.run_id.starts_with("turn-"));
+        assert_eq!(accepted.stream_id, format!("stream-{}", accepted.turn_id));
+
+        let messages = repo.message_page(&cid, None, 10).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, MessageRole::User);
+        assert_eq!(messages[0].state, MessageState::Complete);
+        assert_eq!(messages[1].role, MessageRole::Assistant);
+        assert_eq!(messages[1].state, MessageState::Streaming);
+
+        let runs = repo.runs_for_conversation(&cid).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, accepted.run_id);
+        assert_eq!(runs[0].run_state.as_deref(), Some("queued"));
+        assert_eq!(
+            repo.run_last_event_sequence(&accepted.run_id).unwrap(),
+            Some(0)
+        );
+
+        let replay = repo
+            .accept_conversation_turn(
+                &sample_turn_start_request(&pid, &cid, "req-accept-replay", "idem-accept-1"),
+                3_000,
+            )
+            .unwrap();
+        assert_eq!(replay.turn_id, accepted.turn_id);
+        assert_eq!(replay.run_id, accepted.run_id);
+        assert_eq!(replay.user_message_id, accepted.user_message_id);
+        assert_eq!(replay.assistant_message_id, accepted.assistant_message_id);
+        assert_eq!(replay.request_id, "req-accept-replay");
+        assert_eq!(repo.message_page(&cid, None, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn accept_conversation_turn_snapshots_persisted_thread_settings() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let (pid, cid) = project_and_conversation(&repo);
+        let thread_settings = ConversationThreadSettings {
+            schema: opensks_contracts::CONVERSATION_THREAD_SETTINGS_SCHEMA.to_string(),
+            conversation_id: cid.clone(),
+            model_selection: opensks_contracts::ModelSelection {
+                mode: opensks_contracts::ModelSelectionMode::Pinned,
+                model_id: Some("openrouter/production-code-model".to_string()),
+                fallback_model_ids: vec!["openrouter/fallback-code-model".to_string()],
+            },
+            reasoning_effort: opensks_contracts::ReasoningEffort::Deep,
+            execution_mode: opensks_contracts::ExecutionMode::ReadOnly,
+            pipeline_id: "parallel-build".to_string(),
+            max_parallelism: 7,
+            verifier_count: 3,
+            tool_policy_id: "strict-tools".to_string(),
+            approval_policy_id: "review-everything".to_string(),
+            image_model_id: Some("image-model-a".to_string()),
+            updated_at_ms: 1_900,
+        };
+        repo.set_thread_settings(
+            &cid,
+            &serde_json::to_string(&thread_settings).unwrap(),
+            1_900,
+        )
+        .unwrap();
+
+        let mut request =
+            sample_turn_start_request(&pid, &cid, "req-thread-settings", "idem-thread-settings");
+        request.settings.pipeline_id = "client-sent-ignored".to_string();
+        request.settings.max_parallelism = 99;
+
+        let accepted = repo.accept_conversation_turn(&request, 2_000).unwrap();
+        let effective_raw = repo
+            .turn_effective_settings_json(&accepted.turn_id)
+            .unwrap()
+            .expect("turn settings snapshot");
+        let effective: ConversationTurnSettings = serde_json::from_str(&effective_raw).unwrap();
+
+        assert_eq!(effective.pipeline_id, "parallel-build");
+        assert_eq!(effective.max_parallelism, 7);
+        assert_eq!(effective.verifier_count, 3);
+        assert_eq!(effective.tool_policy_id, "strict-tools");
+        assert_eq!(effective.approval_policy_id, "review-everything");
+        assert_eq!(
+            effective.reasoning_effort,
+            opensks_contracts::ReasoningEffort::Deep
+        );
+        assert_eq!(
+            effective.execution_mode,
+            opensks_contracts::ExecutionMode::ReadOnly
+        );
+        assert_eq!(
+            effective.model.model_id.as_deref(),
+            Some("openrouter/production-code-model")
+        );
+        assert_eq!(
+            repo.run_projection_pipeline_id(&accepted.run_id)
+                .unwrap()
+                .as_deref(),
+            Some("parallel-build")
+        );
+    }
+
+    #[test]
+    fn turn_supervisor_claims_queued_turn_once_and_recovers_expired_lease() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let (pid, cid) = project_and_conversation(&repo);
+        let first = repo
+            .accept_conversation_turn(
+                &sample_turn_start_request(&pid, &cid, "req-supervisor-1", "idem-supervisor-1"),
+                2_000,
+            )
+            .unwrap();
+
+        let claimed = repo
+            .claim_next_queued_turn("supervisor-a", 100, 2_010)
+            .unwrap()
+            .expect("queued turn should be claimed");
+        assert_eq!(claimed.turn_id, first.turn_id);
+        assert_eq!(claimed.run_id, first.run_id);
+        assert_eq!(claimed.lease_owner, "supervisor-a");
+        assert_eq!(claimed.lease_expires_at_ms, 2_110);
+        assert_eq!(
+            repo.run_projection_state(&first.run_id).unwrap().as_deref(),
+            Some("running")
+        );
+
+        assert_eq!(
+            repo.claim_next_queued_turn("supervisor-b", 100, 2_020)
+                .unwrap(),
+            None,
+            "a running leased turn must not be claimed twice"
+        );
+        assert!(
+            repo.heartbeat_turn_supervisor_lease(&first.run_id, "supervisor-a", 200, 2_050)
+                .unwrap()
+        );
+        assert!(
+            !repo
+                .heartbeat_turn_supervisor_lease(&first.run_id, "wrong-supervisor", 200, 2_060)
+                .unwrap()
+        );
+
+        assert_eq!(
+            repo.recover_expired_turn_supervisor_leases(2_100).unwrap(),
+            0
+        );
+        assert_eq!(
+            repo.recover_expired_turn_supervisor_leases(2_251).unwrap(),
+            1
+        );
+        assert_eq!(
+            repo.run_projection_state(&first.run_id).unwrap().as_deref(),
+            Some("queued")
+        );
+
+        let reclaimed = repo
+            .claim_next_queued_turn("supervisor-b", 100, 2_260)
+            .unwrap()
+            .expect("expired turn should be claimable again");
+        assert_eq!(reclaimed.run_id, first.run_id);
+        assert_eq!(reclaimed.lease_owner, "supervisor-b");
+        assert_eq!(
+            repo.turn_user_message_text(&first.turn_id)
+                .unwrap()
+                .as_deref(),
+            Some("accept this turn")
+        );
+
+        repo.finish_turn_supervisor_lease(
+            &first.turn_id,
+            &first.run_id,
+            "completed",
+            7,
+            "completed",
+            2_300,
+        )
+        .unwrap();
+        assert_eq!(
+            repo.run_projection_state(&first.run_id).unwrap().as_deref(),
+            Some("completed")
+        );
+        assert_eq!(
+            repo.get_conversation(&cid).unwrap().unwrap().status,
+            ConversationStatus::Completed
+        );
+        assert_eq!(
+            repo.run_last_event_sequence(&first.run_id).unwrap(),
+            Some(7)
+        );
+        let lease_owner: Option<String> = repo
+            .conn
+            .query_row(
+                "SELECT lease_owner FROM runs WHERE id = ?1",
+                params![first.run_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lease_owner, None);
+    }
+
+    #[test]
+    fn timeline_replays_messages_with_run_projection_state() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let (pid, cid) = project_and_conversation(&repo);
+        let accepted = repo
+            .accept_conversation_turn(
+                &sample_turn_start_request(&pid, &cid, "req-timeline", "idem-timeline"),
+                2_000,
+            )
+            .unwrap();
+        repo.finish_turn_supervisor_lease(
+            &accepted.turn_id,
+            &accepted.run_id,
+            "completed",
+            7,
+            "completed",
+            2_010,
+        )
+        .unwrap();
+
+        let items = repo.timeline_items_for_conversation(&cid, 10).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].kind, TimelineItemKind::UserMessage);
+        assert_eq!(items[0].run_id, None);
+        assert_eq!(items[0].payload["role"], "user");
+        assert_eq!(items[1].kind, TimelineItemKind::AssistantMessage);
+        assert_eq!(items[1].run_id.as_deref(), Some(accepted.run_id.as_str()));
+        assert_eq!(items[1].state, "completed");
+        assert_eq!(items[1].payload["message_state"], "streaming");
+        assert_eq!(items[1].sequence, 2);
+    }
+
+    #[test]
+    fn timeline_replays_persisted_git_receipts_in_sequence_order() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let (pid, cid) = project_and_conversation(&repo);
+        let accepted = repo
+            .accept_conversation_turn(
+                &sample_turn_start_request(&pid, &cid, "req-tl-git", "idem-tl-git"),
+                2_000,
+            )
+            .unwrap();
+        let item = repo
+            .append_timeline_item(
+                &pid,
+                &cid,
+                TimelineItemKind::CommitReceipt,
+                "committed",
+                serde_json::json!({
+                    "content_redacted": "Commit deadbeef",
+                    "commit": "deadbeefcafef00d",
+                    "paths": ["a.rs"],
+                    "message": "ship it",
+                    "projection": "git_receipt"
+                }),
+                2_020,
+            )
+            .unwrap();
+
+        assert_eq!(item.sequence, 3);
+        let items = repo.timeline_items_for_conversation(&cid, 10).unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[1].run_id.as_deref(), Some(accepted.run_id.as_str()));
+        assert_eq!(items[2].kind, TimelineItemKind::CommitReceipt);
+        assert_eq!(items[2].state, "committed");
+        assert_eq!(items[2].payload["commit"], "deadbeefcafef00d");
+    }
+
+    #[test]
+    fn finishing_one_turn_keeps_conversation_running_while_other_runs_are_active() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let (pid, cid) = project_and_conversation(&repo);
+        let first = repo
+            .accept_conversation_turn(
+                &sample_turn_start_request(&pid, &cid, "req-active-1", "idem-active-1"),
+                2_000,
+            )
+            .unwrap();
+        let second = repo
+            .accept_conversation_turn(
+                &sample_turn_start_request(&pid, &cid, "req-active-2", "idem-active-2"),
+                2_010,
+            )
+            .unwrap();
+        let claimed_first = repo
+            .claim_next_queued_turn("supervisor-a", 100, 2_020)
+            .unwrap()
+            .expect("first turn claimed");
+        assert_eq!(claimed_first.run_id, first.run_id);
+
+        repo.finish_turn_supervisor_lease(
+            &first.turn_id,
+            &first.run_id,
+            "completed",
+            4,
+            "completed",
+            2_030,
+        )
+        .unwrap();
+        assert_eq!(
+            repo.get_conversation(&cid).unwrap().unwrap().status,
+            ConversationStatus::Running,
+            "second queued run keeps the conversation summary active"
+        );
+
+        let claimed_second = repo
+            .claim_next_queued_turn("supervisor-b", 100, 2_040)
+            .unwrap()
+            .expect("second turn claimed");
+        assert_eq!(claimed_second.run_id, second.run_id);
+        repo.finish_turn_supervisor_lease(
+            &second.turn_id,
+            &second.run_id,
+            "failed",
+            5,
+            "failed",
+            2_050,
+        )
+        .unwrap();
+        assert_eq!(
+            repo.get_conversation(&cid).unwrap().unwrap().status,
+            ConversationStatus::Failed
+        );
+    }
+
+    #[test]
+    fn migrate_repairs_stale_running_summary_when_no_run_is_active() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let (pid, cid) = project_and_conversation(&repo);
+        let accepted = repo
+            .accept_conversation_turn(
+                &sample_turn_start_request(&pid, &cid, "req-repair-1", "idem-repair-1"),
+                2_000,
+            )
+            .unwrap();
+        repo.finish_turn_supervisor_lease(
+            &accepted.turn_id,
+            &accepted.run_id,
+            "completed",
+            9,
+            "completed",
+            2_010,
+        )
+        .unwrap();
+        repo.set_status(&cid, ConversationStatus::Running, 2_020)
+            .unwrap();
+        assert_eq!(
+            repo.get_conversation(&cid).unwrap().unwrap().status,
+            ConversationStatus::Running
+        );
+
+        repo.repair_conversation_statuses().unwrap();
+        assert_eq!(
+            repo.get_conversation(&cid).unwrap().unwrap().status,
+            ConversationStatus::Completed
         );
     }
 

@@ -31,6 +31,7 @@ struct RootView: View {
         .environmentObject(coordinator.navigation)
         .onAppear {
             state.loadData()
+            state.startProofArtifactRefresh()
             state.connectEngine()
             // Bind the conversation store to the SAME bundled CLI + workspace
             // path AppState resolved, then load this project's conversations.

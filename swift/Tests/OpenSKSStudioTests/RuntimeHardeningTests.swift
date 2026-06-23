@@ -19,6 +19,43 @@ import XCTest
 @MainActor
 final class RuntimeHardeningTests: XCTestCase {
 
+    // MARK: - Proof artifact freshness
+
+    func testProofArtifactFingerprintChangesWhenAcceptanceSummaryChanges() throws {
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("opensks-proof-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let acceptanceDir = workspace.appendingPathComponent(".opensks/acceptance", isDirectory: true)
+        try FileManager.default.createDirectory(at: acceptanceDir, withIntermediateDirectories: true)
+        let summary = acceptanceDir.appendingPathComponent("acceptance-summary.json")
+        try #"{"summary":{"total":23,"passed":21,"partial":2,"failed":0},"goal_complete":false}"#
+            .write(to: summary, atomically: true, encoding: .utf8)
+
+        let stale = ProofArtifactMonitor.fingerprint(workspace: workspace)
+        try #"{"summary":{"total":23,"passed":20,"partial":3,"failed":0},"goal_complete":false}"#
+            .write(to: summary, atomically: true, encoding: .utf8)
+        let fresh = ProofArtifactMonitor.fingerprint(workspace: workspace)
+
+        XCTAssertNotEqual(stale, fresh, "external acceptance audit changes must refresh app-data")
+    }
+
+    func testProofArtifactFingerprintChangesWhenMissionDirectoryChanges() throws {
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("opensks-proof-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let missionsDir = workspace.appendingPathComponent(".opensks/missions", isDirectory: true)
+        try FileManager.default.createDirectory(at: missionsDir, withIntermediateDirectories: true)
+
+        let before = ProofArtifactMonitor.fingerprint(workspace: workspace)
+        try FileManager.default.createDirectory(
+            at: missionsDir.appendingPathComponent("mission-001", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        let after = ProofArtifactMonitor.fingerprint(workspace: workspace)
+
+        XCTAssertNotEqual(before, after, "mission count changes must refresh app-data")
+    }
+
     // MARK: - 1. EventBatcher coalesces a burst into bounded flushes
 
     /// A 10,000-event burst into a manually-ticked batcher coalesces to ONE flush

@@ -29,6 +29,56 @@ fi
 fail() { echo "ARCH-GUARD FAIL: $*" >&2; exit 1; }
 ok()   { echo "ARCH-GUARD ok:  $*"; }
 
+# 0. Monotonic architecture budget. The legacy shell caps below remain for
+# compatibility; this JSON budget adds function-count pressure so large files
+# cannot grow new public API unnoticed.
+BUDGET="scripts/architecture-budget.json"
+if [ -f "$BUDGET" ]; then
+  python3 - "$BUDGET" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+budget_path = pathlib.Path(sys.argv[1])
+budget = json.loads(budget_path.read_text())
+failed = []
+for raw_path, limits in budget.items():
+    path = pathlib.Path(raw_path)
+    if not path.exists():
+        failed.append(f"{raw_path}: missing")
+        continue
+    text = path.read_text(errors="replace")
+    lines = text.count("\n") + (0 if text.endswith("\n") else 1)
+    public_fns = len(re.findall(r"(?m)^\s*pub\s+fn\s+[A-Za-z_][A-Za-z0-9_]*", text))
+    public_fn_names = re.findall(r"(?m)^\s*pub\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)", text)
+    max_lines = limits.get("max_lines")
+    max_public_fns = limits.get("max_public_fns")
+    allowed_public_fns = limits.get("allowed_public_fns")
+    if max_lines is not None and lines > max_lines:
+        failed.append(f"{raw_path}: {lines} lines > max_lines {max_lines}")
+    if max_public_fns is not None and public_fns > max_public_fns:
+        failed.append(f"{raw_path}: {public_fns} public fns > max_public_fns {max_public_fns}")
+    if allowed_public_fns is not None:
+        allowed = set(allowed_public_fns)
+        actual = set(public_fn_names)
+        unexpected = sorted(actual - allowed)
+        missing = sorted(allowed - actual)
+        if unexpected:
+            failed.append(f"{raw_path}: unexpected public fns {unexpected}")
+        if missing:
+            failed.append(f"{raw_path}: allowed public fns missing {missing}")
+
+if failed:
+    for item in failed:
+        print(f"ARCH-GUARD FAIL: {item}", file=sys.stderr)
+    sys.exit(1)
+print(f"ARCH-GUARD ok:  {budget_path} budgets satisfied")
+PY
+else
+  fail "missing $BUDGET"
+fi
+
 # 1. Root monolith line ceiling (zero growth; reductions always pass).
 lib_lines="$(wc -l < src/lib.rs | tr -d '[:space:]')"
 if [ "$lib_lines" -gt "$SRC_LIB_RS_MAX_LINES" ]; then
@@ -93,6 +143,14 @@ if grep -rnE "$conv_template" crates/opensks-cli/src >/dev/null 2>&1; then
 fi
 ok "conversation CLI path uses no deterministic template dispatcher"
 
+# 7b2. Swift Chat's live turn-start must use the typed daemon request, not the
+#      synchronous compatibility CLI `conversation turn-start` path (P0-001).
+swift_turn_start_cli='"conversation",[[:space:]]*"turn-start"'
+if grep -nE "$swift_turn_start_cli" swift/Sources/Conversations/ConversationService.swift >/dev/null 2>&1; then
+  fail "ConversationService.swift shells the compatibility 'conversation turn-start' CLI path; Chat turn-start must use daemon conversation_turn_start."
+fi
+ok "Swift Chat turn-start uses daemon conversation_turn_start, not CLI compatibility path"
+
 # 7c. Chat is the default workspace route (Chat is the main workspace).
 if ! grep -qE 'route:[[:space:]]*WorkspaceRoute[[:space:]]*=[[:space:]]*\.chat' swift/Sources/Navigation/NavigationStore.swift; then
   fail "NavigationStore default route is not .chat (SHELL-002 / §3.3)."
@@ -112,5 +170,62 @@ if grep -qE 'quietWindow' swift/Sources/Backend.swift; then
   fail "Backend.swift reintroduced a quiet-window completion heuristic; daemon responses must complete on the explicit request_completed terminal marker (STREAM-001 / §0.4)."
 fi
 ok "no quiet-window stream-completion heuristic in Backend.swift"
+
+# 7e2. Swift domain services must not instantiate child processes directly.
+#      Temporary allowlist: Backend.swift still owns the legacy CLIRunner plus
+#      the daemon session bootstrap; ProcessSupervisor.swift is the single shared
+#      process launcher. New domain service process creation must route through
+#      ProcessSupervisor or, ultimately, the daemon client.
+python3 - <<'PY'
+import pathlib
+import re
+import sys
+
+allowed = {
+    pathlib.Path("swift/Sources/Backend.swift"),
+    pathlib.Path("swift/Sources/Runtime/ProcessSupervisor.swift"),
+}
+failures = []
+for path in pathlib.Path("swift/Sources").rglob("*.swift"):
+    text = path.read_text(errors="replace")
+    if re.search(r"(?<![A-Za-z0-9_])Process\s*\(", text) and path not in allowed:
+        failures.append(str(path))
+
+if failures:
+    for failure in failures:
+        print(
+            f"ARCH-GUARD FAIL: {failure} instantiates Process(); use ProcessSupervisor or daemon client",
+            file=sys.stderr,
+        )
+    sys.exit(1)
+PY
+ok "Swift domain services do not instantiate Process directly"
+
+# 7f. Provider dispatch must not depend on a system curl subprocess.
+if grep -rnE 'Command::new\("curl"\)|curl stdin|CurlChatCompleter' crates/opensks-adapter/src >/dev/null 2>&1; then
+  fail "OpenRouter provider transport reintroduced curl subprocess usage; use native HTTP transport."
+fi
+ok "OpenRouter provider transport has no curl subprocess"
+
+# 7g. Adapter product code must not own ad-hoc content identity or direct writes.
+python3 - <<'PY'
+import pathlib
+import sys
+
+failures = []
+for path in pathlib.Path("crates/opensks-adapter/src").rglob("*.rs"):
+    text = path.read_text(errors="replace")
+    product = text.split("\n#[cfg(test)]", 1)[0]
+    if "DefaultHasher" in product:
+        failures.append(f"{path}: DefaultHasher content identity is forbidden")
+    if "std::fs::write" in product:
+        failures.append(f"{path}: product std::fs::write must go through opensks-patch-engine")
+
+if failures:
+    for failure in failures:
+        print(f"ARCH-GUARD FAIL: {failure}", file=sys.stderr)
+    sys.exit(1)
+PY
+ok "adapter content identity/write path is patch-engine owned"
 
 echo "ARCH-GUARD: all checks passed."

@@ -2,10 +2,21 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+mod conversation_args;
+mod conversation_timeline;
+mod retention;
+use conversation_args::{
+    parse_conversation_filter, parse_conversation_options, parse_conversation_role,
+    parse_timeline_kind, require_conversation_field,
+};
+pub use retention::{gc_usage, release_usage, run_gc_command, run_release_command};
 
 const DEFAULT_WORKER_LEASE_TTL_SECONDS: u64 = 30;
 
@@ -162,11 +173,13 @@ pub fn daemon_usage() -> &'static str {
 
 /// `opensks capability report [--json]` / `opensks capability matrix` — emit the
 /// machine-readable runtime capability report (recovery directive §18.4) so CI,
-/// the app, and the generated truth matrix all read one honest source. The
-/// report is workspace-independent (the baseline maturity of each capability).
-pub fn run_capability_command(args: &[String], _cwd: &Path) -> Result<CliOutput, CliError> {
+/// the app, and the generated truth matrix all read one honest source. The report
+/// starts from the conservative contract baseline, then overlays current
+/// workspace/build/runtime evidence (provider setup, daemon protocol, ToolGateway,
+/// patch engine, and generated release fixture identity).
+pub fn run_capability_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
     let subcommand = args.first().map(String::as_str).unwrap_or("report");
-    let report = opensks_contracts::baseline_capability_report();
+    let report = runtime_capability_report(cwd, args);
     match subcommand {
         "report" => {
             // JSON is the contract for §18.4; `--json` (if present) is implied.
@@ -183,6 +196,145 @@ pub fn run_capability_command(args: &[String], _cwd: &Path) -> Result<CliOutput,
         other => Err(CliError::Usage(format!(
             "unknown capability subcommand `{other}`\n\nusage: opensks capability report [--json]\n       opensks capability matrix\n"
         ))),
+    }
+}
+
+pub fn runtime_capability_report(
+    cwd: &Path,
+    args: &[String],
+) -> opensks_contracts::RuntimeCapabilityReport {
+    let mut report = opensks_contracts::baseline_capability_report();
+    let workspace_marker = cwd
+        .canonicalize()
+        .unwrap_or_else(|_| cwd.to_path_buf())
+        .display()
+        .to_string();
+    let fixture = args
+        .windows(2)
+        .find_map(|pair| (pair[0] == "--runtime-fixture").then(|| pair[1].to_ascii_lowercase()))
+        .unwrap_or_else(|| "local".to_string());
+    report.generated_for = Some(format!(
+        "workspace:{workspace_marker};crate:{};fixture:{fixture}",
+        env!("CARGO_PKG_VERSION")
+    ));
+
+    if let Some(cap) = capability_mut(&mut report, "chat.answer") {
+        cap.maturity = opensks_contracts::CapabilityMaturity::Foundation;
+        cap.available = false;
+        cap.reason_code = if std::env::var_os("OPENROUTER_API_KEY").is_some() {
+            "openrouter_key_present_but_live_chat_answer_unprobed".to_string()
+        } else {
+            "model_credentials_missing_for_live_chat_answer".to_string()
+        };
+        cap.evidence_refs = vec![
+            "runtime:capability-registry".to_string(),
+            "adapter:openrouter-native-http".to_string(),
+        ];
+        cap.actions = vec!["connect_model".to_string()];
+    }
+
+    if let Some(cap) = capability_mut(&mut report, "agent.code_edit") {
+        cap.maturity = opensks_contracts::CapabilityMaturity::Foundation;
+        cap.available = false;
+        cap.reason_code =
+            "agentic_loop_toolgateway_patch_engine_need_live_provider_credentials".to_string();
+        cap.evidence_refs = vec![
+            "crate:opensks-adapter".to_string(),
+            "crate:opensks-patch-engine".to_string(),
+            "toolgateway:policy-enforced".to_string(),
+            "patch-engine:fsynced-transaction-journal".to_string(),
+            "patch-engine:transactional-delete-rename".to_string(),
+            "driver:openrouter-tools".to_string(),
+            "driver:provider-failure-terminal".to_string(),
+        ];
+        cap.actions = vec![
+            "connect_model".to_string(),
+            "review_patch_policy".to_string(),
+        ];
+    }
+
+    if let Some(cap) = capability_mut(&mut report, "model.dispatch") {
+        cap.maturity = opensks_contracts::CapabilityMaturity::Foundation;
+        cap.available = false;
+        cap.reason_code = if std::env::var_os("OPENROUTER_API_KEY").is_some() {
+            "openrouter_secret_present_runtime_probe_required".to_string()
+        } else {
+            "openrouter_secret_missing".to_string()
+        };
+        cap.evidence_refs = vec![
+            "provider:openrouter-native-reqwest".to_string(),
+            "registry:runtime-overlay".to_string(),
+        ];
+        cap.actions = vec!["connect_model".to_string()];
+    }
+
+    if let Some(cap) = capability_mut(&mut report, "agent.local_test_edit") {
+        if cfg!(feature = "simulation") {
+            cap.maturity = opensks_contracts::CapabilityMaturity::Live;
+            cap.available = true;
+            cap.reason_code = "explicit_local_test_adapter_real_file_io".to_string();
+            append_evidence(cap, "toolgateway:workspace-policy");
+            append_evidence(cap, "patch-engine:transactional-apply");
+            append_evidence(cap, "patch-engine:fsynced-transaction-journal");
+        } else {
+            cap.maturity = opensks_contracts::CapabilityMaturity::Unavailable;
+            cap.available = false;
+            cap.reason_code = "simulation_feature_disabled_for_release_build".to_string();
+            cap.evidence_refs = vec!["build:simulation-feature-disabled".to_string()];
+            cap.actions = vec!["enable_simulation_feature_for_developer_smoke".to_string()];
+        }
+    }
+
+    if let Some(cap) = capability_mut(&mut report, "stream.protocol") {
+        cap.maturity = opensks_contracts::CapabilityMaturity::Degraded;
+        cap.available = true;
+        cap.reason_code = "daemon_ndjson_explicit_terminal_protocol_v2_missing".to_string();
+        cap.evidence_refs = vec![
+            "daemon:request_completed".to_string(),
+            "swift:explicit-terminal-router".to_string(),
+            "test:request_response_ends_with_an_explicit_terminal_marker".to_string(),
+        ];
+    }
+
+    if let Some(cap) = capability_mut(&mut report, "pipeline.graph") {
+        cap.maturity = opensks_contracts::CapabilityMaturity::Foundation;
+        cap.available = false;
+        cap.reason_code = "timeline_read_model_no_live_event_stream_projection".to_string();
+        cap.evidence_refs = vec![
+            "swift:pipeline-projection-ingest".to_string(),
+            "conversation:timeline-read-model".to_string(),
+            "swift:conversation-timeline-read-model".to_string(),
+        ];
+    }
+
+    if let Some(cap) = capability_mut(&mut report, "git.push") {
+        cap.maturity = opensks_contracts::CapabilityMaturity::Degraded;
+        cap.available = true;
+        cap.reason_code = "protected_push_outbox_local_remote_proof_only".to_string();
+        cap.evidence_refs = vec![
+            "crate:opensks-git-service".to_string(),
+            "test:push_cli_full_handshake_pushes_to_local_bare_remote_only".to_string(),
+        ];
+        cap.actions = vec!["approve_push".to_string()];
+    }
+
+    report
+}
+
+fn capability_mut<'a>(
+    report: &'a mut opensks_contracts::RuntimeCapabilityReport,
+    id: &str,
+) -> Option<&'a mut opensks_contracts::RuntimeCapability> {
+    report.capabilities.iter_mut().find(|cap| cap.id == id)
+}
+
+fn append_evidence(cap: &mut opensks_contracts::RuntimeCapability, evidence: &str) {
+    if !cap
+        .evidence_refs
+        .iter()
+        .any(|existing| existing == evidence)
+    {
+        cap.evidence_refs.push(evidence.to_string());
     }
 }
 
@@ -1543,63 +1695,6 @@ fn run_git_push_status(args: &[String], cwd: &Path) -> Result<CliOutput, CliErro
     file_output(&body)
 }
 
-pub fn run_gc_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
-    require_exact_subcommand_cli(args, "plan", gc_usage())?;
-    let plan = opensks_retention::plan_gc(
-        &[
-            ".opensks/runtime/worktrees/run-active/worker".to_string(),
-            ".opensks/runtime/worktrees/run-old/worker".to_string(),
-            ".opensks/wiki/records/ar.jsonl".to_string(),
-        ],
-        "run-active",
-    );
-    let dir = cwd.join(".opensks").join("gc");
-    fs::create_dir_all(&dir)?;
-    write_text_atomic(
-        &dir.join("gc-plan.json"),
-        &(serde_json::to_string_pretty(&plan)
-            .map_err(|error| CliError::Invalid(format!("serialize gc plan: {error}")))?
-            + "\n"),
-    )?;
-    Ok(CliOutput {
-        stdout: format!(
-            "wrote retention GC plan\ndelete: {}\nblocked: {}\nartifact: {}\n",
-            plan.delete_paths.len(),
-            plan.blocked_paths.len(),
-            dir.join("gc-plan.json").display()
-        ),
-    })
-}
-
-pub fn gc_usage() -> &'static str {
-    "usage: opensks gc plan\n"
-}
-
-pub fn run_release_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
-    require_exact_subcommand_cli(args, "proof", release_usage())?;
-    let proof = opensks_retention::release_proof("0.1.0", false, false, true, true, false);
-    let dir = cwd.join(".opensks").join("release");
-    fs::create_dir_all(&dir)?;
-    write_text_atomic(
-        &dir.join("release-proof.json"),
-        &(serde_json::to_string_pretty(&proof)
-            .map_err(|error| CliError::Invalid(format!("serialize release proof: {error}")))?
-            + "\n"),
-    )?;
-    Ok(CliOutput {
-        stdout: format!(
-            "wrote release hardening proof\nstatus: {:?}\nsigned_app: {}\nartifact: {}\n",
-            proof.status,
-            proof.signed_app,
-            dir.join("release-proof.json").display()
-        ),
-    })
-}
-
-pub fn release_usage() -> &'static str {
-    "usage: opensks release proof\n"
-}
-
 pub fn run_worker_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
     let subcommand = args
         .first()
@@ -2306,21 +2401,6 @@ pub fn patch_usage() -> &'static str {
     )
 }
 
-#[derive(Debug, Default)]
-struct ConversationCommandOptions {
-    workspace: Option<PathBuf>,
-    conversation: Option<String>,
-    title: Option<String>,
-    filter: Option<String>,
-    limit: Option<usize>,
-    before_sequence: Option<i64>,
-    after_sequence: Option<i64>,
-    role: Option<String>,
-    text: Option<String>,
-    idempotency_key: Option<String>,
-    settings: Option<String>,
-}
-
 pub fn run_conversation_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
     let Some(subcommand) = args.first() else {
         return Ok(CliOutput {
@@ -2465,6 +2545,37 @@ pub fn run_conversation_command(args: &[String], cwd: &Path) -> Result<CliOutput
                 now_ms,
             )
         }
+        "supervisor-tick" => {
+            let supervisor_id = options
+                .supervisor_id
+                .as_deref()
+                .unwrap_or("cli-turn-supervisor");
+            let lease_ttl_ms = options.lease_ttl_ms.unwrap_or(30_000);
+            let recovered = repo
+                .recover_expired_turn_supervisor_leases(now_ms)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            let claimed = repo
+                .claim_next_queued_turn(supervisor_id, lease_ttl_ms, now_ms)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            let claimed_json = claimed.map(|lease| {
+                serde_json::json!({
+                    "turn_id": lease.turn_id,
+                    "run_id": lease.run_id,
+                    "project_id": lease.project_id,
+                    "conversation_id": lease.conversation_id,
+                    "assistant_message_id": lease.assistant_message_id,
+                    "lease_owner": lease.lease_owner,
+                    "lease_expires_at_ms": lease.lease_expires_at_ms,
+                    "has_model_routing_decision": lease.model_routing_decision_json.is_some(),
+                })
+            });
+            conversation_output(&serde_json::json!({
+                "schema": "opensks.turn-supervisor-tick.v1",
+                "supervisor_id": supervisor_id,
+                "recovered_expired_leases": recovered,
+                "claimed": claimed_json,
+            }))
+        }
         "runs" => {
             let conversation =
                 require_conversation_field(options.conversation.as_deref(), "--conversation")?;
@@ -2490,6 +2601,41 @@ pub fn run_conversation_command(args: &[String], cwd: &Path) -> Result<CliOutput
                 "conversation_id": conversation,
                 "runs": runs_json,
             }))
+        }
+        "timeline" => {
+            let conversation =
+                require_conversation_field(options.conversation.as_deref(), "--conversation")?;
+            let limit = options.limit.unwrap_or(200);
+            let items = conversation_timeline::conversation_timeline_items(
+                &repo,
+                &workspace,
+                conversation,
+                limit,
+            )?;
+            conversation_output(&serde_json::json!({
+                "schema": "opensks.conversation-timeline.v1",
+                "conversation_id": conversation,
+                "items": items,
+            }))
+        }
+        "timeline-append" => {
+            let conversation =
+                require_conversation_field(options.conversation.as_deref(), "--conversation")?;
+            let kind = parse_timeline_kind(options.kind.as_deref())?;
+            let state = options.state.as_deref().unwrap_or("recorded");
+            let raw_payload = require_conversation_field(options.payload.as_deref(), "--payload")?;
+            let payload =
+                serde_json::from_str::<serde_json::Value>(raw_payload).map_err(|error| {
+                    CliError::Invalid(format!("invalid timeline payload json: {error}"))
+                })?;
+            let item = repo
+                .append_timeline_item(&project_id, conversation, kind, state, payload, now_ms)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            conversation_output(
+                &serde_json::to_value(&item).map_err(|error| {
+                    CliError::Invalid(format!("serialize timeline item: {error}"))
+                })?,
+            )
         }
         "settings-get" => {
             let conversation =
@@ -2580,6 +2726,17 @@ fn run_conversation_turn_start(
     let turn_id = repo
         .new_turn_id()
         .map_err(|error| CliError::Invalid(error.to_string()))?;
+    let thread_settings = effective_thread_settings(repo, conversation_id, now_ms)?;
+    let effective_settings = turn_settings_from_thread(&thread_settings);
+    let effective_settings_json = serde_json::to_string(&effective_settings)
+        .map_err(|error| CliError::Invalid(format!("serialize turn settings: {error}")))?;
+    let settings_digest = sha256_v1(&effective_settings_json);
+    let model_routing_decision = opensks_provider::routing_decision_from_turn_settings(
+        format!("route-{turn_id}"),
+        &effective_settings,
+    );
+    let model_routing_decision_json = serde_json::to_string(&model_routing_decision)
+        .map_err(|error| CliError::Invalid(format!("serialize model routing decision: {error}")))?;
 
     let user_message_id = repo
         .append_message(
@@ -2606,37 +2763,78 @@ fn run_conversation_turn_start(
         .map_err(|error| CliError::Invalid(error.to_string()))?;
 
     let run_id = format!("turn-{turn_id}");
-    // Drive a real agent adapter instead of the deterministic engine template
-    // (recovery directive §6, Appendix C rule 2 — the product conversation path
-    // must not call the deterministic engine template directly). Single-model
-    // fallback (§7.3): when one model is configured (OPENROUTER_API_KEY present)
-    // it is auto-selected and produces a real answer; otherwise the
-    // LocalTestAdapter runs — performing genuine file edits for a structured
-    // instruction and answering honestly (no change) otherwise. The key is read
-    // from the env only inside the adapter; it is never logged or persisted.
-    let sink = opensks_adapter::CollectingSink::new();
+    let stream_id = format!("stream-{turn_id}");
+    let request_id = format!("request-{turn_id}");
+    let idempotency_key_value = idempotency_key
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("implicit-{turn_id}"));
+    repo.record_turn_run_snapshot(opensks_conversation::TurnRunSnapshot {
+        turn_id: &turn_id,
+        run_id: &run_id,
+        project_id,
+        conversation_id,
+        client_turn_id: &turn_id,
+        request_id: &request_id,
+        idempotency_key: &idempotency_key_value,
+        state: "queued",
+        effective_settings_json: &effective_settings_json,
+        settings_digest: &settings_digest,
+        model_routing_decision_json: Some(&model_routing_decision_json),
+        now_ms,
+    })
+    .map_err(|error| CliError::Invalid(error.to_string()))?;
+
     let request = opensks_adapter::AgentRunRequest {
         workspace: workspace.to_path_buf(),
         project_id: project_id.to_string(),
         conversation_id: conversation_id.to_string(),
         turn_id: turn_id.clone(),
         run_id: run_id.clone(),
-        stream_id: format!("stream-{turn_id}"),
+        stream_id: stream_id.clone(),
         now_ms,
         prompt: text.to_string(),
     };
-    let model = opensks_adapter::OpenRouterAdapter::default_model();
-    let outcome = if model.is_configured() {
-        opensks_adapter::AgentAdapter::run(&model, &request, &sink)
-    } else {
-        opensks_adapter::AgentAdapter::run(
-            &opensks_adapter::LocalTestAdapter::new(),
+    // Compatibility shim for the old synchronous CLI command. Adapter events
+    // must still land in the durable event journal before any projection claims
+    // are updated; the future daemon subscriber path replays this same store.
+    let journal_sink = DurableAgentEventSink::open(workspace)?;
+    journal_sink.emit_run_started(&request)?;
+    let model = model_routing_decision
+        .selected_model_id
+        .clone()
+        .map(opensks_adapter::OpenRouterAdapter::new);
+    let explicit_local_test = opensks_adapter::LocalTestInstruction::from_prompt(text).is_some();
+    let outcome = if let Some(model) = model.filter(opensks_adapter::OpenRouterAdapter::is_configured) {
+        let completer = opensks_adapter::NativeHttpChatCompleter::new(model.clone());
+        let mut driver = opensks_adapter::OpenRouterToolDriver::new(
+            model.model.clone(),
+            model.max_tokens,
+            completer,
+            "You are a coding agent. Use workspace tools for file changes; final text alone must not claim files changed.",
+            text,
+        );
+        opensks_adapter::run_agentic_loop(
             &request,
-            &sink,
+            &mut driver,
+            &opensks_adapter::AgenticConfig::default(),
+            &journal_sink,
         )
+    } else if explicit_local_test {
+        run_explicit_local_test_turn(&request, &journal_sink)
+    } else {
+        opensks_adapter::AgentEventSink::emit(
+            &journal_sink,
+            setup_required_agent_event(&request),
+        );
+        Ok(opensks_adapter::AgentRunOutcome {
+            assistant_text: "Needs setup — connect at least one code-capable model.".to_string(),
+            patches: vec![],
+            apply_results: vec![],
+            final_state: opensks_contracts::projection::RunProjectionState::Failed,
+        })
     }
     .map_err(|error| CliError::Invalid(format!("agent run failed: {error}")))?;
-    let _ = &sink; // events are streamed by the daemon path; one-shot CLI keeps the outcome.
+    let last_event_sequence = journal_sink.finish(&run_id)?;
 
     use opensks_contracts::projection::RunProjectionState;
     let run_state = match outcome.final_state {
@@ -2675,12 +2873,21 @@ fn run_conversation_turn_start(
 
     // Record the run's real terminal state so the runs list and idempotent
     // replay read it back instead of fabricating `completed` (directive §6.7).
-    repo.upsert_run_projection(
+    repo.upsert_run_projection_with_last_sequence(
         &run_id,
         project_id,
         conversation_id,
         &turn_id,
         run_state,
+        last_event_sequence,
+        now_ms,
+    )
+    .map_err(|error| CliError::Invalid(error.to_string()))?;
+    repo.set_turn_run_state_with_last_sequence(
+        &turn_id,
+        &run_id,
+        run_state,
+        Some(last_event_sequence),
         now_ms,
     )
     .map_err(|error| CliError::Invalid(error.to_string()))?;
@@ -2707,162 +2914,300 @@ fn run_conversation_turn_start(
         "assistant_message_id": assistant_message_id,
         "run_id": run_id,
         "run_state": run_state,
+        "stream_id": stream_id,
+        "settings_digest": settings_digest,
+        "model_routing_decision": model_routing_decision,
+        "last_event_sequence": last_event_sequence,
         "reused": false,
     }))
 }
 
-pub fn conversation_usage() -> &'static str {
-    concat!(
-        "usage: opensks conversation list --workspace <path> [--filter all|running|pinned|archived] [--limit N]\n",
-        "       opensks conversation create --workspace <path> --title \"<title>\"\n",
-        "       opensks conversation rename --workspace <path> --conversation <id> --title \"<title>\"\n",
-        "       opensks conversation pin|unpin|archive|unarchive --workspace <path> --conversation <id>\n",
-        "       opensks conversation delete --workspace <path> --conversation <id>\n",
-        "       opensks conversation fork --workspace <path> --conversation <id> [--after-sequence S]\n",
-        "       opensks conversation messages --workspace <path> --conversation <id> [--before-sequence S] [--limit N]\n",
-        "       opensks conversation append --workspace <path> --conversation <id> --role user|assistant|system --text \"<text>\"\n",
-        "       opensks conversation turn-start --workspace <path> --conversation <id> --text \"<text>\" [--idempotency-key <key>]\n",
-        "       opensks conversation runs --workspace <path> --conversation <id>\n",
-        "       opensks conversation settings-get --workspace <path> --conversation <id>\n",
-        "       opensks conversation settings-set --workspace <path> --conversation <id> --settings '<json>'\n"
-    )
+fn effective_thread_settings(
+    repo: &opensks_conversation::ConversationRepository,
+    conversation_id: &str,
+    now_ms: u64,
+) -> Result<opensks_contracts::ConversationThreadSettings, CliError> {
+    match repo
+        .get_thread_settings(conversation_id)
+        .map_err(|error| CliError::Invalid(error.to_string()))?
+    {
+        Some(raw) => serde_json::from_str::<opensks_contracts::ConversationThreadSettings>(&raw)
+            .map_err(|error| {
+                CliError::Invalid(format!("stored thread settings are invalid: {error}"))
+            }),
+        None => Ok(opensks_contracts::ConversationThreadSettings::default_for(
+            conversation_id,
+            now_ms,
+        )),
+    }
 }
 
-fn parse_conversation_options(args: &[String]) -> Result<ConversationCommandOptions, CliError> {
-    let mut options = ConversationCommandOptions::default();
-    let mut idx = 0;
-    while idx < args.len() {
-        let flag = args[idx].as_str();
-        match flag {
-            "--workspace" => {
-                options.workspace = Some(PathBuf::from(conversation_flag_value(args, idx, flag)?));
-                idx += 2;
-            }
-            "--conversation" => {
-                options.conversation = Some(conversation_flag_value(args, idx, flag)?.to_string());
-                idx += 2;
-            }
-            "--title" => {
-                options.title = Some(conversation_flag_value(args, idx, flag)?.to_string());
-                idx += 2;
-            }
-            "--filter" => {
-                options.filter = Some(conversation_flag_value(args, idx, flag)?.to_string());
-                idx += 2;
-            }
-            "--limit" => {
-                options.limit = Some(conversation_parse_usize(args, idx, flag)?);
-                idx += 2;
-            }
-            "--before-sequence" => {
-                options.before_sequence = Some(conversation_parse_i64(args, idx, flag)?);
-                idx += 2;
-            }
-            "--after-sequence" => {
-                options.after_sequence = Some(conversation_parse_i64(args, idx, flag)?);
-                idx += 2;
-            }
-            "--role" => {
-                options.role = Some(conversation_flag_value(args, idx, flag)?.to_string());
-                idx += 2;
-            }
-            "--text" => {
-                options.text = Some(conversation_flag_value(args, idx, flag)?.to_string());
-                idx += 2;
-            }
-            "--idempotency-key" => {
-                options.idempotency_key =
-                    Some(conversation_flag_value(args, idx, flag)?.to_string());
-                idx += 2;
-            }
-            "--settings" => {
-                options.settings = Some(conversation_flag_value(args, idx, flag)?.to_string());
-                idx += 2;
-            }
-            other => {
-                return Err(CliError::Usage(format!(
-                    "unknown conversation argument `{other}`\n\n{}",
-                    conversation_usage()
-                )));
-            }
+fn turn_settings_from_thread(
+    settings: &opensks_contracts::ConversationThreadSettings,
+) -> opensks_contracts::ConversationTurnSettings {
+    opensks_contracts::ConversationTurnSettings {
+        model: settings.model_selection.clone(),
+        reasoning_effort: settings.reasoning_effort,
+        execution_mode: settings.execution_mode,
+        pipeline_id: settings.pipeline_id.clone(),
+        graph_revision: None,
+        max_parallelism: settings.max_parallelism,
+        verifier_count: settings.verifier_count,
+        tool_policy_id: settings.tool_policy_id.clone(),
+        approval_policy_id: settings.approval_policy_id.clone(),
+        token_budget: None,
+        cost_budget_usd: None,
+        timeout_ms: None,
+        image_model_id: settings.image_model_id.clone(),
+    }
+}
+
+fn sha256_v1(content: &str) -> String {
+    sha256_bytes_v1(content.as_bytes())
+}
+
+fn sha256_bytes_v1(content: &[u8]) -> String {
+    let digest = Sha256::digest(content);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    format!("sha256:v1:{hex}")
+}
+
+struct DurableAgentEventSink {
+    store: std::sync::Mutex<opensks_event_store::EventStore>,
+    failures: std::sync::Mutex<Vec<String>>,
+}
+
+impl DurableAgentEventSink {
+    fn open(workspace: &Path) -> Result<Self, CliError> {
+        let store = opensks_event_store::EventStore::open_workspace(workspace)
+            .map_err(|error| CliError::Invalid(format!("open event journal: {error}")))?;
+        Ok(Self {
+            store: std::sync::Mutex::new(store),
+            failures: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn emit_run_started(&self, request: &opensks_adapter::AgentRunRequest) -> Result<(), CliError> {
+        let event = opensks_contracts::ExecutionEventEnvelope {
+            schema: opensks_contracts::EXECUTION_EVENT_ENVELOPE_SCHEMA.to_string(),
+            id: format!("agent-{}-run-started", request.run_id),
+            run_id: request.run_id.clone(),
+            sequence: 1,
+            occurred_at: event_time_from_ms(request.now_ms),
+            actor: "opensks-cli".to_string(),
+            causation_id: Some(request.turn_id.clone()),
+            correlation_id: Some(request.stream_id.clone()),
+            kind: opensks_contracts::EventKind::RunStarted,
+            payload: serde_json::json!({
+                "source": "conversation.turn-start",
+                "project_id": request.project_id,
+                "conversation_id": request.conversation_id,
+                "turn_id": request.turn_id,
+                "stream_id": request.stream_id,
+                "state": "queued"
+            }),
+            sensitivity: opensks_contracts::Sensitivity::Internal,
+            evidence_refs: vec!["conversation:turn-start".to_string()],
+        };
+        let mut store = self
+            .store
+            .lock()
+            .map_err(|_| CliError::Invalid("event journal lock poisoned".to_string()))?;
+        store
+            .append_event(event)
+            .map_err(|error| CliError::Invalid(format!("append run-started event: {error}")))?;
+        Ok(())
+    }
+
+    fn finish(&self, run_id: &str) -> Result<u64, CliError> {
+        let failures = self
+            .failures
+            .lock()
+            .map_err(|_| CliError::Invalid("event journal failure lock poisoned".to_string()))?;
+        if !failures.is_empty() {
+            return Err(CliError::Invalid(format!(
+                "append agent event journal: {}",
+                failures.join("; ")
+            )));
+        }
+        drop(failures);
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| CliError::Invalid("event journal lock poisoned".to_string()))?;
+        let events = store
+            .replay(run_id)
+            .map_err(|error| CliError::Invalid(format!("replay event journal: {error}")))?;
+        Ok(events.last().map(|event| event.sequence).unwrap_or(0))
+    }
+
+    fn record_failure(&self, error: impl std::fmt::Display) {
+        if let Ok(mut failures) = self.failures.lock() {
+            failures.push(error.to_string());
         }
     }
-    Ok(options)
 }
 
-fn conversation_flag_value<'a>(
-    args: &'a [String],
-    idx: usize,
-    flag: &str,
-) -> Result<&'a str, CliError> {
-    args.get(idx + 1).map(String::as_str).ok_or_else(|| {
-        CliError::Usage(format!(
-            "conversation flag `{flag}` requires a value\n\n{}",
-            conversation_usage()
-        ))
-    })
-}
-
-fn conversation_parse_usize(args: &[String], idx: usize, flag: &str) -> Result<usize, CliError> {
-    conversation_flag_value(args, idx, flag)?
-        .parse::<usize>()
-        .map_err(|_| {
-            CliError::Usage(format!(
-                "conversation flag `{flag}` expects a non-negative integer\n\n{}",
-                conversation_usage()
-            ))
-        })
-}
-
-fn conversation_parse_i64(args: &[String], idx: usize, flag: &str) -> Result<i64, CliError> {
-    conversation_flag_value(args, idx, flag)?
-        .parse::<i64>()
-        .map_err(|_| {
-            CliError::Usage(format!(
-                "conversation flag `{flag}` expects an integer\n\n{}",
-                conversation_usage()
-            ))
-        })
-}
-
-fn require_conversation_field<'a>(value: Option<&'a str>, flag: &str) -> Result<&'a str, CliError> {
-    value.ok_or_else(|| {
-        CliError::Usage(format!(
-            "conversation command requires `{flag}`\n\n{}",
-            conversation_usage()
-        ))
-    })
-}
-
-fn parse_conversation_filter(
-    value: Option<&str>,
-) -> Result<opensks_contracts::ConversationFilter, CliError> {
-    match value.unwrap_or("all") {
-        "all" => Ok(opensks_contracts::ConversationFilter::All),
-        "running" => Ok(opensks_contracts::ConversationFilter::Running),
-        "pinned" => Ok(opensks_contracts::ConversationFilter::Pinned),
-        "archived" => Ok(opensks_contracts::ConversationFilter::Archived),
-        other => Err(CliError::Usage(format!(
-            "unknown conversation filter `{other}`\n\n{}",
-            conversation_usage()
-        ))),
+impl opensks_adapter::AgentEventSink for DurableAgentEventSink {
+    fn emit(&self, event: opensks_contracts::AgentEventEnvelope) {
+        let execution_event = execution_event_from_agent_event(event);
+        match self.store.lock() {
+            Ok(mut store) => {
+                if let Err(error) = store.append_event(execution_event) {
+                    self.record_failure(error);
+                }
+            }
+            Err(_) => self.record_failure("event journal lock poisoned"),
+        }
     }
 }
 
-fn parse_conversation_role(
-    value: Option<&str>,
-) -> Result<opensks_contracts::MessageRole, CliError> {
-    match require_conversation_field(value, "--role")? {
-        "system" => Ok(opensks_contracts::MessageRole::System),
-        "user" => Ok(opensks_contracts::MessageRole::User),
-        "assistant" => Ok(opensks_contracts::MessageRole::Assistant),
-        "tool" => Ok(opensks_contracts::MessageRole::Tool),
-        "event" => Ok(opensks_contracts::MessageRole::Event),
-        other => Err(CliError::Usage(format!(
-            "unknown conversation role `{other}`\n\n{}",
-            conversation_usage()
-        ))),
+fn execution_event_from_agent_event(
+    event: opensks_contracts::AgentEventEnvelope,
+) -> opensks_contracts::ExecutionEventEnvelope {
+    let agent_kind = agent_event_kind_label(event.kind);
+    opensks_contracts::ExecutionEventEnvelope {
+        schema: opensks_contracts::EXECUTION_EVENT_ENVELOPE_SCHEMA.to_string(),
+        id: format!("agent-{}-s{}", event.run_id, event.sequence + 2),
+        run_id: event.run_id.clone(),
+        sequence: event.sequence + 2,
+        occurred_at: event_time_from_ms(event.occurred_at_ms),
+        actor: event
+            .worker_id
+            .clone()
+            .unwrap_or_else(|| "agent".to_string()),
+        causation_id: Some(format!("agent-event:{}", event.sequence)),
+        correlation_id: Some(event.stream_id.clone()),
+        kind: execution_kind_for_agent_event(event.kind),
+        payload: serde_json::json!({
+            "source_schema": event.schema,
+            "agent_event_kind": agent_kind,
+            "stream_id": event.stream_id,
+            "project_id": event.project_id,
+            "conversation_id": event.conversation_id,
+            "turn_id": event.turn_id,
+            "run_id": event.run_id,
+            "worker_id": event.worker_id,
+            "node_id": event.node_id,
+            "payload": event.payload
+        }),
+        sensitivity: event.sensitivity,
+        evidence_refs: event.evidence_refs,
     }
+}
+
+fn execution_kind_for_agent_event(
+    kind: opensks_contracts::AgentEventKind,
+) -> opensks_contracts::EventKind {
+    use opensks_contracts::AgentEventKind;
+    match kind {
+        AgentEventKind::AssistantTextCompleted
+        | AgentEventKind::ToolCallCompleted
+        | AgentEventKind::FilePatchApplied
+        | AgentEventKind::WorkerCompleted => opensks_contracts::EventKind::WorkItemCompleted,
+        AgentEventKind::VerificationCompleted => opensks_contracts::EventKind::VerificationPassed,
+        AgentEventKind::Error => opensks_contracts::EventKind::VerificationFailed,
+        AgentEventKind::ApprovalRequested => opensks_contracts::EventKind::ApprovalRequested,
+        AgentEventKind::ApprovalResolved => opensks_contracts::EventKind::ApprovalApproved,
+        AgentEventKind::PlanUpdated
+        | AgentEventKind::AssistantTextDelta
+        | AgentEventKind::ToolCallStarted
+        | AgentEventKind::ToolCallOutput
+        | AgentEventKind::FilePatchProposed
+        | AgentEventKind::VerificationStarted
+        | AgentEventKind::WorkerSpawned
+        | AgentEventKind::WorkerProgress
+        | AgentEventKind::ImageArtifactCreated
+        | AgentEventKind::Warning => opensks_contracts::EventKind::WorkItemRunning,
+    }
+}
+
+fn setup_required_agent_event(
+    request: &opensks_adapter::AgentRunRequest,
+) -> opensks_contracts::AgentEventEnvelope {
+    opensks_contracts::AgentEventEnvelope {
+        schema: opensks_contracts::AGENT_EVENT_ENVELOPE_SCHEMA.to_string(),
+        stream_id: request.stream_id.clone(),
+        project_id: request.project_id.clone(),
+        conversation_id: request.conversation_id.clone(),
+        turn_id: request.turn_id.clone(),
+        run_id: request.run_id.clone(),
+        worker_id: Some("provider-router".to_string()),
+        node_id: None,
+        sequence: 0,
+        occurred_at_ms: request.now_ms,
+        kind: opensks_contracts::AgentEventKind::Error,
+        payload: serde_json::json!({
+            "code": "setup_required",
+            "message": "Needs setup — connect at least one code-capable model."
+        }),
+        sensitivity: opensks_contracts::Sensitivity::Public,
+        evidence_refs: vec!["provider:no-code-capable-model".to_string()],
+    }
+}
+
+#[cfg(any(test, feature = "simulation"))]
+fn run_explicit_local_test_turn(
+    request: &opensks_adapter::AgentRunRequest,
+    sink: &dyn opensks_adapter::AgentEventSink,
+) -> Result<opensks_adapter::AgentRunOutcome, opensks_adapter::AgentAdapterError> {
+    opensks_adapter::AgentAdapter::run(&opensks_adapter::LocalTestAdapter::new(), request, sink)
+}
+
+#[cfg(not(any(test, feature = "simulation")))]
+fn run_explicit_local_test_turn(
+    request: &opensks_adapter::AgentRunRequest,
+    sink: &dyn opensks_adapter::AgentEventSink,
+) -> Result<opensks_adapter::AgentRunOutcome, opensks_adapter::AgentAdapterError> {
+    opensks_adapter::AgentEventSink::emit(
+        sink,
+        opensks_contracts::AgentEventEnvelope {
+            schema: opensks_contracts::AGENT_EVENT_ENVELOPE_SCHEMA.to_string(),
+            stream_id: request.stream_id.clone(),
+            project_id: request.project_id.clone(),
+            conversation_id: request.conversation_id.clone(),
+            turn_id: request.turn_id.clone(),
+            run_id: request.run_id.clone(),
+            worker_id: Some("simulation-disabled".to_string()),
+            node_id: None,
+            sequence: 0,
+            occurred_at_ms: request.now_ms,
+            kind: opensks_contracts::AgentEventKind::Error,
+            payload: serde_json::json!({
+                "code": "simulation_unavailable",
+                "message": "Local test simulation is disabled in this build."
+            }),
+            sensitivity: opensks_contracts::Sensitivity::Public,
+            evidence_refs: vec!["build:simulation-feature-disabled".to_string()],
+        },
+    );
+    Ok(opensks_adapter::AgentRunOutcome {
+        assistant_text: "Local test simulation is disabled in this build.".to_string(),
+        patches: vec![],
+        apply_results: vec![],
+        final_state: opensks_contracts::projection::RunProjectionState::Failed,
+    })
+}
+
+fn agent_event_kind_label(kind: opensks_contracts::AgentEventKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn event_time_from_ms(ms: u64) -> String {
+    let secs = ms / 1_000;
+    let nanos = (ms % 1_000) * 1_000_000;
+    format!("{secs}.{nanos:09}")
+}
+
+pub fn conversation_usage() -> &'static str {
+    conversation_args::conversation_usage()
 }
 
 /// Resolve the per-workspace project key. Canonicalize when the path resolves on
@@ -4326,6 +4671,7 @@ fn run_local_worker_request_routes(leases: &[WorkerLeaseRecord]) -> Vec<WorkerRo
         .filter(|lease| lease.state == "active")
         .collect::<Vec<_>>();
     let origin = Instant::now();
+    let dispatch_barrier = Arc::new(Barrier::new(active.len().max(1)));
     let handles = active
         .iter()
         .enumerate()
@@ -4333,9 +4679,11 @@ fn run_local_worker_request_routes(leases: &[WorkerLeaseRecord]) -> Vec<WorkerRo
             let lane = lease.lane.clone();
             let worker_id = lease.worker_id.clone();
             let lease_id = lease.lease_id.clone();
+            let dispatch_barrier = Arc::clone(&dispatch_barrier);
             std::thread::spawn(move || {
                 let queued_at_ms = origin.elapsed().as_millis();
                 let dispatched_at_ms = origin.elapsed().as_millis();
+                dispatch_barrier.wait();
                 std::thread::sleep(std::time::Duration::from_millis(5 + index as u64));
                 WorkerRouteRecord {
                     request_id: format!("request-{}", index + 1),
@@ -4752,6 +5100,15 @@ fn write_text_atomic(path: &Path, contents: &str) -> Result<(), CliError> {
     fs::rename(tmp_path, path)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod capability_tests;
+
+#[cfg(test)]
+mod conversation_supervisor_tests;
+
+#[cfg(test)]
+mod security_tests;
 
 #[cfg(test)]
 mod tests {
@@ -5530,6 +5887,10 @@ mod tests {
         assert!(artifact.contains("\"schema\": \"opensks.routing-decision.v1\""));
         assert!(artifact.contains("\"status\": \"routed\""));
         assert!(artifact.contains("\"selected_model_id\": \"fake-image\""));
+        assert!(artifact.contains("\"route_receipt\""));
+        assert!(artifact.contains("\"provider_id\": \"fake-local\""));
+        assert!(artifact.contains("\"model_id\": \"fake-image\""));
+        assert!(artifact.contains("\"requested_capabilities\""));
         assert!(artifact.ends_with('\n'));
         fs::remove_dir_all(root).ok();
     }
@@ -5640,6 +6001,22 @@ mod tests {
         assert_eq!(release_proof["status"], "not_verified");
         assert_eq!(release_proof["signed_app"], false);
         assert_eq!(release_proof["upgrade_checked"], false);
+        assert_eq!(release_proof["artifact_digest_gate_passed"], false);
+        assert_eq!(release_proof["same_sha_artifact_binding"], false);
+        assert!(
+            release_proof["missing_artifacts"]
+                .as_array()
+                .expect("missing artifacts")
+                .iter()
+                .any(|artifact| artifact == "docs/runtime-truth-matrix.generated.md")
+        );
+        assert!(
+            release_proof["blockers"]
+                .as_array()
+                .expect("release blockers")
+                .iter()
+                .any(|blocker| blocker["code"] == "git_head_unavailable")
+        );
 
         fs::remove_dir_all(root).ok();
     }
@@ -5868,7 +6245,37 @@ mod tests {
         );
         assert_eq!(turn["schema"], "opensks.conversation-turn.v1");
         assert_eq!(turn["reused"], false);
-        assert_eq!(turn["run_state"], "completed");
+        assert_eq!(turn["run_state"], "failed");
+        assert!(
+            turn["settings_digest"]
+                .as_str()
+                .expect("settings digest")
+                .starts_with("sha256:v1:")
+        );
+        assert_eq!(
+            turn["model_routing_decision"]["schema"],
+            "opensks.routing-decision.v1"
+        );
+        assert_eq!(
+            turn["model_routing_decision"]["status"],
+            "blocked_missing_capability"
+        );
+        assert_eq!(
+            turn["model_routing_decision"]["reason_code"],
+            "thread_settings_model_not_selected"
+        );
+        assert_eq!(
+            turn["model_routing_decision"]["route_receipt"]["reason_code"],
+            "thread_settings_model_not_selected"
+        );
+        assert_eq!(
+            turn["model_routing_decision"]["route_receipt"]["requested_capabilities"]["code"],
+            true
+        );
+        assert_eq!(
+            turn["model_routing_decision"]["route_receipt"]["registry_revision"],
+            turn["model_routing_decision"]["model_snapshot_hash"]
+        );
         let user_message_id = turn["user_message_id"].as_str().expect("user id");
         let assistant_message_id = turn["assistant_message_id"].as_str().expect("assistant id");
         assert_ne!(user_message_id, assistant_message_id);
@@ -5884,17 +6291,52 @@ mod tests {
         assert_eq!(listed.len(), 2, "user + assistant message persisted");
         assert_eq!(listed[0]["role"], "user");
         assert_eq!(listed[1]["role"], "assistant");
-        assert_eq!(listed[1]["state"], "complete");
-        // The assistant message is the agent's real output, not the removed
-        // "N work items completed" fake summary. A plain-text prompt with no
-        // structured instruction yields an honest no-change reply.
+        assert_eq!(listed[1]["state"], "failed");
         let assistant_content = listed[1]["content_redacted"]
             .as_str()
             .expect("assistant content");
-        assert!(!assistant_content.is_empty());
+        assert!(assistant_content.contains("Needs setup"));
         assert!(
             !assistant_content.contains("work items"),
             "leftover fake summary: {assistant_content}"
+        );
+        let timeline = conversation_json(&["timeline", "--conversation", &cid], &root);
+        assert_eq!(timeline["schema"], "opensks.conversation-timeline.v1");
+        let timeline_items = timeline["items"].as_array().expect("timeline items");
+        assert!(
+            timeline_items.len() >= 4,
+            "message items plus event journal items are replayed"
+        );
+        assert_eq!(timeline_items[0]["kind"], "user_message");
+        assert_eq!(timeline_items[0]["payload"]["role"], "user");
+        assert_eq!(timeline_items[1]["kind"], "assistant_message");
+        assert_eq!(timeline_items[1]["run_id"], turn["run_id"]);
+        assert_eq!(timeline_items[1]["state"], "failed");
+        assert!(
+            timeline_items.iter().any(|item| {
+                item["kind"] == "error"
+                    && item["payload"]["event_kind"] == "verification_failed"
+                    && item["payload"]["payload_redacted"]["agent_event_kind"] == "error"
+                    && item["payload"]["content_redacted"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("Needs setup"))
+            }),
+            "setup-required event must be replayed as a durable timeline error: {timeline_items:#?}"
+        );
+        let run_id = turn["run_id"].as_str().expect("run id");
+        let store = opensks_event_store::EventStore::open_workspace(&root).expect("event store");
+        let events = store.replay(run_id).expect("replay setup events");
+        assert_eq!(
+            events.first().map(|event| &event.kind),
+            Some(&opensks_contracts::EventKind::RunStarted)
+        );
+        assert!(
+            events.iter().any(|event| {
+                event.kind == opensks_contracts::EventKind::VerificationFailed
+                    && event.payload["agent_event_kind"] == "error"
+                    && event.payload["payload"]["code"] == "setup_required"
+            }),
+            "setup-required failure must be journaled: {events:#?}"
         );
 
         fs::remove_dir_all(root).ok();
@@ -5934,6 +6376,47 @@ mod tests {
         // No duplicate messages were appended on the replay.
         let messages = conversation_json(&["messages", "--conversation", &cid], &root);
         assert_eq!(messages["messages"].as_array().expect("messages").len(), 2);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn timeline_append_persists_git_receipt_items() {
+        let root = temp_workspace("opensks-cli-timeline-append");
+        let cid = create_conversation_id(&root);
+        let payload = serde_json::json!({
+            "content_redacted": "Commit deadbeef recorded.",
+            "commit": "deadbeefcafef00d",
+            "paths": ["a.rs"],
+            "message": "ship it",
+            "projection": "git_receipt"
+        })
+        .to_string();
+
+        let receipt = conversation_json(
+            &[
+                "timeline-append",
+                "--conversation",
+                &cid,
+                "--kind",
+                "commit_receipt",
+                "--state",
+                "committed",
+                "--payload",
+                &payload,
+            ],
+            &root,
+        );
+        assert_eq!(receipt["kind"], "commit_receipt");
+        assert_eq!(receipt["payload"]["commit"], "deadbeefcafef00d");
+
+        let timeline = conversation_json(&["timeline", "--conversation", &cid], &root);
+        let items = timeline["items"].as_array().expect("timeline items");
+        assert!(items.iter().any(|item| {
+            item["kind"] == "commit_receipt"
+                && item["state"] == "committed"
+                && item["payload"]["paths"][0] == "a.rs"
+        }));
 
         fs::remove_dir_all(root).ok();
     }
@@ -5993,17 +6476,13 @@ mod tests {
         assert_eq!(listed[0]["turn_id"], turn["turn_id"]);
         assert_eq!(listed[0]["message_id"], turn["assistant_message_id"]);
         assert_eq!(listed[0]["relation"], "primary");
-        assert_eq!(listed[0]["run_state"], "completed");
+        assert_eq!(listed[0]["run_state"], "failed");
 
         fs::remove_dir_all(root).ok();
     }
 
     #[test]
     fn turn_start_with_local_test_instruction_really_edits_the_workspace() {
-        // The conversation path drives a real adapter (not the deterministic
-        // engine template). A structured instruction must produce an actual
-        // on-disk change — the Chat → code-edit vertical, provable without a
-        // model.
         let root = temp_workspace("opensks-cli-agent-edit");
         let cid = create_conversation_id(&root);
         let instruction = r#"{"local_test": {"op": "create_file", "path": "AGENT_NOTE.md", "value": "written by the agent"}}"#;
@@ -6012,13 +6491,14 @@ mod tests {
             &root,
         );
         assert_eq!(turn["run_state"], "completed");
+        let last_event_sequence = turn["last_event_sequence"]
+            .as_u64()
+            .expect("last event sequence");
+        assert!(last_event_sequence > 1);
 
-        // Real side effect: the file exists with the agent's content.
         let written = fs::read_to_string(root.join("AGENT_NOTE.md")).expect("agent-written file");
         assert_eq!(written, "written by the agent");
 
-        // The assistant message is the agent's real summary, not a fixed
-        // "N work items completed" template.
         let messages = conversation_json(&["messages", "--conversation", &cid], &root);
         let list = messages["messages"].as_array().expect("messages");
         let assistant = list
@@ -6031,6 +6511,41 @@ mod tests {
             !content.contains("work items"),
             "leftover fake summary: {content}"
         );
+        let run_id = turn["run_id"].as_str().expect("run id");
+        let store = opensks_event_store::EventStore::open_workspace(&root).expect("event store");
+        let events = store.replay(run_id).expect("replay agent events");
+        assert_eq!(
+            events.first().map(|event| &event.kind),
+            Some(&opensks_contracts::EventKind::RunStarted)
+        );
+        assert_eq!(
+            events.last().map(|event| event.sequence),
+            Some(last_event_sequence)
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| { event.payload["agent_event_kind"] == "file_patch_applied" }),
+            "patch application must be durable in the event journal: {events:#?}"
+        );
+        let timeline = conversation_json(&["timeline", "--conversation", &cid], &root);
+        let timeline_items = timeline["items"].as_array().expect("timeline items");
+        assert!(
+            timeline_items.iter().any(|item| {
+                item["kind"] == "patch"
+                    && item["run_id"] == turn["run_id"]
+                    && item["payload"]["payload_redacted"]["agent_event_kind"]
+                        == "file_patch_applied"
+            }),
+            "patch application must replay into the conversation timeline: {timeline_items:#?}"
+        );
+        let repo = opensks_conversation::ConversationRepository::open_workspace(&root)
+            .expect("conversation repo");
+        assert_eq!(
+            repo.run_last_event_sequence(run_id)
+                .expect("run last sequence"),
+            Some(last_event_sequence)
+        );
 
         fs::remove_dir_all(root).ok();
     }
@@ -6040,13 +6555,11 @@ mod tests {
         let root = temp_workspace("opensks-cli-settings");
         let cid = create_conversation_id(&root);
 
-        // Unset thread → a safe default (Auto model, Worktree mode).
         let default = conversation_json(&["settings-get", "--conversation", &cid], &root);
         assert_eq!(default["schema"], "opensks.thread-settings.v1");
         assert_eq!(default["model_selection"]["mode"], "auto");
         assert_eq!(default["execution_mode"], "worktree");
 
-        // Persist explicit settings.
         let payload = serde_json::json!({
             "schema": "opensks.thread-settings.v1",
             "conversation_id": cid,
@@ -6073,7 +6586,6 @@ mod tests {
         );
         assert_eq!(set["pipeline_id"], "parallel-build");
 
-        // Reopen the workspace (simulate relaunch) and read it back.
         let got = conversation_json(&["settings-get", "--conversation", &cid], &root);
         assert_eq!(got["model_selection"]["mode"], "pinned");
         assert_eq!(got["model_selection"]["model_id"], "openai/gpt-4o-mini");
@@ -6081,7 +6593,41 @@ mod tests {
         assert_eq!(got["reasoning_effort"], "deep");
         assert_eq!(got["max_parallelism"], 8);
 
-        // Garbage settings are rejected (not silently stored).
+        let turn = conversation_json(
+            &[
+                "turn-start",
+                "--conversation",
+                &cid,
+                "--text",
+                "use pinned settings",
+            ],
+            &root,
+        );
+        assert_eq!(
+            turn["model_routing_decision"]["status"], "routed",
+            "pinned model should be recorded as the route decision"
+        );
+        assert_eq!(
+            turn["model_routing_decision"]["selected_model_id"],
+            "openai/gpt-4o-mini"
+        );
+        assert_eq!(
+            turn["model_routing_decision"]["reason_code"],
+            "explicit_thread_settings_model"
+        );
+        assert_eq!(
+            turn["model_routing_decision"]["route_receipt"]["provider_id"],
+            "openai"
+        );
+        assert_eq!(
+            turn["model_routing_decision"]["route_receipt"]["model_id"],
+            "openai/gpt-4o-mini"
+        );
+        assert_eq!(
+            turn["model_routing_decision"]["route_receipt"]["registry_revision"],
+            turn["model_routing_decision"]["model_snapshot_hash"]
+        );
+
         let bad = run_conversation_command(
             &[
                 "settings-set".to_string(),
@@ -6097,25 +6643,6 @@ mod tests {
         assert!(bad.is_err(), "invalid settings json must be rejected");
 
         fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn capability_report_emits_valid_json_and_matrix() {
-        let cwd = std::env::temp_dir();
-        let out = run_capability_command(&["report".to_string()], &cwd).expect("report");
-        let report: opensks_contracts::RuntimeCapabilityReport =
-            serde_json::from_str(&out.stdout).expect("valid json capability report");
-        report.validate().expect("report internally valid");
-        assert!(
-            report
-                .capabilities
-                .iter()
-                .any(|c| c.id == "agent.local_test_edit"),
-            "report must include known capabilities"
-        );
-        let matrix = run_capability_command(&["matrix".to_string()], &cwd).expect("matrix");
-        assert!(matrix.stdout.contains("Runtime Truth Matrix"));
-        assert!(run_capability_command(&["nope".to_string()], &cwd).is_err());
     }
 
     // --- file verb ---------------------------------------------------------
@@ -7380,148 +7907,6 @@ mod tests {
             serde_json::from_str(&err.to_string()).expect("vault error JSON");
         assert_eq!(parsed["error"]["code"], "decrypt_failed");
 
-        fs::remove_dir_all(&root).ok();
-    }
-
-    // --- PR-044 security report + audit gate ---------------------------------
-
-    fn security_json(args: &[&str], workspace: &Path) -> serde_json::Value {
-        let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        let output = run_security_command(&owned, workspace).expect("security command ok");
-        assert!(output.stdout.ends_with('\n'));
-        serde_json::from_str(&output.stdout).expect("valid security json")
-    }
-
-    #[test]
-    fn security_report_emits_schema_checks_and_summary() {
-        let root = temp_workspace("opensks-security-report");
-        let report = security_json(
-            &[
-                "report",
-                "--workspace",
-                &root.to_string_lossy(),
-                "--generated-at",
-                "2026-06-22T00:00:00Z",
-            ],
-            &root,
-        );
-        assert_eq!(report["schema"], "opensks.security-report.v1");
-        assert_eq!(report["generated_at"], "2026-06-22T00:00:00Z");
-
-        // The cheap built-in checks are present and all pass on a clean tree.
-        let checks = report["checks"].as_array().expect("checks array");
-        let names: Vec<&str> = checks
-            .iter()
-            .map(|c| c["name"].as_str().expect("check name"))
-            .collect();
-        for expected in [
-            "redaction_enabled",
-            "capabilities_deny_by_default",
-            "approval_required_for_git_push",
-            "reconnect_replay_supported",
-            "dependency_advisories_scanned",
-        ] {
-            assert!(names.contains(&expected), "missing check {expected}");
-        }
-        assert!(checks.iter().all(|c| c["passed"] == true));
-
-        // The dependency-advisory posture is an accepted (non-gating) finding,
-        // and the severity summary is derived from the findings.
-        let findings = report["findings"].as_array().expect("findings array");
-        assert!(
-            findings
-                .iter()
-                .any(|f| { f["id"] == "dependency-advisory-posture" && f["status"] == "accepted" })
-        );
-        assert!(report["summary"]["critical"].as_u64().is_some());
-        fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn security_audit_passes_when_no_open_blocking_finding() {
-        let root = temp_workspace("opensks-security-audit-pass");
-        let report = security_json(&["audit", "--workspace", &root.to_string_lossy()], &root);
-        assert_eq!(report["schema"], "opensks.security-report.v1");
-        // Clean tree: no open critical/high finding.
-        assert_eq!(report["summary"]["critical"], 0);
-        assert_eq!(report["summary"]["high"], 0);
-        fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn security_report_folds_in_precomputed_findings() {
-        let root = temp_workspace("opensks-security-findings");
-        let findings_path = root.join("findings.json");
-        fs::write(
-            &findings_path,
-            r#"[
-              {
-                "id": "open-critical",
-                "severity": "critical",
-                "category": "secrets",
-                "title": "Hardcoded credential",
-                "detail": "redacted",
-                "status": "open"
-              }
-            ]"#,
-        )
-        .expect("write findings");
-
-        // `report` includes the open critical finding in its summary.
-        let report = security_json(
-            &[
-                "report",
-                "--workspace",
-                &root.to_string_lossy(),
-                "--findings",
-                &findings_path.to_string_lossy(),
-            ],
-            &root,
-        );
-        assert_eq!(report["summary"]["critical"], 1);
-
-        // `audit` ignores external findings (built-in checks only) and still
-        // passes on a clean tree, proving the gate is deterministic.
-        let audit = security_json(&["audit", "--workspace", &root.to_string_lossy()], &root);
-        assert_eq!(audit["summary"]["critical"], 0);
-        fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn security_audit_fails_nonzero_on_open_blocking_builtin_finding() {
-        // Force a built-in finding by pointing the report at a findings file with
-        // an open high finding, then assert the audit gate logic itself rejects a
-        // report that carries an open blocking finding.
-        let report = opensks_contracts::SecurityReport::new(
-            "t",
-            vec![opensks_contracts::SecurityFinding {
-                id: "x".to_string(),
-                severity: opensks_contracts::SecuritySeverity::High,
-                category: "c".to_string(),
-                title: "t".to_string(),
-                detail: "d".to_string(),
-                status: opensks_contracts::FindingStatus::Open,
-                owner: None,
-                deadline: None,
-            }],
-            vec![],
-        );
-        assert!(report.has_open_blocking_finding());
-    }
-
-    #[test]
-    fn security_unknown_subcommand_is_usage_error() {
-        let root = temp_workspace("opensks-security-usage");
-        let err = run_security_command(
-            &[
-                "bogus".to_string(),
-                "--workspace".to_string(),
-                root.to_string_lossy().into_owned(),
-            ],
-            &root,
-        )
-        .expect_err("unknown subcommand must error");
-        assert!(matches!(err, CliError::Usage(_)));
         fs::remove_dir_all(&root).ok();
     }
 }

@@ -1,0 +1,12 @@
+title = "OpenSKS gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic fixtures and public configuration labels only."
+regexes = [
+  '''sk-test-secret-[a-z-]+''',
+  '''OPENROUTER_API_KEY''',
+  '''GITHUB_TOKEN''',
+]

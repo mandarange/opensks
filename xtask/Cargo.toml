@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+opensks-cli = { path = "../crates/opensks-cli" }
 opensks-contracts = { path = "../crates/opensks-contracts" }
 
 [lints]

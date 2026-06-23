@@ -24,6 +24,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     // retain a full thread in memory. The light `summaries` entry survives.
     @Published private(set) var messages: [ConversationMessage] = []
     @Published private(set) var hasMoreMessages = false
+    @Published private(set) var timelineByConversation: [String: [ConversationTimelineItem]] = [:]
 
     // Per-conversation composer drafts. Cleared on a successful send.
     @Published var drafts: [String: String] = [:]
@@ -32,11 +33,14 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     // RunCard renders one of these under the assistant turn it belongs to.
     @Published private(set) var runsByConversation: [String: [ConversationRunRef]] = [:]
 
-    // Per-conversation LOCAL commit cards (PR-035). After a successful local
-    // commit the Git studio posts one of these into the active thread; the
-    // thread renders a `CommitReceiptCard` listing the commit sha + the exact
-    // paths committed. These are UI affordances attached to the thread, not
-    // persisted messages, so they never round-trip through the service.
+    // Durable per-conversation Chat settings. The daemon snapshots these at turn
+    // accept time; the composer edits this SSOT instead of sending ad-hoc
+    // settings that product runtime would ignore.
+    @Published private(set) var threadSettingsByConversation: [String: ConversationThreadSettings] = [:]
+
+    // Compatibility mirrors for Git receipts. The rendered Chat source of truth
+    // is `timelineByConversation`; these arrays preserve older tests/call sites
+    // while receipt posting migrates through durable timeline append.
     @Published private(set) var commitCardsByConversation: [String: [GitCommitCard]] = [:]
 
     // Per-conversation push cards (PR-036). After a SUCCESSFUL approved push the
@@ -49,6 +53,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     // True while a send is in flight for the selected conversation (the
     // composer disables its Send button so one Send starts exactly one run).
     @Published private(set) var isSending = false
+    @Published private(set) var isSavingThreadSettings = false
 
     // Filter / search.
     @Published var filter: ConversationFilter = .all
@@ -61,6 +66,11 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
 
     /// Page size for the message pager.
     let messagePageSize: Int
+
+    /// The chat UI drains queued accepted turns opportunistically, but always
+    /// with a hard cap so a bad supervisor state cannot pin the main actor.
+    private let supervisorDrainMaxTicks = 8
+    private var isDrainingSupervisor = false
 
     /// The conversation whose HEAVY message page is retained. Only this one holds
     /// a full thread page; backgrounding (`releaseBackgroundViews` / memory
@@ -108,38 +118,80 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     /// Runs linked to a conversation (most recent last), for the run card.
     func runs(for id: String) -> [ConversationRunRef] { runsByConversation[id] ?? [] }
 
+    /// Durable timeline items for a conversation. This is the preferred Chat
+    /// read model; `messages` remain loaded for pagination and compatibility.
+    func timelineItems(for id: String) -> [ConversationTimelineItem] {
+        timelineByConversation[id] ?? []
+    }
+
+    /// Durable Chat settings for a conversation, falling back to the typed safe
+    /// defaults until the service has loaded or persisted a row.
+    func threadSettings(for id: String) -> ConversationThreadSettings {
+        threadSettingsByConversation[id] ?? ConversationThreadSettings.defaultFor(conversationID: id)
+    }
+
     /// Commit cards posted into a conversation (most recent last).
     func commitCards(for id: String) -> [GitCommitCard] { commitCardsByConversation[id] ?? [] }
 
     /// Push cards posted into a conversation (most recent last).
     func pushCards(for id: String) -> [GitPushCard] { pushCardsByConversation[id] ?? [] }
 
-    /// Post a LOCAL commit card into a conversation thread (PR-035). Records the
-    /// commit sha + the EXACT paths committed so the thread renders an honest
-    /// receipt. Returns the card. Posting to the currently-selected conversation
-    /// surfaces it immediately under the thread's messages.
+    /// Post a LOCAL commit receipt into the active conversation timeline.
+    /// Returns the compatibility card while the service persists the same
+    /// receipt as a durable `commit_receipt` timeline item.
     @discardableResult
     func postCommitCard(_ result: GitCommitResult, message: String, conversationID: String? = nil) -> GitCommitCard? {
         guard let id = conversationID ?? selectedConversationID else { return nil }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
         let card = GitCommitCard(
             id: UUID().uuidString,
             commit: result.commit,
             paths: result.paths,
             message: message,
-            committedAtMs: Int64(Date().timeIntervalSince1970 * 1000)
+            committedAtMs: now
         )
         commitCardsByConversation[id, default: []].append(card)
+        let payload = ConversationTimelinePayload(
+            messageId: nil,
+            role: nil,
+            messageState: nil,
+            contentRedacted: "Commit \(card.shortSha) recorded.",
+            runRelation: nil,
+            commit: result.commit,
+            paths: result.paths,
+            message: message,
+            remote: nil,
+            ref: nil,
+            remoteOid: nil,
+            localOid: nil,
+            alreadyDone: nil,
+            sourceSchema: result.schema,
+            projection: "git_receipt",
+            committed: result.committed,
+            pushed: nil,
+            intentId: nil,
+            effectDigest: nil,
+            idempotencyKey: nil,
+            remoteUrlRedacted: nil,
+            remoteExpectedOid: nil,
+            protected: nil,
+            approvalId: nil,
+            approvalMatched: nil
+        )
+        postReceiptTimelineItem(conversationID: id, kind: .commitReceipt, state: "committed", payload: payload, nowMs: now)
         return card
     }
 
-    /// Post a push card into a conversation thread (PR-036). Records the pushed
-    /// remote oid + the remote/ref + whether it was idempotently already done, so
-    /// the thread renders an honest push receipt SEPARATE from the commit card.
-    /// Returns the card. Posting to the selected conversation surfaces it
-    /// immediately under the thread's messages.
+    /// Post an approved push receipt into the active conversation timeline.
     @discardableResult
-    func postPushCard(_ receipt: GitPushReceipt, intent: GitPushIntent, conversationID: String? = nil) -> GitPushCard? {
+    func postPushCard(
+        _ receipt: GitPushReceipt,
+        intent: GitPushIntent,
+        approval: GitPushApproval? = nil,
+        conversationID: String? = nil
+    ) -> GitPushCard? {
         guard let id = conversationID ?? selectedConversationID else { return nil }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
         let card = GitPushCard(
             id: UUID().uuidString,
             remote: intent.remote,
@@ -147,10 +199,90 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
             remoteOid: receipt.remoteOid,
             localOid: intent.localOid,
             alreadyDone: receipt.alreadyDone,
-            pushedAtMs: Int64(Date().timeIntervalSince1970 * 1000)
+            pushedAtMs: now
         )
         pushCardsByConversation[id, default: []].append(card)
+        let payload = ConversationTimelinePayload(
+            messageId: nil,
+            role: nil,
+            messageState: nil,
+            contentRedacted: "Push \(card.shortRemoteOid) to \(intent.remote)/\(intent.ref) recorded.",
+            runRelation: nil,
+            commit: nil,
+            paths: nil,
+            message: nil,
+            remote: intent.remote,
+            ref: intent.ref,
+            remoteOid: receipt.remoteOid,
+            localOid: intent.localOid,
+            alreadyDone: receipt.alreadyDone,
+            sourceSchema: receipt.schema,
+            projection: "git_receipt",
+            committed: nil,
+            pushed: receipt.pushed,
+            intentId: intent.intentId,
+            effectDigest: intent.effectDigest,
+            idempotencyKey: receipt.idempotencyKey,
+            remoteUrlRedacted: intent.remoteUrlRedacted,
+            remoteExpectedOid: intent.remoteExpectedOid,
+            protected: intent.protected,
+            approvalId: approval?.approvalId,
+            approvalMatched: approval?.matched
+        )
+        postReceiptTimelineItem(conversationID: id, kind: .pushReceipt, state: "pushed", payload: payload, nowMs: now)
         return card
+    }
+
+    private func postReceiptTimelineItem(
+        conversationID id: String,
+        kind: ConversationTimelineItemKind,
+        state: String,
+        payload: ConversationTimelinePayload,
+        nowMs: Int64
+    ) {
+        guard let encoded = try? JSONEncoder.opensks.encode(payload) else {
+            errorMessage = "could not encode \(kind.rawValue) timeline payload"
+            return
+        }
+        let payloadJSON = String(decoding: encoded, as: UTF8.self)
+        let local = ConversationTimelineItem(
+            schema: "opensks.timeline-item.v1",
+            id: "local-\(kind.rawValue)-\(UUID().uuidString)",
+            projectId: projectId ?? selectedSummary?.projectId ?? "workspace",
+            conversationId: id,
+            turnId: nil,
+            runId: nil,
+            sequence: nextLocalTimelineSequence(for: id),
+            kind: kind,
+            state: state,
+            payload: payload,
+            createdAtMs: nowMs,
+            updatedAtMs: nowMs
+        )
+        timelineByConversation[id, default: []].append(local)
+        timelineByConversation[id]?.sort { lhs, rhs in
+            if lhs.sequence != rhs.sequence { return lhs.sequence < rhs.sequence }
+            return lhs.id < rhs.id
+        }
+        Task { @MainActor in
+            do {
+                _ = try await service.appendTimelineItem(
+                    conversationID: id,
+                    kind: kind,
+                    state: state,
+                    payloadJSON: payloadJSON
+                )
+                await loadTimeline(for: id, limit: timelineItems(for: id).count)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func nextLocalTimelineSequence(for id: String) -> Int64 {
+        let timelineMax = timelineByConversation[id]?.map(\.sequence).max() ?? 0
+        let messageMax = selectedConversationID == id ? messages.map(\.sequence).max() ?? 0 : 0
+        return max(timelineMax, messageMax) + 1
     }
 
     /// The run linked to a specific assistant message, if any — lets the thread
@@ -160,9 +292,14 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
         return runsByConversation[id]?.first { $0.messageId == messageID }
     }
 
+    func run(forRunID runID: String) -> ConversationRunRef? {
+        guard let id = selectedConversationID else { return nil }
+        return runsByConversation[id]?.first { $0.runId == runID }
+    }
+
     // MARK: - Loading
 
-    func load() async {
+    func load(recoverQueuedTurns: Bool = true) async {
         isLoading = true
         errorMessage = nil
         defer { isLoading = false }
@@ -170,14 +307,21 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
             let list = try await service.list(filter: filter, limit: nil)
             summaries = list.conversations
             projectId = list.projectId
+            let shouldRecoverQueuedTurns = recoverQueuedTurns
+                && !isDrainingSupervisor
+                && summaries.contains { $0.status == .running }
             // Keep selection valid; if it vanished, select the first.
             if let selected = selectedConversationID, !summaries.contains(where: { $0.id == selected }) {
                 selectedConversationID = nil
                 messages = []
                 hasMoreMessages = false
+                timelineByConversation[selected] = nil
             }
             if selectedConversationID == nil, let first = summaries.first {
                 await select(first.id)
+            }
+            if shouldRecoverQueuedTurns {
+                _ = try await drainSupervisorQueue(maxTicks: supervisorDrainMaxTicks)
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -201,6 +345,8 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
         activeConversationID = id
         await loadMessages(for: id)
         await loadRuns(for: id)
+        await loadTimeline(for: id)
+        await loadThreadSettings(for: id)
     }
 
     private func loadMessages(for id: String) async {
@@ -234,6 +380,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
             let prepend = page.messages.filter { !existing.contains($0.id) }
             messages = prepend + messages
             hasMoreMessages = page.hasMore
+            await loadTimeline(for: id, limit: messages.count)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -242,10 +389,10 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     // MARK: - Send (PR-027)
 
     /// Start ONE turn for `conversationID`: generate an idempotency key, call
-    /// `turnStart`, then reload the message page and the run list so the new
-    /// user message, assistant turn, and its run card appear. The draft for
-    /// that conversation is cleared on a successful send. This is the ONLY
-    /// primary send path — the legacy engine-run path is never invoked here.
+    /// `turnStart` for the durable accepted handle, then ask the daemon turn
+    /// supervisor to execute one queued turn before reloading messages/runs. The
+    /// draft for that conversation is cleared on a successful send. This is the
+    /// ONLY primary send path — the legacy engine-run path is never invoked here.
     func send(conversationID: String, text: String) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isSending else { return }
@@ -253,22 +400,49 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
         errorMessage = nil
         defer { isSending = false }
         let key = UUID().uuidString
+        guard let summary = summaries.first(where: { $0.id == conversationID }) else {
+            errorMessage = "conversation not loaded: \(conversationID)"
+            return
+        }
         do {
             _ = try await service.turnStart(
                 conversationID: conversationID,
+                projectID: summary.projectId,
                 text: trimmed,
                 idempotencyKey: key
             )
-            // Reload the message page (if this is still the selection) and the
-            // run list so the new turn + run card render.
-            if selectedConversationID == conversationID {
-                await loadMessages(for: conversationID)
-            }
-            await loadRuns(for: conversationID)
+            _ = try await drainSupervisorQueue(maxTicks: supervisorDrainMaxTicks)
             drafts[conversationID] = nil
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// Drain queued accepted turns after a send or a cold-load recovery. Each
+    /// supervisor tick claims and executes at most one turn; looping until an
+    /// empty tick keeps a relaunched chat from leaving durable accepted turns
+    /// stuck in the sidebar as forever-running.
+    @discardableResult
+    func drainSupervisorQueue(maxTicks: Int = 8) async throws -> Int {
+        guard maxTicks > 0, !isDrainingSupervisor else { return 0 }
+        isDrainingSupervisor = true
+        defer { isDrainingSupervisor = false }
+
+        var claimedTurns = 0
+        for _ in 0..<maxTicks {
+            let tick = try await service.supervisorTick()
+            guard tick.claimed != nil || tick.executed != nil else { break }
+            claimedTurns += 1
+        }
+
+        await load(recoverQueuedTurns: false)
+        if let id = selectedConversationID {
+            await loadMessages(for: id)
+            await loadRuns(for: id)
+            await loadTimeline(for: id)
+            await loadThreadSettings(for: id)
+        }
+        return claimedTurns
     }
 
     /// Refresh the run list for a conversation from the service.
@@ -276,6 +450,53 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
         do {
             let runs = try await service.runs(conversationID: id)
             runsByConversation[id] = runs
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Refresh the durable conversation timeline projection. The CLI timeline
+    /// currently pages only by latest N, so use the visible message count when
+    /// older pages have already been loaded.
+    func loadTimeline(for id: String, limit: Int? = nil) async {
+        do {
+            let visibleCount = selectedConversationID == id ? messages.count : 0
+            let timeline = try await service.timeline(
+                conversationID: id,
+                limit: max(limit ?? messagePageSize, visibleCount, 1)
+            )
+            timelineByConversation[id] = timeline.items
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Refresh durable thread settings for a conversation from the service.
+    func loadThreadSettings(for id: String) async {
+        do {
+            let settings = try await service.threadSettings(conversationID: id)
+            threadSettingsByConversation[id] = settings
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Persist a settings edit through the repository-backed service. The saved
+    /// row returned by the service is used as truth because the backend stamps
+    /// `conversation_id` and `updated_at_ms`.
+    func updateThreadSettings(
+        for id: String,
+        mutate: (inout ConversationThreadSettings) -> Void
+    ) async {
+        guard !isSavingThreadSettings else { return }
+        isSavingThreadSettings = true
+        errorMessage = nil
+        defer { isSavingThreadSettings = false }
+        do {
+            var next = threadSettings(for: id)
+            mutate(&next)
+            let saved = try await service.setThreadSettings(next, conversationID: id)
+            threadSettingsByConversation[id] = saved
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -344,6 +565,8 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
             try await service.delete(id: id)
             drafts[id] = nil
             runsByConversation[id] = nil
+            threadSettingsByConversation[id] = nil
+            timelineByConversation[id] = nil
             commitCardsByConversation[id] = nil
             pushCardsByConversation[id] = nil
             if selectedConversationID == id {
@@ -370,11 +593,16 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
             // Background everything: drop the heavy page, keep summaries.
             messages = []
             hasMoreMessages = false
+            if let selected = selectedConversationID {
+                timelineByConversation[selected] = nil
+            }
             return
         }
         selectedConversationID = id
         await loadMessages(for: id)
         await loadRuns(for: id)
+        await loadTimeline(for: id)
+        await loadThreadSettings(for: id)
     }
 
     /// Release the heavy message page for any conversation that is NOT the active
@@ -388,6 +616,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
         if selected != activeConversationID {
             messages = []
             hasMoreMessages = false
+            timelineByConversation[selected] = nil
         }
     }
 
@@ -396,6 +625,6 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     func retainsHeavyView(_ id: String) -> Bool {
         id == activeConversationID
             && selectedConversationID == id
-            && !messages.isEmpty
+            && (!messages.isEmpty || !(timelineByConversation[id] ?? []).isEmpty)
     }
 }

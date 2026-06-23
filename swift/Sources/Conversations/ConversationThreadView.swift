@@ -1,10 +1,8 @@
 // ConversationThreadView.swift — the central `.chat` surface. Renders the
-// selected conversation's stored messages (user / assistant / system cells)
-// oldest -> newest, with a "Load older" affordance when there is an older page.
-// A `ConversationComposer` is pinned to the bottom (PR-027): one Send starts one
-// deterministic engine run, surfaced as an inline `RunCard` under the assistant
-// turn it produced. No live token streaming yet — the run completes and the card
-// shows its final state honestly (live streaming is PR-029 / PR-030).
+// durable conversation timeline oldest -> newest, with the legacy message page
+// kept as a pagination/fallback read model during the timeline migration. A
+// `ConversationComposer` is pinned to the bottom: one Send starts one durable
+// turn, surfaced as an inline `RunCard` under the assistant item it produced.
 
 import SwiftUI
 
@@ -43,15 +41,15 @@ struct ConversationThreadView: View {
         VStack(spacing: 0) {
             threadHeader(summary)
             Divider().overlay(Theme.stroke)
-            if store.messages.isEmpty {
+            if threadIsEmpty(for: summary.id) {
                 EmptyStateView(
                     headline: "No messages yet",
-                    detail: "Send a message below to start a deterministic engine run.",
+                    detail: "Send a message below to start a run.",
                     systemImage: "text.bubble"
                 )
                 .frame(maxHeight: .infinity)
             } else {
-                messageList
+                messageList(for: summary.id)
             }
             ConversationComposer(store: store, conversationID: summary.id)
         }
@@ -134,7 +132,11 @@ struct ConversationThreadView: View {
         .accessibilityLabel("Branch \(gitContext.branchLabel), \(gitContext.changedCount) changed files")
     }
 
-    private var messageList: some View {
+    private func threadIsEmpty(for conversationID: String) -> Bool {
+        store.timelineItems(for: conversationID).isEmpty && store.messages.isEmpty
+    }
+
+    private func messageList(for conversationID: String) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 12) {
                 if store.hasMoreMessages {
@@ -152,43 +154,52 @@ struct ConversationThreadView: View {
                     .disabled(store.isLoadingMessages)
                     .accessibilityIdentifier("conversation.loadOlder")
                 }
-                ForEach(store.messages) { message in
-                    MessageCell(message: message)
-                        .id(message.id)
-                    // An inline run card under the assistant turn it produced.
-                    if let run = store.run(forMessageID: message.id) {
-                        RunCard(run: run)
-                            .id("run-\(run.runId)")
-                        // If a live node-level projection exists for this run,
-                        // surface it as a PipelineRunCard alongside the PR-027
-                        // card. Every number is derived from the projection.
-                        if let projection = pipelines?.projection(for: run.runId) {
-                            PipelineRunCard(
-                                projection: projection,
-                                onControl: { control in
-                                    if control == .openGraph { onOpenGraph(run.runId) }
-                                }
-                            )
-                            .id("pipeline-run-\(run.runId)")
+                let timeline = store.timelineItems(for: conversationID)
+                if timeline.isEmpty {
+                    ForEach(store.messages) { message in
+                        MessageCell(message: message)
+                            .id(message.id)
+                        renderRunCards(for: message)
+                    }
+                } else {
+                    ForEach(timeline) { item in
+                        if let message = item.message {
+                            MessageCell(message: message)
+                                .id(item.id)
+                            renderRunCards(for: message, timelineRunID: item.runId)
+                        } else if let card = item.commitCard {
+                            CommitReceiptCard(card: card)
+                                .id(item.id)
+                        } else if let card = item.pushCard {
+                            PushReceiptCard(card: card)
+                                .id(item.id)
+                        } else {
+                            TimelineItemCell(item: item)
+                                .id(item.id)
                         }
                     }
-                }
-                // LOCAL commit cards posted into this thread (PR-035): each lists
-                // the commit sha + the EXACT paths committed.
-                ForEach(store.commitCards(for: store.selectedConversationID ?? "")) { card in
-                    CommitReceiptCard(card: card)
-                        .id("commit-\(card.id)")
-                }
-                // PUSH cards posted into this thread (PR-036): a SEPARATE receipt
-                // from the commit card, showing the pushed remote oid. A push card
-                // only appears after the operator approved the exact effect.
-                ForEach(store.pushCards(for: store.selectedConversationID ?? "")) { card in
-                    PushReceiptCard(card: card)
-                        .id("push-\(card.id)")
                 }
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 16)
+        }
+    }
+
+    @ViewBuilder
+    private func renderRunCards(for message: ConversationMessage, timelineRunID: String? = nil) -> some View {
+        let run = timelineRunID.flatMap { store.run(forRunID: $0) } ?? store.run(forMessageID: message.id)
+        if let run {
+            RunCard(run: run)
+                .id("run-\(run.runId)")
+            if let projection = pipelines?.projection(for: run.runId) {
+                PipelineRunCard(
+                    projection: projection,
+                    onControl: { control in
+                        if control == .openGraph { onOpenGraph(run.runId) }
+                    }
+                )
+                .id("pipeline-run-\(run.runId)")
+            }
         }
     }
 }
@@ -239,6 +250,8 @@ struct MessageCell: View {
         case .user: return "You"
         case .assistant: return "Assistant"
         case .system: return "System"
+        case .tool: return "Tool"
+        case .event: return "Event"
         case .unknown: return "Message"
         }
     }
@@ -248,6 +261,8 @@ struct MessageCell: View {
         case .user: return "person.fill"
         case .assistant: return "sparkles"
         case .system: return "gearshape.fill"
+        case .tool: return "terminal"
+        case .event: return "waveform.path.ecg"
         case .unknown: return "bubble.left"
         }
     }
@@ -256,12 +271,87 @@ struct MessageCell: View {
         switch message.role {
         case .user: return Theme.accent
         case .assistant: return Theme.violet
-        case .system: return Theme.muted
+        case .system, .tool, .event: return Theme.muted
         case .unknown: return Theme.muted
         }
     }
 
     private var cellFill: Color {
         message.role == .user ? Theme.input : Theme.panel
+    }
+}
+
+// MARK: - Generic timeline cell
+
+struct TimelineItemCell: View {
+    let item: ConversationTimelineItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: symbol)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(tint)
+                Text(item.kind.displayLabel)
+                    .font(Theme.ui(11, .semibold))
+                    .foregroundStyle(tint)
+                Text(item.state)
+                    .font(Theme.mono(10))
+                    .foregroundStyle(Theme.faint)
+                Spacer(minLength: 0)
+                Text(RelativeTime.string(from: item.createdAtDate))
+                    .font(Theme.ui(10))
+                    .foregroundStyle(Theme.faint)
+            }
+            Text(item.payload.contentRedacted ?? item.id)
+                .font(Theme.ui(13))
+                .foregroundStyle(Theme.textSoft)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: 720, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous)
+                .fill(Theme.panel)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous)
+                .strokeBorder(Theme.stroke, lineWidth: 1)
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(item.kind.displayLabel): \(item.payload.contentRedacted ?? item.state)")
+    }
+
+    private var symbol: String {
+        switch item.kind {
+        case .plan: return "list.bullet.rectangle"
+        case .toolCall: return "terminal"
+        case .worker: return "person.2"
+        case .patch: return "doc.badge.gearshape"
+        case .verification: return "checkmark.seal"
+        case .approval: return "hand.raised"
+        case .commitReceipt: return "checkmark.circle"
+        case .pushReceipt: return "arrow.up.circle"
+        case .imageArtifact: return "photo"
+        case .warning: return "exclamationmark.triangle"
+        case .error: return "xmark.octagon"
+        case .userMessage: return "person.fill"
+        case .assistantMessage: return "sparkles"
+        case .unknown: return "circle.dashed"
+        }
+    }
+
+    private var tint: Color {
+        switch item.kind {
+        case .error: return Theme.coral
+        case .warning, .approval: return Theme.gold
+        case .verification, .commitReceipt, .pushReceipt: return Theme.accent
+        case .assistantMessage: return Theme.violet
+        case .userMessage: return Theme.accent
+        default: return Theme.muted
+        }
     }
 }

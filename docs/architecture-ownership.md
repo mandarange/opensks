@@ -69,15 +69,22 @@ The four `planned` service crates may begin life as modules inside an existing
 crate; what matters is **ownership and a test boundary**, not crate count. They
 must not be implemented inside `src/lib.rs`.
 
+Release/GC CLI command bodies live in `crates/opensks-cli/src/retention.rs` and
+delegate trust decisions to `opensks-retention`, keeping `crates/opensks-cli/src/lib.rs`
+under its public-function and line-count budget.
+
 ## Root monolith reduction policy
 
-`src/lib.rs` is **20,102 lines** at baseline and still hosts ~35 inline
-`run_*_command` handlers plus domain types. It is a known God module. The plan:
+`src/lib.rs` was **20,102 lines** at baseline and still hosts ~35 inline
+`run_*_command` handlers plus domain types. It is a known God module. The inline
+test mega-module has been moved to `src/tests.rs`, and the static PRD coverage
+ledger now lives in `assets/prd-requirements.tsv`, lowering the current root
+facade cap to **14,870 lines**. The plan:
 
 | Milestone | Target for `src/lib.rs` |
 |---|---|
 | P0 (now) | No new domain type or handler except re-export/facade. **Zero growth.** |
-| P1 | < 15,000 lines |
+| P1 | < 15,000 lines (**met by current 14,870-line ratchet**) |
 | P2 | < 8,000 lines |
 | Final | Compatibility facade, ideally < 2,500 lines |
 
@@ -89,7 +96,8 @@ Lowering the cap to record progress is always welcome and needs no ceremony.
 `ci-core` workflow) enforces, with caps from
 `scripts/architecture-ownership.config`:
 
-1. `src/lib.rs` line count `<= SRC_LIB_RS_MAX_LINES` (baseline 20102, zero growth).
+1. `src/lib.rs` line count `<= SRC_LIB_RS_MAX_LINES` (current ratchet 14870,
+   reductions only).
 2. `src/main.rs` line count `<= MAIN_RS_MAX_LINES` (thin shim).
 3. `src/lib.rs` declares **no non-test module** (a new subsystem must be a crate).
 4. `.opensks/data-plane-manifest.json` exists (shared/local boundary contract).

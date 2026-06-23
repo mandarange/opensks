@@ -270,6 +270,8 @@ final class EnginePendingResponseRouter: @unchecked Sendable {
     private func route(_ line: String) {
         let engine = decodedEngineEvent(from: line)
         let requestId = engine?.requestId
+            ?? decodedConversationTurnAcceptedRequestId(from: line)
+            ?? decodedTurnSupervisorTickRequestId(from: line)
         let isTerminal = engine?.isTerminal ?? false
         let runId = decodedExecutionRunId(from: line)
         let matchedIds = matchedPendingIds(requestId: requestId, runId: runId)
@@ -330,6 +332,26 @@ final class EnginePendingResponseRouter: @unchecked Sendable {
             return nil
         }
         return (event.requestId, event.eventType == .requestCompleted)
+    }
+
+    private func decodedConversationTurnAcceptedRequestId(from line: String) -> String? {
+        guard let data = line.data(using: .utf8),
+              let accepted = try? JSONDecoder.opensks.decode(ConversationTurnAccepted.self, from: data),
+              accepted.schema == "opensks.conversation-turn-accepted.v1"
+        else {
+            return nil
+        }
+        return accepted.requestId
+    }
+
+    private func decodedTurnSupervisorTickRequestId(from line: String) -> String? {
+        guard let data = line.data(using: .utf8),
+              let tick = try? JSONDecoder.opensks.decode(TurnSupervisorTickResult.self, from: data),
+              tick.schema == "opensks.turn-supervisor-tick.v1"
+        else {
+            return nil
+        }
+        return tick.requestId
     }
 
     private func decodedExecutionRunId(from line: String) -> String? {
@@ -528,6 +550,50 @@ actor EngineProcess {
         return await sendRequest(cli: cli, cwd: cwd, request: request)
     }
 
+    func conversationTurnStart(
+        cli: URL,
+        cwd: URL,
+        request: ConversationTurnStartRequest
+    ) async -> EngineConversationTurnStartResult {
+        let stream = await sendRequest(
+            cli: cli,
+            cwd: cwd,
+            request: EngineRequestEnvelope.conversationTurnStart(request)
+        )
+        let accepted = Self.decodeConversationTurnAccepted(stream.rawLines)
+        var finalStream = stream
+        if accepted == nil {
+            finalStream.exitCode = finalStream.exitCode == 0 ? 1 : finalStream.exitCode
+            finalStream.engineEvents.append(.localError("daemon did not return conversation turn accepted for \(request.requestId)"))
+        }
+        return EngineConversationTurnStartResult(accepted: accepted, stream: finalStream)
+    }
+
+    func conversationSupervisorTick(
+        cli: URL,
+        cwd: URL,
+        requestId: String,
+        supervisorId: String,
+        leaseTtlMs: UInt64
+    ) async -> EngineTurnSupervisorTickResult {
+        let stream = await sendRequest(
+            cli: cli,
+            cwd: cwd,
+            request: EngineRequestEnvelope.conversationSupervisorTick(
+                id: requestId,
+                supervisorId: supervisorId,
+                leaseTtlMs: leaseTtlMs
+            )
+        )
+        let tick = Self.decodeTurnSupervisorTickResult(stream.rawLines)
+        var finalStream = stream
+        if tick == nil {
+            finalStream.exitCode = finalStream.exitCode == 0 ? 1 : finalStream.exitCode
+            finalStream.engineEvents.append(.localError("daemon did not return turn supervisor tick for \(requestId)"))
+        }
+        return EngineTurnSupervisorTickResult(tick: tick, stream: finalStream)
+    }
+
     private func ensureSession(cli: URL, cwd: URL) throws -> EngineDaemonSession {
         let key = EngineSessionKey(cliPath: cli.path, cwdPath: cwd.path)
         if let existing = session, existing.key == key, existing.isRunning {
@@ -565,6 +631,7 @@ actor EngineProcess {
 
         let response = await collectResponse(from: daemonSession, request: request)
         var stream = Self.decodeRunStream(response.lines)
+        stream.rawLines = response.lines
         stream.stderr = daemonSession.drainStderrText()
 
         if daemonSession.isRunning {
@@ -587,6 +654,32 @@ actor EngineProcess {
             stream.engineEvents.append(.localError("daemon response timed out for \(request.id)"))
         }
         return stream
+    }
+
+    static func decodeConversationTurnAccepted(_ lines: [String]) -> ConversationTurnAccepted? {
+        for line in lines {
+            guard let data = line.data(using: .utf8),
+                  let accepted = try? JSONDecoder.opensks.decode(ConversationTurnAccepted.self, from: data),
+                  accepted.schema == "opensks.conversation-turn-accepted.v1"
+            else {
+                continue
+            }
+            return accepted
+        }
+        return nil
+    }
+
+    static func decodeTurnSupervisorTickResult(_ lines: [String]) -> TurnSupervisorTickResult? {
+        for line in lines {
+            guard let data = line.data(using: .utf8),
+                  let tick = try? JSONDecoder.opensks.decode(TurnSupervisorTickResult.self, from: data),
+                  tick.schema == "opensks.turn-supervisor-tick.v1"
+            else {
+                continue
+            }
+            return tick
+        }
+        return nil
     }
 
     private func collectResponse(
@@ -676,6 +769,17 @@ struct EngineRunStream: Sendable {
     var executionEvents: [ExecutionEventEnvelope]
     var exitCode: Int32?
     var stderr: String
+    var rawLines: [String] = []
+}
+
+struct EngineConversationTurnStartResult: Sendable {
+    let accepted: ConversationTurnAccepted?
+    let stream: EngineRunStream
+}
+
+struct EngineTurnSupervisorTickResult: Sendable {
+    let tick: TurnSupervisorTickResult?
+    let stream: EngineRunStream
 }
 
 struct EngineRequestEnvelope: Encodable {
@@ -704,6 +808,34 @@ struct EngineRequestEnvelope: Encodable {
                 sinceSequence: nil,
                 tailMs: nil,
                 pollIntervalMs: nil
+            )
+        )
+    }
+
+    static func conversationTurnStart(_ request: ConversationTurnStartRequest) -> EngineRequestEnvelope {
+        EngineRequestEnvelope(
+            schema: "opensks.engine-request.v1",
+            id: request.requestId,
+            kind: "conversation_turn_start",
+            protocolVersion: "opensks.contracts.v1",
+            params: EngineRequestParams(conversationTurnStart: request)
+        )
+    }
+
+    static func conversationSupervisorTick(
+        id: String,
+        supervisorId: String,
+        leaseTtlMs: UInt64
+    ) -> EngineRequestEnvelope {
+        EngineRequestEnvelope(
+            schema: "opensks.engine-request.v1",
+            id: id,
+            kind: "conversation_supervisor_tick",
+            protocolVersion: "opensks.contracts.v1",
+            params: EngineRequestParams(
+                supervisorId: supervisorId,
+                leaseTtlMs: leaseTtlMs,
+                reasonCode: "conversation_supervisor_tick_requested"
             )
         )
     }
@@ -829,18 +961,21 @@ struct EngineRequestEnvelope: Encodable {
 }
 
 struct EngineRequestParams: Encodable {
-    let pipelineId: String?
-    let graphPath: String?
-    let objective: String?
-    let runId: String?
-    let targetId: String?
-    let message: String?
-    let reasonCode: String?
-    let approvalId: String?
-    let scope: String?
-    let sinceSequence: UInt64?
-    let tailMs: UInt64?
-    let pollIntervalMs: UInt64?
+    var conversationTurnStart: ConversationTurnStartRequest? = nil
+    var supervisorId: String? = nil
+    var leaseTtlMs: UInt64? = nil
+    var pipelineId: String? = nil
+    var graphPath: String? = nil
+    var objective: String? = nil
+    var runId: String? = nil
+    var targetId: String? = nil
+    var message: String? = nil
+    var reasonCode: String? = nil
+    var approvalId: String? = nil
+    var scope: String? = nil
+    var sinceSequence: UInt64? = nil
+    var tailMs: UInt64? = nil
+    var pollIntervalMs: UInt64? = nil
 }
 
 // MARK: - File tree
@@ -891,6 +1026,105 @@ enum FileScanner {
         if data.count > 512 * 1024 { return "// file too large to preview (512 KB cap)." }
         if data.prefix(8000).contains(0) { return "// binary file — preview not available." }
         return String(decoding: data, as: UTF8.self)
+    }
+}
+
+// MARK: - Proof artifact freshness
+
+struct ProofArtifactFingerprint: Equatable {
+    let files: [ProofArtifactFileFingerprint]
+}
+
+struct ProofArtifactFileFingerprint: Equatable {
+    let relativePath: String
+    let exists: Bool
+    let isDirectory: Bool
+    let byteCount: Int
+    let childCount: Int
+    let contentHash: UInt64
+}
+
+enum ProofArtifactMonitor {
+    static let relativePaths = [
+        ".opensks/acceptance/acceptance-summary.json",
+        ".opensks/qa/qa-report.json",
+        ".opensks/qa/security-audit.json",
+        ".opensks/security/security-audit.json",
+        ".opensks/providers/provider-dashboard.json",
+        ".opensks/triwiki/voxel-index-report.json",
+        ".opensks/missions",
+        ".opensks/browser",
+        ".opensks/computer-use",
+        ".opensks/app-use",
+    ]
+
+    static func fingerprint(workspace: URL, fileManager: FileManager = .default) -> ProofArtifactFingerprint {
+        ProofArtifactFingerprint(files: relativePaths.map {
+            fingerprint(relativePath: $0, workspace: workspace, fileManager: fileManager)
+        })
+    }
+
+    private static func fingerprint(
+        relativePath: String,
+        workspace: URL,
+        fileManager: FileManager
+    ) -> ProofArtifactFileFingerprint {
+        let url = workspace.appendingPathComponent(relativePath, isDirectory: false)
+        var isDirectory = ObjCBool(false)
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            return ProofArtifactFileFingerprint(
+                relativePath: relativePath,
+                exists: false,
+                isDirectory: false,
+                byteCount: 0,
+                childCount: 0,
+                contentHash: 0
+            )
+        }
+
+        if isDirectory.boolValue {
+            let children = (try? fileManager.contentsOfDirectory(atPath: url.path).sorted()) ?? []
+            return ProofArtifactFileFingerprint(
+                relativePath: relativePath,
+                exists: true,
+                isDirectory: true,
+                byteCount: 0,
+                childCount: children.count,
+                contentHash: hash(strings: children)
+            )
+        }
+
+        let data = (try? Data(contentsOf: url)) ?? Data()
+        return ProofArtifactFileFingerprint(
+            relativePath: relativePath,
+            exists: true,
+            isDirectory: false,
+            byteCount: data.count,
+            childCount: 0,
+            contentHash: hash(data: data)
+        )
+    }
+
+    private static func hash(data: Data) -> UInt64 {
+        var value: UInt64 = 1_469_598_103_934_665_603
+        for byte in data {
+            value ^= UInt64(byte)
+            value &*= 1_099_511_628_211
+        }
+        return value
+    }
+
+    private static func hash(strings: [String]) -> UInt64 {
+        var value: UInt64 = 1_469_598_103_934_665_603
+        for string in strings {
+            for byte in string.utf8 {
+                value ^= UInt64(byte)
+                value &*= 1_099_511_628_211
+            }
+            value ^= 0xff
+            value &*= 1_099_511_628_211
+        }
+        return value
     }
 }
 
@@ -950,6 +1184,8 @@ final class AppState: ObservableObject {
     private let runner = CLIRunner()
     private let engine = EngineProcess()
     private var runTask: Task<Void, Never>?
+    private var proofRefreshTask: Task<Void, Never>?
+    private var lastProofArtifactFingerprint: ProofArtifactFingerprint?
 
     init() {
         var ws = FileManager.default.currentDirectoryPath
@@ -1014,11 +1250,33 @@ final class AppState: ObservableObject {
             }
             do {
                 self.data = try JSONDecoder.opensks.decode(AppData.self, from: raw)
+                self.lastProofArtifactFingerprint = ProofArtifactMonitor.fingerprint(workspace: ws)
                 self.loadError = nil
             } catch {
                 self.loadError = "could not decode app-data: \(error.localizedDescription)"
             }
         }
+    }
+
+    func startProofArtifactRefresh(intervalNanoseconds: UInt64 = 2_000_000_000) {
+        guard proofRefreshTask == nil else { return }
+        lastProofArtifactFingerprint = ProofArtifactMonitor.fingerprint(workspace: workspace)
+        proofRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: intervalNanoseconds)
+                guard let self else { return }
+                let next = ProofArtifactMonitor.fingerprint(workspace: self.workspace)
+                if next != self.lastProofArtifactFingerprint {
+                    self.lastProofArtifactFingerprint = next
+                    self.loadData()
+                }
+            }
+        }
+    }
+
+    func stopProofArtifactRefresh() {
+        proofRefreshTask?.cancel()
+        proofRefreshTask = nil
     }
 
     func connectEngine() {
