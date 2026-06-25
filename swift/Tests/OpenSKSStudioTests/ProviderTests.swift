@@ -208,6 +208,45 @@ final class ProviderTests: XCTestCase {
         XCTAssertNotNil(renderer.nsImage, "provider center renders with adapter diagnostic")
     }
 
+    func testProviderComponentSurfacesRenderIndependently() async throws {
+        let service = RecordingProviderRegistryService()
+        service.state.providers = [Self.providerRecord(health: "healthy")]
+        service.state.models = [
+            Self.modelRecord(health: "healthy"),
+            Self.imageModelRecord(health: "healthy"),
+            Self.visionModelRecord(health: "healthy")
+        ]
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore(), service: service)
+        await store.refresh()
+        let provider = try XCTUnwrap(store.connections.first)
+
+        let catalog = ProviderModelCatalogView(
+            store: store,
+            provider: provider,
+            modelSearchText: .constant("code")
+        )
+        .frame(width: 520, height: 240)
+        let diagnostics = ProviderDiagnosticsView(store: store, provider: provider)
+            .frame(width: 520, height: 240)
+        let textPicker = ModelPicker(
+            providers: store,
+            kind: .text,
+            selectedModelID: "provider-1/code-model",
+            autoSelected: false,
+            chipText: "Code Model",
+            onSelectAuto: {},
+            onSelectModel: { _ in }
+        )
+        .frame(width: 180, height: 40)
+        let secureField = SecureCredentialField(credential: .constant("secret-value"))
+            .frame(width: 360, height: 80)
+
+        XCTAssertNotNil(ImageRenderer(content: catalog).nsImage)
+        XCTAssertNotNil(ImageRenderer(content: diagnostics).nsImage)
+        XCTAssertNotNil(ImageRenderer(content: textPicker).nsImage)
+        XCTAssertNotNil(ImageRenderer(content: secureField).nsImage)
+    }
+
     func testProviderStoreConnectPersistsThroughRegistryServiceWithoutSecretValue() async throws {
         let secrets = InMemoryProviderSecretStore()
         let service = RecordingProviderRegistryService()

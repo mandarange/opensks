@@ -90,8 +90,40 @@ struct ConversationComposer: View {
 
     private var settingsBar: some View {
         HStack(spacing: 8) {
-            modelMenu
-            imageModelMenu
+            ModelPicker(
+                providers: providers,
+                kind: .text,
+                selectedModelID: settings.modelSelection.modelId,
+                autoSelected: settings.modelSelection.mode == .auto,
+                chipText: modelLabel,
+                onSelectAuto: {
+                    updateSettings {
+                        $0.modelSelection = ModelSelection(mode: .auto, modelId: nil, fallbackModelIds: [])
+                    }
+                },
+                onSelectModel: { model in
+                    updateSettings {
+                        $0.modelSelection = providers.textModelSelection(pinning: model.id)
+                    }
+                }
+            )
+            ModelPicker(
+                providers: providers,
+                kind: .image,
+                selectedModelID: settings.imageModelId,
+                autoSelected: settings.imageModelId == nil,
+                chipText: imageModelLabel,
+                onSelectAuto: {
+                    updateSettings {
+                        $0.imageModelId = nil
+                    }
+                },
+                onSelectModel: { model in
+                    updateSettings {
+                        $0.imageModelId = model.id
+                    }
+                }
+            )
             executionModeMenu
             reasoningMenu
             pipelineMenu
@@ -165,84 +197,6 @@ struct ConversationComposer: View {
                 .strokeBorder(attachment.isStale ? Theme.gold.opacity(0.35) : Theme.stroke, lineWidth: 1)
         )
         .help(attachment.isStale ? "Attached context changed since capture." : attachment.wireRef)
-    }
-
-    private var modelMenu: some View {
-        Menu {
-            Button {
-                updateSettings {
-                    $0.modelSelection = ModelSelection(mode: .auto, modelId: nil, fallbackModelIds: [])
-                }
-            } label: {
-                Label("Auto route", systemImage: settings.modelSelection.mode == .auto ? "checkmark" : "circle")
-            }
-            if providers.eligibleTextModels.isEmpty {
-                Divider()
-                Button {
-                    providers.showingAddProvider = true
-                } label: {
-                    Label(providerSetupActionLabel, systemImage: "key")
-                }
-            } else {
-                Divider()
-                ForEach(providers.eligibleTextModels) { model in
-                    Button {
-                        updateSettings {
-                            $0.modelSelection = providers.textModelSelection(pinning: model.id)
-                        }
-                    } label: {
-                        Label(
-                            modelMenuTitle(model),
-                            systemImage: settings.modelSelection.modelId == model.id ? "checkmark" : "cpu"
-                        )
-                    }
-                }
-            }
-        } label: {
-            settingChip(icon: "cpu", text: "Model \(modelLabel)")
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .accessibilityIdentifier("conversation.composer.settings.model")
-    }
-
-    private var imageModelMenu: some View {
-        Menu {
-            Button {
-                updateSettings {
-                    $0.imageModelId = nil
-                }
-            } label: {
-                Label("Auto route", systemImage: settings.imageModelId == nil ? "checkmark" : "circle")
-            }
-            if providers.eligibleImageModels.isEmpty {
-                Divider()
-                Button {
-                    providers.showingAddProvider = true
-                } label: {
-                    Label(providerSetupActionLabel, systemImage: "key")
-                }
-            } else {
-                Divider()
-                ForEach(providers.eligibleImageModels) { model in
-                    Button {
-                        updateSettings {
-                            $0.imageModelId = model.id
-                        }
-                    } label: {
-                        Label(
-                            modelMenuTitle(model),
-                            systemImage: settings.imageModelId == model.id ? "checkmark" : "photo"
-                        )
-                    }
-                }
-            }
-        } label: {
-            settingChip(icon: "photo", text: "Image \(imageModelLabel)")
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .accessibilityIdentifier("conversation.composer.settings.image-model")
     }
 
     private var providerReadinessBar: some View {
@@ -390,10 +344,6 @@ struct ConversationComposer: View {
     private var imageModelLabel: String {
         guard let id = settings.imageModelId, !id.isEmpty else { return "Auto" }
         return providers.model(id: id)?.displayName ?? id
-    }
-
-    private func modelMenuTitle(_ model: ProviderModelViewModel) -> String {
-        "\(providers.providerDisplayName(for: model.providerID)) · \(model.displayName)"
     }
 
     private var providerReadinessLabel: String {

@@ -6,6 +6,7 @@ import SwiftUI
 
 struct TitleBarView: View {
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var coordinator: AppCoordinator
 
     var body: some View {
         ZStack {
@@ -45,7 +46,7 @@ struct TitleBarView: View {
     }
 
     private var providerReadiness: some View {
-        let count = state.data?.gui.providerConfiguredCount ?? 0
+        let count = coordinator.providers.connections.count
         return HStack(spacing: 6) {
             Image(systemName: "dot.radiowaves.left.and.right")
                 .font(.system(size: 11))
@@ -54,7 +55,7 @@ struct TitleBarView: View {
                 .font(Theme.ui(11, .medium))
                 .foregroundStyle(Theme.textSoft)
         }
-        .help("Configured provider adapters — secrets are never shown")
+        .help("Configured provider registry connections — secrets are never shown")
     }
 
     private var helpChip: some View {
