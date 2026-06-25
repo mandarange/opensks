@@ -13633,62 +13633,154 @@ fn render_macos_app_info_plist() -> String {
 
 #[cfg(target_os = "macos")]
 fn create_macos_icon_assets(resources_dir: &Path) -> Result<(), OpenSksError> {
-    let svg = resources_dir.join("opensks-logo.svg");
     let iconset = resources_dir.join("OpenSKS.iconset");
     fs::create_dir_all(&iconset)?;
     let specs = [
-        (16, "icon_16x16.png"),
-        (32, "icon_16x16@2x.png"),
-        (32, "icon_32x32.png"),
-        (64, "icon_32x32@2x.png"),
-        (128, "icon_128x128.png"),
-        (256, "icon_128x128@2x.png"),
-        (256, "icon_256x256.png"),
-        (512, "icon_256x256@2x.png"),
-        (512, "icon_512x512.png"),
-        (1024, "icon_512x512@2x.png"),
+        (16, "icon_16x16.png", *b"icp4"),
+        (32, "icon_16x16@2x.png", *b"ic11"),
+        (32, "icon_32x32.png", *b"icp5"),
+        (64, "icon_32x32@2x.png", *b"ic12"),
+        (128, "icon_128x128.png", *b"ic07"),
+        (256, "icon_128x128@2x.png", *b"ic13"),
+        (256, "icon_256x256.png", *b"ic08"),
+        (512, "icon_256x256@2x.png", *b"ic14"),
+        (512, "icon_512x512.png", *b"ic09"),
+        (1024, "icon_512x512@2x.png", *b"ic10"),
     ];
-    for (size, name) in specs {
-        let output = process::Command::new("qlmanage")
-            .arg("-t")
-            .arg("-s")
-            .arg(size.to_string())
-            .arg("--out")
-            .arg(&iconset)
-            .arg(&svg)
-            .output()?;
-        if !output.status.success() {
-            return Err(OpenSksError::Invalid(format!(
-                "failed to render app icon PNG `{name}`: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-        let rendered = iconset.join("opensks-logo.svg.png");
-        if !rendered.is_file() {
-            return Err(OpenSksError::Invalid(format!(
-                "qlmanage did not write expected icon PNG for `{name}`"
-            )));
-        }
+    let mut icns_entries = Vec::with_capacity(specs.len());
+    for (size, name, icon_type) in specs {
+        let png = render_macos_icon_png(size);
         let target = iconset.join(name);
         if target.exists() {
             fs::remove_file(&target)?;
         }
-        fs::rename(rendered, target)?;
+        fs::write(target, &png)?;
+        icns_entries.push((icon_type, png));
     }
-    let output = process::Command::new("iconutil")
-        .arg("-c")
-        .arg("icns")
-        .arg(&iconset)
-        .arg("-o")
-        .arg(resources_dir.join("AppIcon.icns"))
-        .output()?;
-    if !output.status.success() {
-        return Err(OpenSksError::Invalid(format!(
-            "failed to build AppIcon.icns: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
+    fs::write(
+        resources_dir.join("AppIcon.icns"),
+        render_macos_icns(&icns_entries),
+    )?;
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn render_macos_icon_png(size: u32) -> Vec<u8> {
+    let mut raw = Vec::with_capacity(((size * size * 4) + size) as usize);
+    let center = (size as f32 - 1.0) / 2.0;
+    let radius = size as f32 * 0.31;
+    let ring_outer = size as f32 * 0.42;
+    let ring_inner = size as f32 * 0.37;
+    for y in 0..size {
+        raw.push(0);
+        for x in 0..size {
+            let dx = x as f32 - center;
+            let dy = y as f32 - center;
+            let distance = (dx * dx + dy * dy).sqrt();
+            let diagonal = (x as f32 + y as f32) / (size.max(1) as f32 * 2.0);
+            let mut r = (11.0 + 22.0 * diagonal) as u8;
+            let mut g = (17.0 + 28.0 * diagonal) as u8;
+            let mut b = (25.0 + 38.0 * diagonal) as u8;
+            if distance <= radius {
+                r = 42;
+                g = 204;
+                b = 179;
+            } else if distance >= ring_inner && distance <= ring_outer {
+                r = 129;
+                g = 116;
+                b = 255;
+            } else if dx.abs() <= size as f32 * 0.035 || dy.abs() <= size as f32 * 0.035 {
+                r = 78;
+                g = 236;
+                b = 205;
+            }
+            raw.extend_from_slice(&[r, g, b, 255]);
+        }
+    }
+
+    let mut png = Vec::new();
+    png.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+    png_chunk(&mut png, b"IHDR", &png_ihdr(size, size));
+    png_chunk(&mut png, b"IDAT", &zlib_store_blocks(&raw));
+    png_chunk(&mut png, b"IEND", &[]);
+    png
+}
+
+#[cfg(target_os = "macos")]
+fn render_macos_icns(entries: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let total_len = entries
+        .iter()
+        .fold(8usize, |sum, (_, png)| sum + 8 + png.len());
+    let mut icns = Vec::with_capacity(total_len);
+    icns.extend_from_slice(b"icns");
+    icns.extend_from_slice(&(total_len as u32).to_be_bytes());
+    for (icon_type, png) in entries {
+        icns.extend_from_slice(icon_type);
+        icns.extend_from_slice(&((png.len() + 8) as u32).to_be_bytes());
+        icns.extend_from_slice(png);
+    }
+    icns
+}
+
+#[cfg(target_os = "macos")]
+fn png_ihdr(width: u32, height: u32) -> Vec<u8> {
+    let mut data = Vec::with_capacity(13);
+    data.extend_from_slice(&width.to_be_bytes());
+    data.extend_from_slice(&height.to_be_bytes());
+    data.extend_from_slice(&[8, 6, 0, 0, 0]);
+    data
+}
+
+#[cfg(target_os = "macos")]
+fn png_chunk(png: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
+    png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    png.extend_from_slice(chunk_type);
+    png.extend_from_slice(data);
+    let mut crc_data = Vec::with_capacity(chunk_type.len() + data.len());
+    crc_data.extend_from_slice(chunk_type);
+    crc_data.extend_from_slice(data);
+    png.extend_from_slice(&crc32(&crc_data).to_be_bytes());
+}
+
+#[cfg(target_os = "macos")]
+fn zlib_store_blocks(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() + (data.len() / 65_535 + 1) * 5 + 6);
+    out.extend_from_slice(&[0x78, 0x01]);
+    for (index, block) in data.chunks(65_535).enumerate() {
+        let final_block = index == data.len().saturating_sub(1) / 65_535;
+        out.push(if final_block { 0x01 } else { 0x00 });
+        let len = block.len() as u16;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
+        out.extend_from_slice(block);
+    }
+    out.extend_from_slice(&adler32(data).to_be_bytes());
+    out
+}
+
+#[cfg(target_os = "macos")]
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffff;
+    for byte in data {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = 0u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+#[cfg(target_os = "macos")]
+fn adler32(data: &[u8]) -> u32 {
+    const MOD_ADLER: u32 = 65_521;
+    let mut a = 1u32;
+    let mut b = 0u32;
+    for byte in data {
+        a = (a + u32::from(*byte)) % MOD_ADLER;
+        b = (b + a) % MOD_ADLER;
+    }
+    (b << 16) | a
 }
 
 #[cfg(not(target_os = "macos"))]

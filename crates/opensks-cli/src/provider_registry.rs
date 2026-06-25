@@ -17,6 +17,10 @@ struct ProviderRegistryOptions {
     keychain_command: Option<PathBuf>,
     expected_revision: Option<u64>,
     enabled: Option<bool>,
+    #[cfg(test)]
+    probe_fixture_models_json: Option<String>,
+    #[cfg(test)]
+    probe_fixture_expected_credential: Option<String>,
 }
 
 pub fn is_registry_subcommand(value: &str) -> bool {
@@ -124,6 +128,26 @@ pub fn run_provider_registry_command(args: &[String], cwd: &Path) -> Result<CliO
                 .map_err(|error| CliError::Invalid(error.to_string()))?;
             let credential =
                 resolve_provider_secret(&connection, options.keychain_command.as_deref())?;
+            #[cfg(test)]
+            let outcome = if let Some(models_json) = options.probe_fixture_models_json.as_deref() {
+                if let Some(expected) = options.probe_fixture_expected_credential.as_deref() {
+                    if credential != expected {
+                        return Err(CliError::Invalid(
+                            "provider probe fixture credential mismatch".to_string(),
+                        ));
+                    }
+                }
+                provider_probe_fixture_outcome(&connection, models_json, now_ms)?
+            } else {
+                opensks_provider::probe_openai_compatible_provider(
+                    &connection,
+                    &credential,
+                    now_ms,
+                    Duration::from_secs(30),
+                )
+                .map_err(|error| CliError::Invalid(error.to_string()))?
+            };
+            #[cfg(not(test))]
             let outcome = opensks_provider::probe_openai_compatible_provider(
                 &connection,
                 &credential,
@@ -223,6 +247,12 @@ fn parse_provider_registry_options(
             "--models" => options.models_json = Some(value()?),
             "--receipt" => options.receipt_json = Some(value()?),
             "--keychain-command" => options.keychain_command = Some(PathBuf::from(value()?)),
+            #[cfg(test)]
+            "--probe-fixture-models-json" => options.probe_fixture_models_json = Some(value()?),
+            #[cfg(test)]
+            "--probe-fixture-expected-credential" => {
+                options.probe_fixture_expected_credential = Some(value()?)
+            }
             "--expected-revision" => {
                 let raw = value()?;
                 options.expected_revision = Some(raw.parse().map_err(|_| {
@@ -243,6 +273,36 @@ fn parse_provider_registry_options(
         index += 1;
     }
     Ok(options)
+}
+
+#[cfg(test)]
+fn provider_probe_fixture_outcome(
+    connection: &opensks_contracts::ProviderConnection,
+    models_json: &str,
+    now_ms: u64,
+) -> Result<opensks_provider::ProviderProbeOutcome, CliError> {
+    let models = opensks_provider::parse_openai_compatible_models(connection, models_json)
+        .map_err(|error| CliError::Invalid(error.to_string()))?;
+    Ok(opensks_provider::ProviderProbeOutcome {
+        receipt: opensks_contracts::ProviderProbeReceipt {
+            schema: opensks_contracts::PROVIDER_PROBE_RECEIPT_SCHEMA.to_string(),
+            provider_id: connection.id.clone(),
+            endpoint_host_redacted: "fixture.provider.local".to_string(),
+            http_category: opensks_contracts::ProviderProbeHttpCategory::Success,
+            latency_bucket: opensks_contracts::LatencyBucket::Under250Ms,
+            auth_accepted: true,
+            model_list_available: true,
+            catalog_count: Some(models.len() as u32),
+            occurred_at_ms: now_ms,
+            reason_code: if models.is_empty() {
+                "model_catalog_empty".to_string()
+            } else {
+                "probe_ok".to_string()
+            },
+            diagnostic_ref: None,
+        },
+        models,
+    })
 }
 
 fn required(value: Option<&str>) -> Result<&str, CliError> {
@@ -325,14 +385,9 @@ fn json_output(value: &serde_json::Value) -> Result<CliOutput, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::{
-        fs,
-        io::{Read, Write},
-        net::TcpListener,
-        thread,
-    };
 
     #[test]
     fn registry_commands_roundtrip_secretless_state() {
@@ -569,18 +624,14 @@ mod tests {
     fn registry_probe_resolves_keychain_ref_and_syncs_models_secretlessly() {
         let root = temp_workspace("opensks-cli-provider-probe");
         let workspace = root.to_string_lossy().into_owned();
-        let endpoint = spawn_models_server(
-            200,
-            r#"{"data":[{"id":"code-model","name":"Code Model","context_length":64000,"supported_parameters":["tools","response_format"]}]}"#,
-            Some("fixture-credential"),
-        );
+        let models_fixture = r#"{"data":[{"id":"code-model","name":"Code Model","context_length":64000,"supported_parameters":["tools","response_format"]}]}"#;
         let connection = serde_json::json!({
             "schema": "opensks.provider-connection.v1",
             "id": "provider-1",
             "kind": "open_ai_compatible",
             "display_name": "Local OpenAI Compatible",
             "enabled": true,
-            "endpoint": {"base_url": endpoint, "allow_insecure_http": true},
+            "endpoint": {"base_url": "https://provider-fixture.invalid/v1", "allow_insecure_http": false},
             "auth": {
                 "schema": "opensks.secret-ref.v1",
                 "store": "macos_keychain",
@@ -617,6 +668,10 @@ mod tests {
                 "provider-1".into(),
                 "--keychain-command".into(),
                 keychain_command.to_string_lossy().into_owned(),
+                "--probe-fixture-models-json".into(),
+                models_fixture.into(),
+                "--probe-fixture-expected-credential".into(),
+                "fixture-credential".into(),
             ],
             &root,
         )
@@ -658,36 +713,5 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&path, permissions).expect("chmod mock keychain command");
         path
-    }
-
-    fn spawn_models_server(status: u16, body: &str, expected_bearer: Option<&str>) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
-        let address = listener.local_addr().expect("local addr");
-        let body = body.to_string();
-        let expected_bearer = expected_bearer.map(str::to_string);
-        thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept request");
-            let mut request = [0_u8; 4096];
-            let bytes = stream.read(&mut request).expect("read request");
-            let request = String::from_utf8_lossy(&request[..bytes]);
-            assert!(request.starts_with("GET /v1/models "));
-            if let Some(secret) = expected_bearer {
-                let lower_request = request.to_ascii_lowercase();
-                assert!(
-                    lower_request
-                        .contains(&format!("authorization: bearer {secret}").to_ascii_lowercase())
-                );
-            }
-            let reason = if status == 200 { "OK" } else { "Unauthorized" };
-            let response = format!(
-                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream
-                .write_all(response.as_bytes())
-                .expect("write response");
-        });
-        format!("http://{address}/v1")
     }
 }

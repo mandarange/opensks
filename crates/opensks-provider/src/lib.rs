@@ -279,7 +279,7 @@ fn redacted_endpoint_host(endpoint: &str) -> String {
         .unwrap_or_else(|| "unknown-host".to_string())
 }
 
-fn parse_openai_compatible_models(
+pub fn parse_openai_compatible_models(
     connection: &ProviderConnection,
     body: &str,
 ) -> Result<Vec<ModelCatalogEntry>> {

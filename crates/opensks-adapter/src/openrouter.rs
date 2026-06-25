@@ -335,10 +335,16 @@ impl OpenAiCompatibleChatCompleter {
 /// Native OpenAI-compatible image generation transport for provider-registry
 /// dispatch. The key is accepted as an in-memory bearer token and is scrubbed
 /// from every provider diagnostic.
+#[cfg(test)]
+type TestHttpResponder =
+    std::sync::Arc<dyn Fn(TestHttpRequest) -> Result<String, ImageError> + Send + Sync>;
+
 pub struct OpenAiCompatibleImageGenerator {
     base_url: String,
     bearer_token: String,
     timeout: Duration,
+    #[cfg(test)]
+    test_http: Option<TestHttpResponder>,
 }
 
 impl OpenAiCompatibleImageGenerator {
@@ -358,11 +364,22 @@ impl OpenAiCompatibleImageGenerator {
             base_url,
             bearer_token,
             timeout: Duration::from_secs(120),
+            #[cfg(test)]
+            test_http: None,
         })
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_test_http(
+        mut self,
+        responder: impl Fn(TestHttpRequest) -> Result<String, ImageError> + Send + Sync + 'static,
+    ) -> Self {
+        self.test_http = Some(std::sync::Arc::new(responder));
         self
     }
 
@@ -395,38 +412,7 @@ impl OpenAiCompatibleImageGenerator {
             "n": 1,
             "size": format!("{}x{}", request.width, request.height),
         });
-        let client = reqwest::blocking::Client::builder()
-            .timeout(self.timeout)
-            .user_agent("opensks-adapter/0.1 provider-image")
-            .build()
-            .map_err(|error| ImageError::Provider(error.to_string()))?;
-        let response = client
-            .post(&endpoint)
-            .bearer_auth(&self.bearer_token)
-            .json(&body)
-            .send()
-            .map_err(|error| {
-                ImageError::Provider(redact_with_secrets(
-                    &error.to_string(),
-                    &[self.bearer_token.as_str()],
-                ))
-            })?;
-        let status = response.status();
-        let response_body = response.text().map_err(|error| {
-            ImageError::Provider(redact_with_secrets(
-                &error.to_string(),
-                &[self.bearer_token.as_str()],
-            ))
-        })?;
-        if !status.is_success() {
-            return Err(ImageError::Provider(format!(
-                "provider HTTP status {}: {}",
-                status.as_u16(),
-                redact_with_secrets(response_body.trim(), &[self.bearer_token.as_str()])
-            )));
-        }
-        serde_json::from_str(&response_body)
-            .map_err(|_| ImageError::Provider("provider returned non-JSON".to_string()))
+        self.post_provider_json(&endpoint, &body, "opensks-adapter/0.1 provider-image")
     }
 
     fn download_image_url(&self, url: &str) -> Result<(Vec<u8>, Option<String>), ImageError> {
@@ -489,38 +475,8 @@ impl ImageInspectionClient for OpenAiCompatibleImageGenerator {
             }],
             "max_completion_tokens": 512,
         });
-        let client = reqwest::blocking::Client::builder()
-            .timeout(self.timeout)
-            .user_agent("opensks-adapter/0.1 provider-vision")
-            .build()
-            .map_err(|error| ImageError::Provider(error.to_string()))?;
-        let response = client
-            .post(&endpoint)
-            .bearer_auth(&self.bearer_token)
-            .json(&body)
-            .send()
-            .map_err(|error| {
-                ImageError::Provider(redact_with_secrets(
-                    &error.to_string(),
-                    &[self.bearer_token.as_str()],
-                ))
-            })?;
-        let status = response.status();
-        let response_body = response.text().map_err(|error| {
-            ImageError::Provider(redact_with_secrets(
-                &error.to_string(),
-                &[self.bearer_token.as_str()],
-            ))
-        })?;
-        if !status.is_success() {
-            return Err(ImageError::Provider(format!(
-                "provider HTTP status {}: {}",
-                status.as_u16(),
-                redact_with_secrets(response_body.trim(), &[self.bearer_token.as_str()])
-            )));
-        }
-        let json: serde_json::Value = serde_json::from_str(&response_body)
-            .map_err(|_| ImageError::Provider("provider returned non-JSON".to_string()))?;
+        let json =
+            self.post_provider_json(&endpoint, &body, "opensks-adapter/0.1 provider-vision")?;
         if let Some(error) = json.get("error") {
             let message = error
                 .get("message")
@@ -543,6 +499,68 @@ impl ImageInspectionClient for OpenAiCompatibleImageGenerator {
             evidence_refs: vec!["adapter:openai-compatible-vision:chat-completions".to_string()],
         })
     }
+}
+
+impl OpenAiCompatibleImageGenerator {
+    fn post_provider_json(
+        &self,
+        endpoint: &str,
+        body: &serde_json::Value,
+        user_agent: &str,
+    ) -> Result<serde_json::Value, ImageError> {
+        #[cfg(test)]
+        if let Some(responder) = &self.test_http {
+            let response_body = responder(TestHttpRequest {
+                endpoint: endpoint.to_string(),
+                bearer_token: self.bearer_token.clone(),
+                user_agent: user_agent.to_string(),
+                body: body.clone(),
+            })?;
+            return serde_json::from_str(&response_body)
+                .map_err(|_| ImageError::Provider("provider returned non-JSON".to_string()));
+        }
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(self.timeout)
+            .user_agent(user_agent)
+            .build()
+            .map_err(|error| ImageError::Provider(error.to_string()))?;
+        let response = client
+            .post(endpoint)
+            .bearer_auth(&self.bearer_token)
+            .json(body)
+            .send()
+            .map_err(|error| {
+                ImageError::Provider(redact_with_secrets(
+                    &error.to_string(),
+                    &[self.bearer_token.as_str()],
+                ))
+            })?;
+        let status = response.status();
+        let response_body = response.text().map_err(|error| {
+            ImageError::Provider(redact_with_secrets(
+                &error.to_string(),
+                &[self.bearer_token.as_str()],
+            ))
+        })?;
+        if !status.is_success() {
+            return Err(ImageError::Provider(format!(
+                "provider HTTP status {}: {}",
+                status.as_u16(),
+                redact_with_secrets(response_body.trim(), &[self.bearer_token.as_str()])
+            )));
+        }
+        serde_json::from_str(&response_body)
+            .map_err(|_| ImageError::Provider("provider returned non-JSON".to_string()))
+    }
+}
+
+#[cfg(test)]
+struct TestHttpRequest {
+    endpoint: String,
+    bearer_token: String,
+    user_agent: String,
+    body: serde_json::Value,
 }
 
 impl ImageGenerationClient for OpenAiCompatibleImageGenerator {
@@ -601,7 +619,7 @@ impl ChatCompleter for OpenAiCompatibleChatCompleter {
             .build()
             .map_err(|error| AgentAdapterError::Provider(error.to_string()))?;
         let response = client
-            .post(&endpoint)
+            .post(endpoint)
             .bearer_auth(&self.bearer_token)
             .json(body)
             .send()
@@ -1226,10 +1244,8 @@ fn redact_with_secrets(s: &str, secrets: &[&str]) -> String {
 mod tests {
     use super::*;
     use crate::CollectingSink;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
     use std::path::PathBuf;
-    use std::thread;
+    use std::sync::{Arc, Mutex};
 
     fn request(prompt: &str) -> AgentRunRequest {
         AgentRunRequest {
@@ -1384,15 +1400,50 @@ mod tests {
         serde_json::json!({ "choices": [{ "message": { "role": "assistant", "content": text } }] })
     }
 
+    fn test_image_generator(
+        response_body: String,
+    ) -> (OpenAiCompatibleImageGenerator, Arc<Mutex<Vec<String>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured_requests = Arc::clone(&requests);
+        let generator =
+            OpenAiCompatibleImageGenerator::new("http://127.0.0.1/v1", "sk-test-secret")
+                .expect("image generator")
+                .with_test_http(move |request| {
+                    captured_requests
+                        .lock()
+                        .expect("capture request")
+                        .push(render_test_http_request(&request));
+                    Ok(response_body.clone())
+                });
+        (generator, requests)
+    }
+
+    fn render_test_http_request(request: &TestHttpRequest) -> String {
+        let path = reqwest::Url::parse(&request.endpoint)
+            .map(|url| {
+                let mut path = url.path().to_string();
+                if let Some(query) = url.query() {
+                    path.push('?');
+                    path.push_str(query);
+                }
+                path
+            })
+            .unwrap_or_else(|_| request.endpoint.clone());
+        format!(
+            "POST {path} HTTP/1.1\r\nUser-Agent: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\n\r\n{}",
+            request.user_agent,
+            request.bearer_token,
+            serde_json::to_string(&request.body).expect("json body")
+        )
+    }
+
     #[test]
     fn openai_compatible_image_generator_decodes_base64_image_response() {
         let png = b"\x89PNG\r\n\x1a\nopensks-adapter-image";
         let encoded = base64::engine::general_purpose::STANDARD.encode(png);
-        let (base_url, server) = spawn_single_response_server(format!(
+        let (generator, requests) = test_image_generator(format!(
             r#"{{"created":1,"data":[{{"b64_json":"{encoded}"}}]}}"#
         ));
-        let generator = OpenAiCompatibleImageGenerator::new(base_url, "sk-test-secret")
-            .expect("image generator");
         let receipt = opensks_contracts::ModelRouteReceipt {
             provider_id: Some("provider-1".to_string()),
             model_id: Some("provider-1/image-model".to_string()),
@@ -1421,7 +1472,7 @@ mod tests {
                 .evidence_refs
                 .contains(&"adapter:openai-compatible-images:b64_json".to_string())
         );
-        let request = server.join().expect("server request");
+        let request = requests.lock().expect("captured request").join("\n");
         assert!(request.starts_with("POST /v1/images/generations "));
         assert!(
             request
@@ -1435,7 +1486,7 @@ mod tests {
 
     #[test]
     fn openai_compatible_image_generator_sends_vision_data_url_request() {
-        let (base_url, server) = spawn_single_response_server(
+        let (generator, requests) = test_image_generator(
             serde_json::json!({
                 "choices": [{
                     "message": {
@@ -1446,8 +1497,6 @@ mod tests {
             })
             .to_string(),
         );
-        let generator = OpenAiCompatibleImageGenerator::new(base_url, "sk-test-secret")
-            .expect("image generator");
         let receipt = opensks_contracts::ModelRouteReceipt {
             provider_id: Some("provider-1".to_string()),
             model_id: Some("provider-1/vision-model".to_string()),
@@ -1482,7 +1531,7 @@ mod tests {
                 .evidence_refs
                 .contains(&"adapter:openai-compatible-vision:chat-completions".to_string())
         );
-        let request = server.join().expect("server request");
+        let request = requests.lock().expect("captured request").join("\n");
         assert!(request.starts_with("POST /v1/chat/completions "));
         assert!(
             request
@@ -2073,51 +2122,5 @@ mod tests {
         assert_eq!(outcome.apply_results.len(), 1);
         assert!(outcome.apply_results[0].applied);
         std::fs::remove_dir_all(&ws).ok();
-    }
-
-    fn spawn_single_response_server(response_body: String) -> (String, thread::JoinHandle<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
-        let base_url = format!("http://{}/v1", listener.local_addr().expect("addr"));
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept request");
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 1024];
-            loop {
-                let read = stream.read(&mut buffer).expect("read request");
-                if read == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buffer[..read]);
-                if request_is_complete(&request) {
-                    break;
-                }
-            }
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
-            stream
-                .write_all(response.as_bytes())
-                .expect("write response");
-            String::from_utf8_lossy(&request).to_string()
-        });
-        (base_url, handle)
-    }
-
-    fn request_is_complete(request: &[u8]) -> bool {
-        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
-            return false;
-        };
-        let headers = String::from_utf8_lossy(&request[..header_end]);
-        let content_length = headers
-            .lines()
-            .find_map(|line| {
-                line.strip_prefix("Content-Length:")
-                    .or_else(|| line.strip_prefix("content-length:"))
-                    .and_then(|value| value.trim().parse::<usize>().ok())
-            })
-            .unwrap_or(0);
-        request.len() >= header_end + 4 + content_length
     }
 }
