@@ -3596,6 +3596,28 @@ fn provider_commands_write_zero_leak_registry_probe_and_usage() {
 
     let adapter_report =
         fs::read_to_string(dir.join("provider-adapter-check.json")).expect("adapter report");
+    let adapter_contract: opensks_contracts::ProviderAdapterCheckReport =
+        serde_json::from_str(&adapter_report).expect("provider adapter report contract");
+    assert_eq!(
+        adapter_contract.schema,
+        opensks_contracts::PROVIDER_ADAPTER_CHECK_SCHEMA
+    );
+    assert_eq!(adapter_contract.summary.total, 2);
+    assert_eq!(adapter_contract.summary.attempted, 0);
+    assert_eq!(adapter_contract.summary.reachable, 0);
+    assert_eq!(adapter_contract.remediation_actions.len(), 3);
+    assert!(
+        adapter_contract
+            .remediation_actions
+            .iter()
+            .any(|action| action.scope == "operator_environment")
+    );
+    assert!(
+        adapter_contract
+            .remediation_actions
+            .iter()
+            .any(|action| action.scope == "provider_credential")
+    );
     assert!(adapter_report.contains("\"schema\": \"opensks.provider-adapter-check.v1\""));
     assert!(adapter_report.contains("OpenRouter"));
     assert!(adapter_report.contains("OpenAI"));
