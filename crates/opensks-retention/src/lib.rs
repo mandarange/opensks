@@ -115,14 +115,44 @@ pub fn release_proof_with_artifacts(
             message: "release proof did not name any required artifacts".to_string(),
         });
     }
-    let artifact_digest_gate_passed =
-        required_artifacts_complete && same_sha_artifact_binding && blockers.is_empty();
+    let artifact_digest_gate_passed = required_artifacts_complete && same_sha_artifact_binding;
+    if !signed_app {
+        blockers.push(ReleaseProofBlocker {
+            code: "signed_app_missing".to_string(),
+            message: "release proof requires production app signing evidence".to_string(),
+        });
+    }
+    if !notarized {
+        blockers.push(ReleaseProofBlocker {
+            code: "notarization_missing".to_string(),
+            message: "release proof requires macOS notarization evidence".to_string(),
+        });
+    }
+    if !fresh_install_checked {
+        blockers.push(ReleaseProofBlocker {
+            code: "fresh_install_unverified".to_string(),
+            message: "release proof requires a fresh install verification receipt".to_string(),
+        });
+    }
+    if !fresh_clone_checked {
+        blockers.push(ReleaseProofBlocker {
+            code: "fresh_clone_unverified".to_string(),
+            message: "release proof requires a fresh clone verification receipt".to_string(),
+        });
+    }
+    if !upgrade_checked {
+        blockers.push(ReleaseProofBlocker {
+            code: "upgrade_unverified".to_string(),
+            message: "release proof requires an upgrade-path verification receipt".to_string(),
+        });
+    }
     let status = if signed_app
         && notarized
         && fresh_install_checked
         && fresh_clone_checked
         && upgrade_checked
         && artifact_digest_gate_passed
+        && blockers.is_empty()
     {
         TrustStatus::Verified
     } else {

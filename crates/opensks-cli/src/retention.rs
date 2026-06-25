@@ -315,11 +315,24 @@ mod tests {
                 .expect("missing artifacts")
                 .is_empty()
         );
+        let blockers = release_proof["blockers"]
+            .as_array()
+            .expect("release blockers");
+        assert_eq!(blockers.len(), 3);
         assert!(
-            release_proof["blockers"]
-                .as_array()
-                .expect("release blockers")
-                .is_empty()
+            blockers
+                .iter()
+                .any(|blocker| blocker["code"] == "signed_app_missing")
+        );
+        assert!(
+            blockers
+                .iter()
+                .any(|blocker| blocker["code"] == "notarization_missing")
+        );
+        assert!(
+            blockers
+                .iter()
+                .any(|blocker| blocker["code"] == "upgrade_unverified")
         );
         let source_commit = release_proof["source_commit_sha"]
             .as_str()
@@ -366,8 +379,11 @@ mod tests {
         .expect("dirty release artifact");
 
         let release = run_release_command(&["proof".to_string()], &root).expect("release proof");
-        assert!(release.stdout.contains("blockers: 1"));
+        assert!(release.stdout.contains("blockers: 4"));
         assert!(release.stdout.contains("blocker: workspace_dirty - "));
+        assert!(release.stdout.contains("blocker: signed_app_missing - "));
+        assert!(release.stdout.contains("blocker: notarization_missing - "));
+        assert!(release.stdout.contains("blocker: upgrade_unverified - "));
         assert!(
             release
                 .stdout
@@ -382,9 +398,14 @@ mod tests {
         let blockers = release_proof["blockers"]
             .as_array()
             .expect("release blockers");
-        assert_eq!(blockers.len(), 1);
-        assert_eq!(blockers[0]["code"], "workspace_dirty");
-        let message = blockers[0]["message"].as_str().expect("blocker message");
+        assert_eq!(blockers.len(), 4);
+        let workspace_dirty = blockers
+            .iter()
+            .find(|blocker| blocker["code"] == "workspace_dirty")
+            .expect("workspace dirty blocker");
+        let message = workspace_dirty["message"]
+            .as_str()
+            .expect("blocker message");
         assert!(message.contains("1 tracked paths"));
         assert!(message.contains("docs/runtime-truth-matrix.generated.md"));
 
