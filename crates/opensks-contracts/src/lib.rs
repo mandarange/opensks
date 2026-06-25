@@ -14,6 +14,7 @@ pub const PROVIDER_MUTATION_SCHEMA: &str = "opensks.provider-mutation.v1";
 pub const SECRET_REF_SCHEMA: &str = "opensks.secret-ref.v1";
 pub const MODEL_CATALOG_ENTRY_SCHEMA: &str = "opensks.model-catalog-entry.v1";
 pub const PROVIDER_PROBE_RECEIPT_SCHEMA: &str = "opensks.provider-probe-receipt.v1";
+pub const PROVIDER_ADAPTER_CHECK_SCHEMA: &str = "opensks.provider-adapter-check.v1";
 pub const MODEL_PROFILE_SCHEMA: &str = "opensks.model-profile.v1";
 pub const PROVIDER_DESCRIPTOR_SCHEMA: &str = "opensks.provider-descriptor.v1";
 pub const ROUTING_DECISION_SCHEMA: &str = "opensks.routing-decision.v1";
@@ -936,6 +937,60 @@ pub struct ProviderProbeReceipt {
     pub reason_code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContractTimestamp {
+    pub unix_seconds: i64,
+    pub nanos: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderAdapterCheckSummary {
+    pub total: usize,
+    pub attempted: usize,
+    pub reachable: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderAdapterRemediationAction {
+    pub blocker: String,
+    pub action: String,
+    pub scope: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderAdapterCheckRow {
+    pub name: String,
+    pub configured: bool,
+    pub attempted: bool,
+    pub status: String,
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    pub credential_source: String,
+    pub endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_code: Option<String>,
+    pub duration_ms: u128,
+    pub transport: String,
+    pub secret_value_exposed: bool,
+    #[serde(default)]
+    pub stderr: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderAdapterCheckReport {
+    pub schema: String,
+    pub generated_at: ContractTimestamp,
+    pub remote_probe_opt_in: bool,
+    pub secret_value_exposed: bool,
+    pub summary: ProviderAdapterCheckSummary,
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    #[serde(default)]
+    pub remediation_actions: Vec<ProviderAdapterRemediationAction>,
+    #[serde(default)]
+    pub adapters: Vec<ProviderAdapterCheckRow>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -3162,6 +3217,10 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
             serde_json::to_string_pretty(&schema_for!(ProviderProbeReceipt))?,
         ),
         (
+            "provider-adapter-check.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ProviderAdapterCheckReport))?,
+        ),
+        (
             "provider-mutation.schema.json",
             serde_json::to_string_pretty(&schema_for!(ProviderMutationReceipt))?,
         ),
@@ -3492,6 +3551,53 @@ mod tests {
             decoded_graph.params.graph_path.as_deref(),
             Some(".opensks/pipelines/editor/current.graph.json")
         );
+    }
+
+    #[test]
+    fn provider_adapter_check_report_decodes_remediation_actions() {
+        let json = r#"{
+            "schema":"opensks.provider-adapter-check.v1",
+            "generated_at":{"unix_seconds":1782399232,"nanos":95853000},
+            "remote_probe_opt_in":false,
+            "secret_value_exposed":false,
+            "summary":{"total":2,"attempted":0,"reachable":0},
+            "blockers":["configure_OPENROUTER_API_KEY_credential"],
+            "remediation_actions":[
+                {
+                    "blocker":"configure_OPENROUTER_API_KEY_credential",
+                    "action":"Add an OpenRouter API key credential through Provider Center or the configured secret store.",
+                    "scope":"provider_credential"
+                }
+            ],
+            "adapters":[
+                {
+                    "name":"OpenRouter",
+                    "configured":false,
+                    "attempted":false,
+                    "status":"not_configured",
+                    "credential_source":"none",
+                    "endpoint":"https://openrouter.ai/api/v1/models",
+                    "http_code":null,
+                    "duration_ms":0,
+                    "transport":"native_reqwest_blocking_http",
+                    "secret_value_exposed":false
+                }
+            ]
+        }"#;
+
+        let report: ProviderAdapterCheckReport =
+            serde_json::from_str(json).expect("decode provider adapter report");
+
+        assert_eq!(report.schema, PROVIDER_ADAPTER_CHECK_SCHEMA);
+        assert_eq!(report.summary.total, 2);
+        assert_eq!(
+            report.blockers,
+            vec!["configure_OPENROUTER_API_KEY_credential"]
+        );
+        assert_eq!(report.remediation_actions.len(), 1);
+        assert_eq!(report.remediation_actions[0].scope, "provider_credential");
+        assert_eq!(report.adapters[0].blockers, Vec::<String>::new());
+        assert!(!report.secret_value_exposed);
     }
 
     #[test]

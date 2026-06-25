@@ -1,0 +1,176 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProviderAdapterCheckReport",
+  "type": "object",
+  "required": [
+    "generated_at",
+    "remote_probe_opt_in",
+    "schema",
+    "secret_value_exposed",
+    "summary"
+  ],
+  "properties": {
+    "adapters": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ProviderAdapterCheckRow"
+      }
+    },
+    "blockers": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "generated_at": {
+      "$ref": "#/definitions/ContractTimestamp"
+    },
+    "remediation_actions": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ProviderAdapterRemediationAction"
+      }
+    },
+    "remote_probe_opt_in": {
+      "type": "boolean"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "secret_value_exposed": {
+      "type": "boolean"
+    },
+    "summary": {
+      "$ref": "#/definitions/ProviderAdapterCheckSummary"
+    }
+  },
+  "definitions": {
+    "ContractTimestamp": {
+      "type": "object",
+      "required": [
+        "nanos",
+        "unix_seconds"
+      ],
+      "properties": {
+        "nanos": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "unix_seconds": {
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "ProviderAdapterCheckRow": {
+      "type": "object",
+      "required": [
+        "attempted",
+        "configured",
+        "credential_source",
+        "duration_ms",
+        "endpoint",
+        "name",
+        "secret_value_exposed",
+        "status",
+        "transport"
+      ],
+      "properties": {
+        "attempted": {
+          "type": "boolean"
+        },
+        "blockers": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "credential_source": {
+          "type": "string"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "format": "uint128",
+          "minimum": 0.0
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "http_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "secret_value_exposed": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string"
+        },
+        "stderr": {
+          "default": "",
+          "type": "string"
+        },
+        "transport": {
+          "type": "string"
+        }
+      }
+    },
+    "ProviderAdapterCheckSummary": {
+      "type": "object",
+      "required": [
+        "attempted",
+        "reachable",
+        "total"
+      ],
+      "properties": {
+        "attempted": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "reachable": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "total": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ProviderAdapterRemediationAction": {
+      "type": "object",
+      "required": [
+        "action",
+        "blocker",
+        "scope"
+      ],
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "blocker": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
