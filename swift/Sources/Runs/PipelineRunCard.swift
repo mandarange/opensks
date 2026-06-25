@@ -54,6 +54,8 @@ struct PipelineRunCardModel: Equatable {
                 approval += 1
             case .queued:
                 queued += 1
+            case .unknown:
+                break
             }
         }
         self.completed = completed
@@ -215,7 +217,7 @@ struct PipelineRunCard: View {
             controls.append(.pause)
         case .paused:
             controls.append(.resume)
-        case .completed, .failed, .cancelled:
+        case .completed, .failed, .cancelled, .unknown:
             break
         }
         if !model.runState.isTerminal {

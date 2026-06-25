@@ -290,21 +290,22 @@ final class ConversationTurnTests: XCTestCase {
         XCTAssertEqual(request.text, "use the selected lines")
         XCTAssertEqual(request.threadSettingsUpdatedAtMs, storedSettings.updatedAtMs)
         XCTAssertEqual(request.context.refs, [ref.wireReference])
-        XCTAssertEqual(request.settings.model, ModelSelection(
+        XCTAssertNil(request.settings)
+        XCTAssertEqual(storedSettings.modelSelection, ModelSelection(
             mode: .pinned,
             modelId: "provider/text-large",
             fallbackModelIds: ["provider/text-small"]
         ))
-        XCTAssertEqual(request.settings.reasoningEffort, .maximum)
-        XCTAssertEqual(request.settings.pipelineId, "parallel-build")
-        XCTAssertEqual(request.settings.maxParallelism, 8)
-        XCTAssertEqual(request.settings.verifierCount, 3)
-        XCTAssertEqual(request.settings.toolPolicyId, "read-only")
-        XCTAssertEqual(request.settings.approvalPolicyId, "manual-review")
-        XCTAssertEqual(request.settings.tokenBudget, 120_000)
-        XCTAssertEqual(request.settings.costBudgetUsd, 2.75)
-        XCTAssertEqual(request.settings.timeoutMs, 600_000)
-        XCTAssertEqual(request.settings.imageModelId, "provider/image")
+        XCTAssertEqual(storedSettings.reasoningEffort, .maximum)
+        XCTAssertEqual(storedSettings.pipelineId, "parallel-build")
+        XCTAssertEqual(storedSettings.maxParallelism, 8)
+        XCTAssertEqual(storedSettings.verifierCount, 3)
+        XCTAssertEqual(storedSettings.toolPolicyId, "read-only")
+        XCTAssertEqual(storedSettings.approvalPolicyId, "manual-review")
+        XCTAssertEqual(storedSettings.tokenBudget, 120_000)
+        XCTAssertEqual(storedSettings.costBudgetUsd, 2.75)
+        XCTAssertEqual(storedSettings.timeoutMs, 600_000)
+        XCTAssertEqual(storedSettings.imageModelId, "provider/image")
     }
 
     func testContextAttachmentMarksStaleAfterBackgroundRefreshAndComposerRenders() async throws {
@@ -384,6 +385,84 @@ final class ConversationTurnTests: XCTestCase {
         let messageTimeline = store.timelineItems(for: "a")
             .filter { $0.kind == .userMessage || $0.kind == .assistantMessage }
         XCTAssertEqual(messageTimeline.count, 4)
+    }
+
+    func testSendInFlightIsScopedPerConversation() async {
+        let base = MockConversationService(summaries: [summary(id: "a"), summary(id: "b")])
+        let service = GatedTurnStartConversationService(base: base, gatedConversationID: "a")
+        let store = ConversationStore(service: service, messagePageSize: 50)
+        await store.load()
+
+        let firstSend = Task { await store.send(conversationID: "a", text: "first") }
+        await service.waitUntilGatedTurnStartEntered()
+
+        XCTAssertTrue(store.isSending(conversationID: "a"))
+        XCTAssertFalse(store.isSending(conversationID: "b"))
+
+        await store.send(conversationID: "b", text: "second")
+        XCTAssertEqual(base.turnStartRequests.map(\.conversationID), ["b"])
+        XCTAssertEqual(store.runs(for: "b").count, 1)
+
+        service.releaseGate()
+        await firstSend.value
+
+        XCTAssertEqual(Set(base.turnStartRequests.map(\.conversationID)), Set(["a", "b"]))
+        XCTAssertEqual(store.runs(for: "a").count, 1)
+        XCTAssertEqual(store.runs(for: "b").count, 1)
+        XCTAssertFalse(store.isSending(conversationID: "a"))
+        XCTAssertFalse(store.isSending(conversationID: "b"))
+    }
+
+    func testThreadSettingsUpdateIsOptimisticWhileSaveInFlight() async throws {
+        let base = MockConversationService(summaries: [summary(id: "a")])
+        let service = GatedTurnStartConversationService(
+            base: base,
+            gatedThreadSettingsConversationID: "a"
+        )
+        let store = ConversationStore(service: service, messagePageSize: 50)
+        await store.load()
+
+        let save = Task {
+            await store.updateThreadSettings(for: "a") { settings in
+                settings.executionMode = .readOnly
+                settings.maxParallelism = 9
+            }
+        }
+        await service.waitUntilGatedThreadSettingsSaveEntered()
+
+        XCTAssertTrue(store.isSavingThreadSettings(for: "a"))
+        XCTAssertEqual(store.threadSettings(for: "a").executionMode, .readOnly)
+        XCTAssertEqual(store.threadSettings(for: "a").maxParallelism, 9)
+
+        service.releaseThreadSettingsGate()
+        await save.value
+
+        XCTAssertFalse(store.isSavingThreadSettings(for: "a"))
+        XCTAssertEqual(store.threadSettings(for: "a").executionMode, .readOnly)
+        XCTAssertEqual(store.threadSettings(for: "a").maxParallelism, 9)
+        let persisted = try await base.threadSettings(conversationID: "a")
+        XCTAssertEqual(persisted.executionMode, .readOnly)
+        XCTAssertEqual(persisted.maxParallelism, 9)
+    }
+
+    func testThreadSettingsUpdateRollsBackOptimisticStateWhenSaveFails() async {
+        let error = NSError(domain: "OpenSKSStudioTests", code: 42)
+        let service = GatedTurnStartConversationService(
+            base: MockConversationService(summaries: [summary(id: "a")]),
+            threadSettingsError: error
+        )
+        let store = ConversationStore(service: service, messagePageSize: 50)
+        await store.load()
+        let original = store.threadSettings(for: "a")
+
+        await store.updateThreadSettings(for: "a") { settings in
+            settings.executionMode = .readOnly
+            settings.maxParallelism = 9
+        }
+
+        XCTAssertFalse(store.isSavingThreadSettings(for: "a"))
+        XCTAssertEqual(store.threadSettings(for: "a"), original)
+        XCTAssertEqual(store.errorMessage, error.localizedDescription)
     }
 
     func testSendStartsBackgroundRunEventSubscriptionAndPreservesLiveTimelineCards() async throws {
@@ -911,5 +990,219 @@ final class ConversationTurnTests: XCTestCase {
         }
         XCTFail("timed out waiting for timeline item \(id)", file: file, line: line)
         return nil
+    }
+}
+
+private final class GatedTurnStartConversationService: ConversationService, @unchecked Sendable {
+    private let base: MockConversationService
+    private let gatedConversationID: String?
+    private let gatedThreadSettingsConversationID: String?
+    private let threadSettingsError: NSError?
+    private let lock = NSLock()
+    private var gateContinuation: CheckedContinuation<Void, Never>?
+    private var enteredContinuation: CheckedContinuation<Void, Never>?
+    private var enteredGate = false
+    private var threadSettingsGateContinuation: CheckedContinuation<Void, Never>?
+    private var threadSettingsEnteredContinuation: CheckedContinuation<Void, Never>?
+    private var enteredThreadSettingsGate = false
+
+    init(
+        base: MockConversationService,
+        gatedConversationID: String? = nil,
+        gatedThreadSettingsConversationID: String? = nil,
+        threadSettingsError: NSError? = nil
+    ) {
+        self.base = base
+        self.gatedConversationID = gatedConversationID
+        self.gatedThreadSettingsConversationID = gatedThreadSettingsConversationID
+        self.threadSettingsError = threadSettingsError
+    }
+
+    func waitUntilGatedTurnStartEntered() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if enteredGate {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                enteredContinuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    func waitUntilGatedThreadSettingsSaveEntered() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if enteredThreadSettingsGate {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                threadSettingsEnteredContinuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    func releaseGate() {
+        lock.lock()
+        let continuation = gateContinuation
+        gateContinuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    func releaseThreadSettingsGate() {
+        lock.lock()
+        let continuation = threadSettingsGateContinuation
+        threadSettingsGateContinuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    func list(filter: ConversationFilter, limit: Int?) async throws -> ConversationList {
+        try await base.list(filter: filter, limit: limit)
+    }
+
+    func create(title: String) async throws -> ConversationSummary {
+        try await base.create(title: title)
+    }
+
+    func rename(id: String, title: String) async throws {
+        try await base.rename(id: id, title: title)
+    }
+
+    func setPinned(id: String, pinned: Bool) async throws {
+        try await base.setPinned(id: id, pinned: pinned)
+    }
+
+    func setArchived(id: String, archived: Bool) async throws {
+        try await base.setArchived(id: id, archived: archived)
+    }
+
+    func delete(id: String) async throws {
+        try await base.delete(id: id)
+    }
+
+    func fork(id: String, afterSequence: Int64?) async throws -> ConversationSummary {
+        try await base.fork(id: id, afterSequence: afterSequence)
+    }
+
+    func messages(id: String, beforeSequence: Int64?, limit: Int?) async throws -> MessagePage {
+        try await base.messages(id: id, beforeSequence: beforeSequence, limit: limit)
+    }
+
+    func append(id: String, role: MessageRole, text: String) async throws -> ConversationMessage {
+        try await base.append(id: id, role: role, text: text)
+    }
+
+    func timeline(conversationID: String, limit: Int?) async throws -> ConversationTimeline {
+        try await base.timeline(conversationID: conversationID, limit: limit)
+    }
+
+    func appendTimelineItem(
+        conversationID: String,
+        kind: ConversationTimelineItemKind,
+        state: String,
+        payloadJSON: String
+    ) async throws -> ConversationTimelineItem {
+        try await base.appendTimelineItem(
+            conversationID: conversationID,
+            kind: kind,
+            state: state,
+            payloadJSON: payloadJSON
+        )
+    }
+
+    func appendGitReceiptEvent(
+        conversationID: String,
+        kind: ExecutionEventKind,
+        idempotencyKey: String,
+        payloadJSON: String
+    ) async throws -> ConversationTimelineItem {
+        try await base.appendGitReceiptEvent(
+            conversationID: conversationID,
+            kind: kind,
+            idempotencyKey: idempotencyKey,
+            payloadJSON: payloadJSON
+        )
+    }
+
+    func turnStart(
+        conversationID: String,
+        projectID: String,
+        text: String,
+        settings: ConversationTurnSettings?,
+        threadSettingsUpdatedAtMs: Int64?,
+        context: TurnContextSelection,
+        idempotencyKey: String
+    ) async throws -> ConversationTurn {
+        if conversationID == gatedConversationID {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                enteredGate = true
+                let entered = enteredContinuation
+                enteredContinuation = nil
+                gateContinuation = continuation
+                lock.unlock()
+                entered?.resume()
+            }
+        }
+        return try await base.turnStart(
+            conversationID: conversationID,
+            projectID: projectID,
+            text: text,
+            settings: settings,
+            threadSettingsUpdatedAtMs: threadSettingsUpdatedAtMs,
+            context: context,
+            idempotencyKey: idempotencyKey
+        )
+    }
+
+    func supervisorTick() async throws -> TurnSupervisorTickResult {
+        try await base.supervisorTick()
+    }
+
+    func subscribeRunEvents(
+        runID: String,
+        sinceSequence: UInt64,
+        tailMs: UInt64?,
+        pollIntervalMs: UInt64?
+    ) async throws -> EngineRunStream {
+        try await base.subscribeRunEvents(
+            runID: runID,
+            sinceSequence: sinceSequence,
+            tailMs: tailMs,
+            pollIntervalMs: pollIntervalMs
+        )
+    }
+
+    func runs(conversationID: String) async throws -> [ConversationRunRef] {
+        try await base.runs(conversationID: conversationID)
+    }
+
+    func threadSettings(conversationID: String) async throws -> ConversationThreadSettings {
+        try await base.threadSettings(conversationID: conversationID)
+    }
+
+    func setThreadSettings(
+        _ settings: ConversationThreadSettings,
+        conversationID: String
+    ) async throws -> ConversationThreadSettings {
+        if conversationID == gatedThreadSettingsConversationID {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                enteredThreadSettingsGate = true
+                let entered = threadSettingsEnteredContinuation
+                threadSettingsEnteredContinuation = nil
+                threadSettingsGateContinuation = continuation
+                lock.unlock()
+                entered?.resume()
+            }
+        }
+        if let threadSettingsError {
+            throw threadSettingsError
+        }
+        return try await base.setThreadSettings(settings, conversationID: conversationID)
     }
 }

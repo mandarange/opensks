@@ -12,7 +12,7 @@ use std::{sync::atomic::Ordering, time::Duration};
 use base64::Engine as _;
 use opensks_contracts::projection::RunProjectionState;
 use opensks_contracts::{
-    AGENT_ADAPTER_DESCRIPTOR_SCHEMA, AgentAdapterDescriptor, AgentAdapterKind,
+    AGENT_ADAPTER_DESCRIPTOR_SCHEMA, AgentAdapterDescriptor, AgentAdapterKind, ReasoningEffort,
     default_tool_registry,
 };
 use opensks_image::{
@@ -156,7 +156,7 @@ impl AgentAdapter for OpenRouterAdapter {
             supports_tools: false,
             supports_resume: false,
             supports_parallel_sessions: true,
-            supported_reasoning_efforts: vec![],
+            supported_reasoning_efforts: openrouter_supported_reasoning_efforts(),
         }
     }
 
@@ -1052,9 +1052,16 @@ fn observations_message(results: &[ToolResult]) -> String {
 pub struct OpenRouterToolDriver<C: ChatCompleter> {
     model: String,
     max_tokens: u32,
+    reasoning_effort: Option<(ChatReasoningEffortWire, ReasoningEffort)>,
     completer: C,
     messages: Vec<serde_json::Value>,
     tools: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatReasoningEffortWire {
+    OpenRouterReasoningObject,
+    OpenAiReasoningEffort,
 }
 
 impl<C: ChatCompleter> OpenRouterToolDriver<C> {
@@ -1069,6 +1076,7 @@ impl<C: ChatCompleter> OpenRouterToolDriver<C> {
         Self {
             model: model.into(),
             max_tokens,
+            reasoning_effort: None,
             completer,
             messages: vec![
                 serde_json::json!({ "role": "system", "content": system.into() }),
@@ -1083,13 +1091,83 @@ impl<C: ChatCompleter> OpenRouterToolDriver<C> {
         self
     }
 
+    pub fn with_openrouter_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = Some((ChatReasoningEffortWire::OpenRouterReasoningObject, effort));
+        self
+    }
+
+    pub fn with_openrouter_reasoning_effort_if_some(self, effort: Option<ReasoningEffort>) -> Self {
+        match effort {
+            Some(effort) => self.with_openrouter_reasoning_effort(effort),
+            None => self,
+        }
+    }
+
+    pub fn with_openai_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = Some((ChatReasoningEffortWire::OpenAiReasoningEffort, effort));
+        self
+    }
+
+    pub fn with_chat_reasoning_effort_if_some(
+        mut self,
+        wire: Option<ChatReasoningEffortWire>,
+        effort: ReasoningEffort,
+    ) -> Self {
+        if let Some(wire) = wire {
+            self.reasoning_effort = Some((wire, effort));
+        }
+        self
+    }
+
     fn request_body(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "max_tokens": self.max_tokens,
             "tools": self.tools.clone(),
             "messages": self.messages,
-        })
+        });
+        if let Some((wire, effort)) = self.reasoning_effort {
+            match wire {
+                ChatReasoningEffortWire::OpenRouterReasoningObject => {
+                    body["reasoning"] = serde_json::json!({
+                        "effort": openrouter_reasoning_effort_value(effort),
+                    });
+                }
+                ChatReasoningEffortWire::OpenAiReasoningEffort => {
+                    body["reasoning_effort"] = serde_json::Value::String(
+                        openai_reasoning_effort_value(effort).to_string(),
+                    );
+                }
+            }
+        }
+        body
+    }
+}
+
+pub fn openrouter_supported_reasoning_efforts() -> Vec<ReasoningEffort> {
+    vec![
+        ReasoningEffort::Quick,
+        ReasoningEffort::Standard,
+        ReasoningEffort::Deep,
+        ReasoningEffort::Maximum,
+    ]
+}
+
+pub fn openrouter_reasoning_effort_value(effort: ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::Quick => "low",
+        ReasoningEffort::Standard => "medium",
+        ReasoningEffort::Deep => "high",
+        ReasoningEffort::Maximum => "xhigh",
+    }
+}
+
+pub fn openai_reasoning_effort_value(effort: ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::Quick => "low",
+        ReasoningEffort::Standard => "medium",
+        ReasoningEffort::Deep => "high",
+        ReasoningEffort::Maximum => "xhigh",
     }
 }
 
@@ -1863,6 +1941,53 @@ mod tests {
             }
             other => panic!("expected failure, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn provider_reasoning_effort_maps_turn_settings_to_reasoning_body() {
+        assert_eq!(
+            openrouter_reasoning_effort_value(ReasoningEffort::Quick),
+            "low"
+        );
+        assert_eq!(
+            openrouter_reasoning_effort_value(ReasoningEffort::Standard),
+            "medium"
+        );
+        assert_eq!(
+            openrouter_reasoning_effort_value(ReasoningEffort::Deep),
+            "high"
+        );
+        assert_eq!(
+            openrouter_reasoning_effort_value(ReasoningEffort::Maximum),
+            "xhigh"
+        );
+
+        let driver = OpenRouterToolDriver::new(
+            "openrouter/test",
+            256,
+            ScriptedCompleter::new(vec![]),
+            "system",
+            "goal",
+        )
+        .with_openrouter_reasoning_effort(ReasoningEffort::Maximum);
+        let body = driver.request_body();
+
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+        assert_eq!(body["model"], "openrouter/test");
+        assert_eq!(body["max_tokens"], 256);
+
+        let openai_driver = OpenRouterToolDriver::new(
+            "openai/test",
+            256,
+            ScriptedCompleter::new(vec![]),
+            "system",
+            "goal",
+        )
+        .with_openai_reasoning_effort(ReasoningEffort::Deep);
+        let openai_body = openai_driver.request_body();
+
+        assert_eq!(openai_body["reasoning_effort"], "high");
+        assert!(openai_body.get("reasoning").is_none());
     }
 
     #[test]

@@ -2010,6 +2010,48 @@ pub struct IntegrationSourceCandidateRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IntegrationTurnSettingsSnapshot {
+    pub model: turn::ModelSelection,
+    pub reasoning_effort: turn::ReasoningEffort,
+    pub execution_mode: turn::ExecutionMode,
+    pub pipeline_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_revision: Option<String>,
+    pub max_parallelism: u32,
+    pub verifier_count: u32,
+    pub tool_policy_id: String,
+    pub approval_policy_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_budget_usd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_model_id: Option<String>,
+}
+
+impl From<&turn::ConversationTurnSettings> for IntegrationTurnSettingsSnapshot {
+    fn from(settings: &turn::ConversationTurnSettings) -> Self {
+        Self {
+            model: settings.model.clone(),
+            reasoning_effort: settings.reasoning_effort,
+            execution_mode: settings.execution_mode,
+            pipeline_id: settings.pipeline_id.clone(),
+            graph_revision: settings.graph_revision.clone(),
+            max_parallelism: settings.max_parallelism,
+            verifier_count: settings.verifier_count,
+            tool_policy_id: settings.tool_policy_id.clone(),
+            approval_policy_id: settings.approval_policy_id.clone(),
+            token_budget: settings.token_budget,
+            cost_budget_usd: settings.cost_budget_usd.map(|budget| budget.to_string()),
+            timeout_ms: settings.timeout_ms,
+            image_model_id: settings.image_model_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct IntegrationCandidateReceipt {
     pub schema: String,
     pub id: String,
@@ -2035,6 +2077,10 @@ pub struct IntegrationCandidateReceipt {
     pub aggregate_target_count: usize,
     #[serde(default)]
     pub planned_verifier_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_settings: Option<IntegrationTurnSettingsSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shard_policy_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2088,6 +2134,10 @@ pub struct IntegrationCandidateSelectionReceipt {
     pub aggregate_target_count: usize,
     #[serde(default)]
     pub planned_verifier_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_settings: Option<IntegrationTurnSettingsSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shard_policy_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2172,6 +2222,10 @@ pub struct IntegrationApplyReceipt {
     pub target_paths: Vec<String>,
     pub approval_required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_settings: Option<IntegrationTurnSettingsSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_id: Option<String>,
     pub candidate_ref: String,
     pub patch_ref: String,
@@ -2236,6 +2290,10 @@ pub struct IntegrationFinalSeal {
     pub failed_gates: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_settings: Option<IntegrationTurnSettingsSnapshot>,
     pub candidate_ref: String,
     pub patch_ref: String,
     pub verification_ref: String,
@@ -3548,7 +3606,7 @@ mod tests {
                 attachment_refs: vec![],
             },
             thread_settings_updated_at_ms: Some(0),
-            settings: ConversationTurnSettings {
+            settings: Some(ConversationTurnSettings {
                 model: ModelSelection {
                     mode: ModelSelectionMode::Auto,
                     model_id: None,
@@ -3566,7 +3624,7 @@ mod tests {
                 cost_budget_usd: None,
                 timeout_ms: None,
                 image_model_id: None,
-            },
+            }),
             context: TurnContextSelection::default(),
             idempotency_key: "idem-conversation-turn".to_string(),
         };
@@ -3679,6 +3737,7 @@ mod tests {
 
     #[test]
     fn integration_candidate_receipt_roundtrips_with_source_candidates() {
+        let turn_settings = integration_turn_settings_fixture();
         let receipt = IntegrationCandidateReceipt {
             schema: INTEGRATION_CANDIDATE_RECEIPT_SCHEMA.to_string(),
             id: "integration-candidate-run-1".to_string(),
@@ -3739,6 +3798,8 @@ mod tests {
             main_workspace_modified: false,
             integration_required: true,
             approval_required: true,
+            approval_policy_id: Some("safe-interactive".to_string()),
+            turn_settings: Some(turn_settings.clone()),
             path_redacted: true,
             content_redacted: true,
             generated_at_ms: 1_000,
@@ -3773,10 +3834,20 @@ mod tests {
             decoded.selection_ref.as_deref(),
             Some("artifact://.opensks/runtime/integration-candidates/run-1/selection.json")
         );
+        assert_eq!(
+            decoded.approval_policy_id.as_deref(),
+            Some("safe-interactive")
+        );
+        let decoded_settings = decoded.turn_settings.expect("turn settings receipt");
+        assert_eq!(decoded_settings.pipeline_id, "integration-test-pipeline");
+        assert_eq!(decoded_settings.max_parallelism, 6);
+        assert_eq!(decoded_settings.verifier_count, 3);
+        assert_eq!(decoded_settings.tool_policy_id, "integration-tools");
     }
 
     #[test]
     fn integration_candidate_selection_receipt_roundtrips() {
+        let turn_settings = integration_turn_settings_fixture();
         let receipt = IntegrationCandidateSelectionReceipt {
             schema: INTEGRATION_CANDIDATE_SELECTION_RECEIPT_SCHEMA.to_string(),
             id: "integration-candidate-selection-run-1".to_string(),
@@ -3824,6 +3895,8 @@ mod tests {
             aggregate_candidate_count: 1,
             aggregate_target_count: 1,
             planned_verifier_count: 2,
+            approval_policy_id: Some("safe-interactive".to_string()),
+            turn_settings: Some(turn_settings),
             shard_policy_id: Some("planner-shard-policy-11111111".to_string()),
             shard_policy_selection_policy: Some(
                 "planner_required_shards_before_approval_apply".to_string(),
@@ -3845,6 +3918,17 @@ mod tests {
         assert_eq!(
             decoded.schema,
             INTEGRATION_CANDIDATE_SELECTION_RECEIPT_SCHEMA
+        );
+        assert_eq!(
+            decoded.approval_policy_id.as_deref(),
+            Some("safe-interactive")
+        );
+        assert_eq!(
+            decoded
+                .turn_settings
+                .as_ref()
+                .map(|settings| settings.pipeline_id.as_str()),
+            Some("integration-test-pipeline")
         );
         assert_eq!(decoded.candidate_pool.len(), 1);
         assert_eq!(decoded.planned_verifier_count, 2);
@@ -3868,6 +3952,29 @@ mod tests {
                 "approval_event".to_string()
             ]
         );
+    }
+
+    fn integration_turn_settings_fixture() -> IntegrationTurnSettingsSnapshot {
+        let settings = ConversationTurnSettings {
+            model: ModelSelection {
+                mode: turn::ModelSelectionMode::Pinned,
+                model_id: Some("provider-1/code-model".to_string()),
+                fallback_model_ids: vec!["provider-1/fallback-code".to_string()],
+            },
+            reasoning_effort: ReasoningEffort::Deep,
+            execution_mode: ExecutionMode::Worktree,
+            pipeline_id: "integration-test-pipeline".to_string(),
+            graph_revision: Some("graph-rev-1".to_string()),
+            max_parallelism: 6,
+            verifier_count: 3,
+            tool_policy_id: "integration-tools".to_string(),
+            approval_policy_id: "safe-interactive".to_string(),
+            token_budget: Some(12_000),
+            cost_budget_usd: Some(2.5),
+            timeout_ms: Some(45_000),
+            image_model_id: Some("provider-1/image-model".to_string()),
+        };
+        IntegrationTurnSettingsSnapshot::from(&settings)
     }
 
     #[test]

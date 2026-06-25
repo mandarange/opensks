@@ -18,8 +18,12 @@ opensks-image = { path = "../opensks-image" }
 opensks-provider = { path = "../opensks-provider" }
 opensks-scheduler = { path = "../opensks-scheduler" }
 opensks-stream = { path = "../opensks-stream" }
+opensks-vault = { path = "../opensks-vault" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { workspace = true }
 
 [features]
 default = []
@@ -27,6 +31,7 @@ simulation = ["opensks-adapter/simulation"]
 
 [dev-dependencies]
 opensks-adapter = { path = "../opensks-adapter", features = ["simulation"] }
+age = { workspace = true }
 
 [lints]
 workspace = true

@@ -165,6 +165,7 @@
       "enum": [
         "open_router",
         "open_ai",
+        "codex_lb",
         "open_ai_compatible",
         "anthropic_compatible",
         "google_compatible",

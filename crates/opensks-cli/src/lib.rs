@@ -2833,7 +2833,8 @@ fn run_conversation_turn_start(
             completer,
             "You are a coding agent. Use workspace tools for file changes; final text alone must not claim files changed.",
             text,
-        );
+        )
+        .with_openrouter_reasoning_effort(agentic_config.reasoning_effort);
         opensks_adapter::run_agentic_loop(
             &request,
             &mut driver,
@@ -2994,9 +2995,9 @@ fn turn_settings_from_thread(
         verifier_count: settings.verifier_count,
         tool_policy_id: settings.tool_policy_id.clone(),
         approval_policy_id: settings.approval_policy_id.clone(),
-        token_budget: None,
-        cost_budget_usd: None,
-        timeout_ms: None,
+        token_budget: settings.token_budget,
+        cost_budget_usd: settings.cost_budget_usd,
+        timeout_ms: settings.timeout_ms,
         image_model_id: settings.image_model_id.clone(),
     }
 }
@@ -6476,6 +6477,10 @@ mod tests {
             "verifier_count": 2,
             "tool_policy_id": "project-default",
             "approval_policy_id": "safe-interactive",
+            "token_budget": 100000,
+            "cost_budget_usd": 1.5,
+            "timeout_ms": 600000,
+            "image_model_id": "openai/gpt-image-1",
             "updated_at_ms": 0
         })
         .to_string();
@@ -6497,6 +6502,10 @@ mod tests {
         assert_eq!(got["execution_mode"], "local");
         assert_eq!(got["reasoning_effort"], "deep");
         assert_eq!(got["max_parallelism"], 8);
+        assert_eq!(got["token_budget"], 100000);
+        assert_eq!(got["cost_budget_usd"], 1.5);
+        assert_eq!(got["timeout_ms"], 600000);
+        assert_eq!(got["image_model_id"], "openai/gpt-image-1");
 
         let turn = conversation_json(
             &[
@@ -6528,6 +6537,21 @@ mod tests {
         assert_eq!(
             turn["model_routing_decision"]["route_receipt"]["registry_revision"],
             turn["model_routing_decision"]["model_snapshot_hash"]
+        );
+        let repo = opensks_conversation::ConversationRepository::open_workspace(&root)
+            .expect("conversation repo");
+        let effective_raw = repo
+            .turn_effective_settings_json(turn["turn_id"].as_str().expect("turn id"))
+            .expect("turn settings lookup")
+            .expect("turn settings snapshot");
+        let effective: opensks_contracts::ConversationTurnSettings =
+            serde_json::from_str(&effective_raw).expect("effective turn settings");
+        assert_eq!(effective.token_budget, Some(100_000));
+        assert_eq!(effective.cost_budget_usd, Some(1.5));
+        assert_eq!(effective.timeout_ms, Some(600_000));
+        assert_eq!(
+            effective.image_model_id.as_deref(),
+            Some("openai/gpt-image-1")
         );
 
         let bad = run_conversation_command(

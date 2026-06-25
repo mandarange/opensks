@@ -26,6 +26,12 @@
         "null"
       ]
     },
+    "approval_policy_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "candidate_id": {
       "type": "string"
     },
@@ -110,8 +116,149 @@
         "type": "string"
       }
     },
+    "turn_settings": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/IntegrationTurnSettingsSnapshot"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "verification_ref": {
       "type": "string"
+    }
+  },
+  "definitions": {
+    "ExecutionMode": {
+      "description": "Where a turn is allowed to write (§5.4). `Cloud` is reserved and hidden until a real adapter exists.",
+      "type": "string",
+      "enum": [
+        "local",
+        "worktree",
+        "read_only",
+        "cloud"
+      ]
+    },
+    "IntegrationTurnSettingsSnapshot": {
+      "type": "object",
+      "required": [
+        "approval_policy_id",
+        "execution_mode",
+        "max_parallelism",
+        "model",
+        "pipeline_id",
+        "reasoning_effort",
+        "tool_policy_id",
+        "verifier_count"
+      ],
+      "properties": {
+        "approval_policy_id": {
+          "type": "string"
+        },
+        "cost_budget_usd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "execution_mode": {
+          "$ref": "#/definitions/ExecutionMode"
+        },
+        "graph_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image_model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_parallelism": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "model": {
+          "$ref": "#/definitions/ModelSelection"
+        },
+        "pipeline_id": {
+          "type": "string"
+        },
+        "reasoning_effort": {
+          "$ref": "#/definitions/ReasoningEffort"
+        },
+        "timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "token_budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "tool_policy_id": {
+          "type": "string"
+        },
+        "verifier_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ModelSelection": {
+      "description": "Model choice for a turn/thread. A single configured model auto-selects.",
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "fallback_model_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mode": {
+          "$ref": "#/definitions/ModelSelectionMode"
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ModelSelectionMode": {
+      "description": "Whether the model is auto-routed or pinned by the user.",
+      "type": "string",
+      "enum": [
+        "auto",
+        "pinned"
+      ]
+    },
+    "ReasoningEffort": {
+      "description": "User-facing reasoning effort. Adapters map these to provider-specific knobs; an adapter that cannot honour a value reports `unsupported` rather than silently ignoring it (§5.3).",
+      "type": "string",
+      "enum": [
+        "quick",
+        "standard",
+        "deep",
+        "maximum"
+      ]
     }
   }
 }

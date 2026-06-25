@@ -36,6 +36,7 @@ const RESIDENT_SUPERVISOR_STARTUP_QUIESCE_POLL_MS: u64 = 5;
 const WORKTREE_ISOLATION_INVENTORY_KIND: &str = "worktree_inventory";
 const WORKTREE_ISOLATION_RECOVERY_KIND: &str = "worktree_recover";
 const WORKTREE_ISOLATION_INVENTORY_LEGACY_KIND: &str = "worktree_isolation_inventory";
+const RAW_PROMPT_VAULT_KEYCHAIN_SERVICE: &str = "dev.opensks.raw-prompt-vault";
 const WORKTREE_ISOLATION_RECOVERY_LEGACY_KIND: &str = "worktree_isolation_recovery";
 
 static DAEMON_ARTIFACT_WRITE_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -1598,7 +1599,12 @@ fn conversation_turn_start_lines(
                 return Ok(vec![serde_json::to_string(&event)?]);
             }
         };
-    match repo.accept_conversation_turn(turn_request, timestamp_ms()) {
+    let raw_content = encrypted_raw_prompt_for_turn_start(&options.workspace, turn_request);
+    match repo.accept_conversation_turn_with_raw_ciphertext(
+        turn_request,
+        raw_content.as_ref(),
+        timestamp_ms(),
+    ) {
         Ok(accepted) => {
             if let Err(error) = record_model_routing_decision(&repo, &accepted.turn_id) {
                 let mut event = EngineEvent::new(
@@ -1651,6 +1657,34 @@ fn conversation_turn_start_lines(
             event.redacted = true;
             Ok(vec![serde_json::to_string(&event)?])
         }
+    }
+}
+
+fn encrypted_raw_prompt_for_turn_start(
+    workspace: &Path,
+    turn_request: &opensks_contracts::ConversationTurnStartRequest,
+) -> Option<opensks_conversation::MessageRawContentCiphertext> {
+    if !prompt_requires_raw_content(&opensks_conversation::redact_secrets(
+        &turn_request.message.text,
+    )) {
+        return None;
+    }
+    let identity_text = ensure_raw_prompt_vault_identity_text(workspace).ok()?;
+    let ciphertext = opensks_vault::encrypt_bytes_with_identity_text(
+        turn_request.message.text.as_bytes(),
+        &identity_text,
+    )
+    .ok()?;
+    Some(opensks_conversation::MessageRawContentCiphertext {
+        ciphertext,
+        nonce: b"age-x25519-keychain-v1".to_vec(),
+    })
+}
+
+fn ensure_raw_prompt_vault_identity_text(workspace: &Path) -> Result<String, String> {
+    match resolve_raw_prompt_vault_identity_text(workspace) {
+        Ok(identity_text) => Ok(identity_text),
+        Err(_) => provision_raw_prompt_vault_identity_text(workspace),
     }
 }
 
@@ -1875,6 +1909,10 @@ fn apply_live_objective_planner_directive(
             &dispatch.model.remote_model_id,
             max_output_tokens_for_model(&dispatch.model).min(256),
             plan_request,
+            provider_reasoning_effort_for_provider(
+                dispatch.connection.kind,
+                settings.reasoning_effort,
+            ),
         ),
     )
     .map_err(|_error| "objective_planner_model_call_failed".to_string())?;
@@ -1967,8 +2005,9 @@ fn objective_planner_model_call_body(
     remote_model_id: &str,
     max_tokens: u32,
     request: &opensks_contracts::ObjectivePlanRequest,
+    reasoning_effort: ProviderReasoningEffort,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "model": remote_model_id,
         "max_tokens": max_tokens.clamp(1, 256),
         "temperature": 0,
@@ -1985,7 +2024,9 @@ fn objective_planner_model_call_body(
                 )
             }
         ]
-    })
+    });
+    add_provider_reasoning_effort(&mut body, reasoning_effort);
+    body
 }
 
 fn parse_objective_planner_directive(content: &str) -> Result<ObjectivePlannerDirective, String> {
@@ -2385,10 +2426,13 @@ fn execute_claimed_conversation_turn_inner(
     }
     let routing_decision = resolve_claimed_turn_routing(repo, workspace, lease, &settings, now_ms)
         .map_err(|error| error.to_string())?;
-    let prompt = repo
+    let stored_prompt = repo
         .turn_user_message_text(&lease.turn_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "accepted turn has no durable user prompt".to_string())?;
+    let prompt_resolution =
+        resolve_execution_prompt(repo, workspace, &lease.turn_id, &stored_prompt)?;
+    let prompt = prompt_resolution.prompt;
     let selected_model_id = routing_decision
         .status
         .has_resolved_model()
@@ -2424,6 +2468,16 @@ fn execute_claimed_conversation_turn_inner(
             execution_workspace_prepared_agent_event(&request, isolation),
         );
     }
+    if prompt_resolution.raw_prompt_restored {
+        opensks_adapter::AgentEventSink::emit(
+            &sink,
+            raw_prompt_restored_after_redaction_agent_event(
+                &request,
+                prompt_resolution.raw_ciphertext_bytes,
+                prompt.len(),
+            ),
+        );
+    }
 
     let agentic_config = opensks_adapter::AgenticConfig::for_turn_settings(&settings);
     let execution = ClaimedTurnExecution {
@@ -2448,7 +2502,23 @@ fn execute_claimed_conversation_turn_inner(
         Arc::clone(&cancellation_token),
     )
     .map_err(|error| format!("start turn lease heartbeat: {error}"))?;
-    let (outcome, mut final_routing_decision) = dispatch_claimed_turn_via_scheduler(execution)?;
+    let (outcome, mut final_routing_decision) = if prompt_requires_raw_content(&prompt) {
+        opensks_adapter::AgentEventSink::emit(
+            &sink,
+            raw_prompt_unavailable_after_redaction_agent_event(&request),
+        );
+        (
+            opensks_adapter::AgentRunOutcome {
+                assistant_text: "Cannot execute this turn because the durable prompt is redacted and the raw prompt vault is unavailable.".to_string(),
+                patches: vec![],
+                apply_results: vec![],
+                final_state: opensks_contracts::projection::RunProjectionState::Failed,
+            },
+            routing_decision.clone(),
+        )
+    } else {
+        dispatch_claimed_turn_via_scheduler(execution)?
+    };
     let cancellation_after_dispatch = observe_run_cancellation(workspace, &lease.run_id)?;
     let outcome = if cancellation_after_dispatch.is_some() {
         opensks_adapter::AgentRunOutcome {
@@ -3766,6 +3836,10 @@ fn execute_claimed_turn_role_model_call(
             context,
             item,
             worker_context,
+            provider_reasoning_effort_for_provider(
+                dispatch.connection.kind,
+                context.agentic_config.reasoning_effort,
+            ),
         ),
     )
     .map_err(|_error| "provider_role_call_failed".to_string())?;
@@ -3838,6 +3912,10 @@ fn execute_claimed_turn_code_role_subcontract(
             worker_context_body(worker_context),
             context.prompt
         ),
+    )
+    .with_chat_reasoning_effort_if_some(
+        chat_reasoning_effort_wire_for_provider(dispatch.connection.kind),
+        context.agentic_config.reasoning_effort,
     )
     .with_tools(opensks_adapter::tool_definitions());
     let role_sink = RoleSubcontractAgentEventSink {
@@ -4223,13 +4301,14 @@ fn role_worker_model_call_body(
     context: &RoleWorkerExecutionContext<'_>,
     item: &opensks_contracts::SchedulerWorkItem,
     worker_context: Option<&WorkerContextPackMaterialization>,
+    reasoning_effort: ProviderReasoningEffort,
 ) -> serde_json::Value {
     let response_instruction = if role == "verification" {
         "Return the first line exactly as `VERDICT: pass` or `VERDICT: fail`, then at most two short bullets. Use fail for unsafe, unverified, or semantically mismatched candidates."
     } else {
         "Return at most three short bullets."
     };
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "model": remote_model_id,
         "max_tokens": max_tokens.clamp(1, 256),
         "temperature": 0,
@@ -4251,7 +4330,9 @@ fn role_worker_model_call_body(
                 )
             }
         ]
-    })
+    });
+    add_provider_reasoning_effort(&mut body, reasoning_effort);
+    body
 }
 
 fn worker_context_ref(
@@ -4517,6 +4598,10 @@ fn run_claimed_turn_adapter_workload(
                             completer,
                             "You are a coding agent. Use workspace tools for file changes; final text alone must not claim files changed.",
                             execution.prompt,
+                        )
+                        .with_chat_reasoning_effort_if_some(
+                            chat_reasoning_effort_wire_for_provider(dispatch.connection.kind),
+                            execution.agentic_config.reasoning_effort,
                         )
                         .with_tools(tools);
                         if let Some(image_executor) = image_executor.as_ref() {
@@ -4831,6 +4916,8 @@ fn write_integration_candidate(
         evidence_refs.push("integration:aggregate-candidate-ready".to_string());
     }
     evidence_refs.push("integration:candidate-selection-receipt".to_string());
+    evidence_refs.push("settings:approval-policy".to_string());
+    evidence_refs.push("settings:turn-settings-snapshot".to_string());
     let source_candidates = sources
         .iter()
         .map(IntegrationCandidateSource::source_ref)
@@ -4873,6 +4960,8 @@ fn write_integration_candidate(
     let mut selection_evidence_refs = vec![
         "integration:candidate-selection-receipt".to_string(),
         "schema:integration-candidate-selection-receipt".to_string(),
+        "settings:approval-policy".to_string(),
+        "settings:turn-settings-snapshot".to_string(),
     ];
     if planner_shard_selection.shard_policy_id.is_some() {
         selection_evidence_refs.push("planner:shard-policy".to_string());
@@ -4915,6 +5004,10 @@ fn write_integration_candidate(
         main_workspace_modified: false,
         integration_required: true,
         approval_required: true,
+        approval_policy_id: Some(settings.approval_policy_id.clone()),
+        turn_settings: Some(opensks_contracts::IntegrationTurnSettingsSnapshot::from(
+            settings,
+        )),
         path_redacted: true,
         content_redacted: true,
         generated_at_ms: now_ms,
@@ -4942,6 +5035,10 @@ fn write_integration_candidate(
         aggregate_candidate_count: sources.len(),
         aggregate_target_count: target_paths.len(),
         planned_verifier_count,
+        approval_policy_id: Some(settings.approval_policy_id.clone()),
+        turn_settings: Some(opensks_contracts::IntegrationTurnSettingsSnapshot::from(
+            settings,
+        )),
         shard_policy_id: planner_shard_selection.shard_policy_id.clone(),
         shard_policy_selection_policy: planner_shard_selection
             .shard_policy_selection_policy
@@ -5217,6 +5314,8 @@ fn apply_integration_candidate(
                 reason_code: "candidate_receipt_missing",
                 target_paths: Vec::new(),
                 approval_id: Some(expected_approval_id),
+                approval_policy_id: None,
+                turn_settings: None,
                 candidate_ref: &candidate_ref,
                 patch_ref: &patch_ref,
                 verification_ref: Some(&verification_ref),
@@ -5261,6 +5360,8 @@ fn apply_integration_candidate(
                 reason_code: "candidate_receipt_invalid",
                 target_paths: Vec::new(),
                 approval_id: Some(expected_approval_id),
+                approval_policy_id: None,
+                turn_settings: None,
                 candidate_ref: &candidate_ref,
                 patch_ref: &patch_ref,
                 verification_ref: Some(&verification_ref),
@@ -5279,6 +5380,8 @@ fn apply_integration_candidate(
     };
     let candidate_id = candidate.id.clone();
     let target_paths = candidate.target_paths.clone();
+    let approval_policy_id = candidate.approval_policy_id.as_deref();
+    let turn_settings = candidate.turn_settings.as_ref();
 
     let failure = |reason_code: &str| {
         integration_apply_receipt(IntegrationApplyReceiptInput {
@@ -5288,6 +5391,8 @@ fn apply_integration_candidate(
             reason_code,
             target_paths: target_paths.clone(),
             approval_id: Some(expected_approval_id.clone()),
+            approval_policy_id,
+            turn_settings,
             candidate_ref: &candidate_ref,
             patch_ref: &patch_ref,
             verification_ref: Some(&verification_ref),
@@ -5355,6 +5460,8 @@ fn apply_integration_candidate(
             reason_code: "planner_required_shards_missing",
             target_paths,
             approval_id: Some(expected_approval_id),
+            approval_policy_id,
+            turn_settings,
             candidate_ref: &candidate_ref,
             patch_ref: &patch_ref,
             verification_ref: Some(&verification_ref),
@@ -5402,6 +5509,8 @@ fn apply_integration_candidate(
             reason_code: "planner_required_verifier_count_exceeds_runtime_cap",
             target_paths,
             approval_id: Some(expected_approval_id),
+            approval_policy_id,
+            turn_settings,
             candidate_ref: &candidate_ref,
             patch_ref: &patch_ref,
             verification_ref: Some(&verification_ref),
@@ -5487,6 +5596,8 @@ fn apply_integration_candidate(
             reason_code: &verification.reason_code,
             target_paths,
             approval_id: Some(expected_approval_id),
+            approval_policy_id,
+            turn_settings,
             candidate_ref: &candidate_ref,
             patch_ref: &patch_ref,
             verification_ref: Some(&verification_ref),
@@ -5518,6 +5629,8 @@ fn apply_integration_candidate(
             },
             target_paths,
             approval_id: Some(expected_approval_id),
+            approval_policy_id,
+            turn_settings,
             candidate_ref: &candidate_ref,
             patch_ref: &patch_ref,
             verification_ref: Some(&verification_ref),
@@ -5601,6 +5714,8 @@ fn apply_integration_candidate(
             candidate_id: &candidate_id,
             target_paths: target_paths.clone(),
             approval_id: Some(envelope.lease_id.clone()),
+            approval_policy_id,
+            turn_settings,
             candidate_ref: &candidate_ref,
             patch_ref: &patch_ref,
             verification_ref: &verification_ref,
@@ -5638,6 +5753,8 @@ fn apply_integration_candidate(
         reason_code,
         target_paths,
         approval_id: Some(envelope.lease_id),
+        approval_policy_id,
+        turn_settings,
         candidate_ref: &candidate_ref,
         patch_ref: &patch_ref,
         verification_ref: Some(&verification_ref),
@@ -6213,6 +6330,8 @@ struct IntegrationApplyReceiptInput<'a> {
     reason_code: &'a str,
     target_paths: Vec<String>,
     approval_id: Option<String>,
+    approval_policy_id: Option<&'a str>,
+    turn_settings: Option<&'a opensks_contracts::IntegrationTurnSettingsSnapshot>,
     candidate_ref: &'a str,
     patch_ref: &'a str,
     verification_ref: Option<&'a str>,
@@ -6242,6 +6361,12 @@ fn integration_apply_receipt(
     if input.verification_ref.is_some() {
         evidence_refs.push("integration:verification-receipt".to_string());
     }
+    if input.approval_policy_id.is_some() {
+        evidence_refs.push("settings:approval-policy".to_string());
+    }
+    if input.turn_settings.is_some() {
+        evidence_refs.push("settings:turn-settings-snapshot".to_string());
+    }
     if input.cleanup_ref.is_some() {
         evidence_refs.push("integration:cleanup-receipt".to_string());
     }
@@ -6254,6 +6379,8 @@ fn integration_apply_receipt(
         reason_code: input.reason_code.to_string(),
         target_paths: input.target_paths,
         approval_required: true,
+        approval_policy_id: input.approval_policy_id.map(str::to_string),
+        turn_settings: input.turn_settings.cloned(),
         approval_id: input.approval_id,
         candidate_ref: input.candidate_ref.to_string(),
         patch_ref: input.patch_ref.to_string(),
@@ -6278,6 +6405,8 @@ struct IntegrationFinalSealInput<'a> {
     candidate_id: &'a str,
     target_paths: Vec<String>,
     approval_id: Option<String>,
+    approval_policy_id: Option<&'a str>,
+    turn_settings: Option<&'a opensks_contracts::IntegrationTurnSettingsSnapshot>,
     candidate_ref: &'a str,
     patch_ref: &'a str,
     verification_ref: &'a str,
@@ -6311,6 +6440,14 @@ fn integration_final_seal(
         passed_gates.push("source_isolation_cleanup_receipt".to_string());
         evidence_refs.push("integration:cleanup-receipt".to_string());
     }
+    if input.approval_policy_id.is_some() {
+        passed_gates.push("approval_policy_bound".to_string());
+        evidence_refs.push("settings:approval-policy".to_string());
+    }
+    if input.turn_settings.is_some() {
+        passed_gates.push("turn_settings_snapshot_bound".to_string());
+        evidence_refs.push("settings:turn-settings-snapshot".to_string());
+    }
     opensks_contracts::IntegrationFinalSeal {
         schema: opensks_contracts::INTEGRATION_FINAL_SEAL_SCHEMA.to_string(),
         id: format!("integration-final-seal-{}", input.run_id),
@@ -6322,6 +6459,8 @@ fn integration_final_seal(
         passed_gates,
         failed_gates: Vec::new(),
         approval_id: input.approval_id,
+        approval_policy_id: input.approval_policy_id.map(str::to_string),
+        turn_settings: input.turn_settings.cloned(),
         candidate_ref: input.candidate_ref.to_string(),
         patch_ref: input.patch_ref.to_string(),
         verification_ref: input.verification_ref.to_string(),
@@ -7095,6 +7234,59 @@ fn supports_openai_compatible_dispatch(kind: opensks_contracts::ProviderKind) ->
     )
 }
 
+fn chat_reasoning_effort_wire_for_provider(
+    kind: opensks_contracts::ProviderKind,
+) -> Option<opensks_adapter::ChatReasoningEffortWire> {
+    match kind {
+        opensks_contracts::ProviderKind::OpenRouter => {
+            Some(opensks_adapter::ChatReasoningEffortWire::OpenRouterReasoningObject)
+        }
+        opensks_contracts::ProviderKind::OpenAi => {
+            Some(opensks_adapter::ChatReasoningEffortWire::OpenAiReasoningEffort)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProviderReasoningEffort {
+    wire: Option<opensks_adapter::ChatReasoningEffortWire>,
+    effort: opensks_contracts::ReasoningEffort,
+}
+
+fn provider_reasoning_effort_for_provider(
+    kind: opensks_contracts::ProviderKind,
+    effort: opensks_contracts::ReasoningEffort,
+) -> ProviderReasoningEffort {
+    ProviderReasoningEffort {
+        wire: chat_reasoning_effort_wire_for_provider(kind),
+        effort,
+    }
+}
+
+fn add_provider_reasoning_effort(
+    body: &mut serde_json::Value,
+    reasoning_effort: ProviderReasoningEffort,
+) {
+    let Some(wire) = reasoning_effort.wire else {
+        return;
+    };
+    match wire {
+        opensks_adapter::ChatReasoningEffortWire::OpenRouterReasoningObject => {
+            body["reasoning"] = serde_json::json!({
+                "effort": opensks_adapter::openrouter_reasoning_effort_value(
+                    reasoning_effort.effort
+                ),
+            });
+        }
+        opensks_adapter::ChatReasoningEffortWire::OpenAiReasoningEffort => {
+            body["reasoning_effort"] = serde_json::Value::String(
+                opensks_adapter::openai_reasoning_effort_value(reasoning_effort.effort).to_string(),
+            );
+        }
+    }
+}
+
 fn persist_routing_status(
     repo: &opensks_conversation::ConversationRepository,
     turn_id: &str,
@@ -7514,6 +7706,243 @@ fn setup_required_agent_event(
         }),
         sensitivity: opensks_contracts::Sensitivity::Public,
         evidence_refs: vec!["provider:no-code-capable-model".to_string()],
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ExecutionPromptResolution {
+    prompt: String,
+    raw_prompt_restored: bool,
+    raw_ciphertext_bytes: usize,
+}
+
+fn resolve_execution_prompt(
+    repo: &opensks_conversation::ConversationRepository,
+    workspace: &Path,
+    turn_id: &str,
+    stored_prompt: &str,
+) -> Result<ExecutionPromptResolution, String> {
+    if !prompt_requires_raw_content(stored_prompt) {
+        return Ok(ExecutionPromptResolution {
+            prompt: stored_prompt.to_string(),
+            raw_prompt_restored: false,
+            raw_ciphertext_bytes: 0,
+        });
+    }
+    let Some(raw_content) = repo
+        .turn_user_message_raw_content_ciphertext(turn_id)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(ExecutionPromptResolution {
+            prompt: stored_prompt.to_string(),
+            raw_prompt_restored: false,
+            raw_ciphertext_bytes: 0,
+        });
+    };
+    let identity_text = match resolve_raw_prompt_vault_identity_text(workspace) {
+        Ok(identity_text) => identity_text,
+        Err(_) => {
+            return Ok(ExecutionPromptResolution {
+                prompt: stored_prompt.to_string(),
+                raw_prompt_restored: false,
+                raw_ciphertext_bytes: raw_content.ciphertext.len(),
+            });
+        }
+    };
+    let plaintext = match opensks_vault::decrypt_bytes_with_identity_text(
+        &raw_content.ciphertext,
+        &identity_text,
+    ) {
+        Ok(plaintext) => plaintext,
+        Err(_) => {
+            return Ok(ExecutionPromptResolution {
+                prompt: stored_prompt.to_string(),
+                raw_prompt_restored: false,
+                raw_ciphertext_bytes: raw_content.ciphertext.len(),
+            });
+        }
+    };
+    let prompt =
+        String::from_utf8(plaintext).map_err(|_| "raw prompt was not UTF-8".to_string())?;
+    Ok(ExecutionPromptResolution {
+        prompt,
+        raw_prompt_restored: true,
+        raw_ciphertext_bytes: raw_content.ciphertext.len(),
+    })
+}
+
+fn resolve_raw_prompt_vault_identity_text(workspace: &Path) -> Result<String, String> {
+    #[cfg(test)]
+    if let Some(identity_text) = test_raw_prompt_identity_text(workspace) {
+        return Ok(identity_text);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = workspace;
+        Err("raw prompt vault identity requires macOS Keychain".to_string())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let account = raw_prompt_vault_keychain_account(workspace);
+        let identity_bytes = security_framework::passwords::get_generic_password(
+            RAW_PROMPT_VAULT_KEYCHAIN_SERVICE,
+            &account,
+        )
+        .map_err(|_| "raw prompt vault identity was not found in Keychain".to_string())?;
+        let identity_text = String::from_utf8(identity_bytes)
+            .map_err(|_| "raw prompt vault identity was not UTF-8".to_string())?;
+        if identity_text.trim().is_empty() {
+            return Err("raw prompt vault identity resolved empty".to_string());
+        }
+        Ok(identity_text)
+    }
+}
+
+fn provision_raw_prompt_vault_identity_text(workspace: &Path) -> Result<String, String> {
+    let identity_text = opensks_vault::generate_identity_text();
+    #[cfg(test)]
+    {
+        if test_raw_prompt_identity_provisioning_disabled(workspace) {
+            return Err("raw prompt vault identity provisioning disabled for test".to_string());
+        }
+        install_test_raw_prompt_identity_text(workspace, identity_text.clone());
+        Ok(identity_text)
+    }
+
+    #[cfg(all(not(test), not(target_os = "macos")))]
+    {
+        let _ = workspace;
+        let _ = identity_text;
+        Err("raw prompt vault identity provisioning requires macOS Keychain".to_string())
+    }
+    #[cfg(all(not(test), target_os = "macos"))]
+    {
+        let account = raw_prompt_vault_keychain_account(workspace);
+        security_framework::passwords::set_generic_password(
+            RAW_PROMPT_VAULT_KEYCHAIN_SERVICE,
+            &account,
+            identity_text.as_bytes(),
+        )
+        .map_err(|error| format!("raw prompt vault keychain provision failed: {error}"))?;
+        Ok(identity_text)
+    }
+}
+
+fn raw_prompt_vault_keychain_account(workspace: &Path) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in workspace.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("workspace:{hash:016x}")
+}
+
+#[cfg(test)]
+static TEST_RAW_PROMPT_IDENTITIES: std::sync::LazyLock<std::sync::Mutex<HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+static TEST_RAW_PROMPT_PROVISIONING_DISABLED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(test)]
+fn install_test_raw_prompt_identity_text(workspace: &Path, identity_text: String) {
+    TEST_RAW_PROMPT_IDENTITIES
+        .lock()
+        .expect("raw prompt identity test lock")
+        .insert(raw_prompt_vault_keychain_account(workspace), identity_text);
+}
+
+#[cfg(test)]
+fn disable_test_raw_prompt_identity_provisioning(workspace: &Path) {
+    TEST_RAW_PROMPT_PROVISIONING_DISABLED
+        .lock()
+        .expect("raw prompt identity provisioning test lock")
+        .insert(raw_prompt_vault_keychain_account(workspace));
+}
+
+#[cfg(test)]
+fn test_raw_prompt_identity_text(workspace: &Path) -> Option<String> {
+    TEST_RAW_PROMPT_IDENTITIES
+        .lock()
+        .expect("raw prompt identity test lock")
+        .get(&raw_prompt_vault_keychain_account(workspace))
+        .cloned()
+}
+
+#[cfg(test)]
+fn test_raw_prompt_identity_provisioning_disabled(workspace: &Path) -> bool {
+    TEST_RAW_PROMPT_PROVISIONING_DISABLED
+        .lock()
+        .expect("raw prompt identity provisioning test lock")
+        .contains(&raw_prompt_vault_keychain_account(workspace))
+}
+
+fn prompt_requires_raw_content(prompt: &str) -> bool {
+    prompt.contains("[REDACTED]")
+}
+
+fn raw_prompt_restored_after_redaction_agent_event(
+    request: &opensks_adapter::AgentRunRequest,
+    ciphertext_bytes: usize,
+    plaintext_bytes: usize,
+) -> opensks_contracts::AgentEventEnvelope {
+    opensks_contracts::AgentEventEnvelope {
+        schema: opensks_contracts::AGENT_EVENT_ENVELOPE_SCHEMA.to_string(),
+        stream_id: request.stream_id.clone(),
+        project_id: request.project_id.clone(),
+        conversation_id: request.conversation_id.clone(),
+        turn_id: request.turn_id.clone(),
+        run_id: request.run_id.clone(),
+        worker_id: Some("prompt-vault-policy".to_string()),
+        node_id: None,
+        sequence: 0,
+        occurred_at_ms: request.now_ms,
+        kind: opensks_contracts::AgentEventKind::Warning,
+        payload: serde_json::json!({
+            "code": "raw_prompt_restored_after_redaction",
+            "message": "Raw prompt content was restored from the encrypted prompt vault for execution.",
+            "raw_prompt_available": true,
+            "content_redacted": true,
+            "ciphertext_bytes": ciphertext_bytes,
+            "plaintext_bytes": plaintext_bytes
+        }),
+        sensitivity: opensks_contracts::Sensitivity::Internal,
+        evidence_refs: vec![
+            "conversation:raw-prompt-required".to_string(),
+            "conversation:raw-prompt-vault-decrypt".to_string(),
+        ],
+    }
+}
+
+fn raw_prompt_unavailable_after_redaction_agent_event(
+    request: &opensks_adapter::AgentRunRequest,
+) -> opensks_contracts::AgentEventEnvelope {
+    opensks_contracts::AgentEventEnvelope {
+        schema: opensks_contracts::AGENT_EVENT_ENVELOPE_SCHEMA.to_string(),
+        stream_id: request.stream_id.clone(),
+        project_id: request.project_id.clone(),
+        conversation_id: request.conversation_id.clone(),
+        turn_id: request.turn_id.clone(),
+        run_id: request.run_id.clone(),
+        worker_id: Some("prompt-vault-policy".to_string()),
+        node_id: None,
+        sequence: 0,
+        occurred_at_ms: request.now_ms,
+        kind: opensks_contracts::AgentEventKind::Error,
+        payload: serde_json::json!({
+            "code": "raw_prompt_unavailable_after_redaction",
+            "message": "Raw prompt content is required because the durable searchable prompt is redacted.",
+            "raw_prompt_available": false,
+            "content_redacted": true
+        }),
+        sensitivity: opensks_contracts::Sensitivity::Internal,
+        evidence_refs: vec![
+            "conversation:raw-prompt-required".to_string(),
+            "conversation:redacted-prompt-fail-closed".to_string(),
+        ],
     }
 }
 
@@ -8641,7 +9070,7 @@ mod tests {
                 attachment_refs: vec![],
             },
             thread_settings_updated_at_ms: None,
-            settings: ConversationTurnSettings {
+            settings: Some(ConversationTurnSettings {
                 model: ModelSelection {
                     mode: ModelSelectionMode::Auto,
                     model_id: None,
@@ -8659,7 +9088,7 @@ mod tests {
                 cost_budget_usd: None,
                 timeout_ms: None,
                 image_model_id: None,
-            },
+            }),
             context: TurnContextSelection::default(),
             idempotency_key: idempotency_key.to_string(),
         }
@@ -8724,6 +9153,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn objective_planner_model_call_body_includes_provider_reasoning_effort() {
+        let request =
+            opensks_contracts::ObjectivePlanRequest::new("Implement provider routing".to_string());
+        assert_eq!(
+            chat_reasoning_effort_wire_for_provider(ProviderKind::OpenRouter),
+            Some(opensks_adapter::ChatReasoningEffortWire::OpenRouterReasoningObject)
+        );
+        assert_eq!(
+            chat_reasoning_effort_wire_for_provider(ProviderKind::OpenAi),
+            Some(opensks_adapter::ChatReasoningEffortWire::OpenAiReasoningEffort)
+        );
+        assert_eq!(
+            chat_reasoning_effort_wire_for_provider(ProviderKind::OpenAiCompatible),
+            None
+        );
+        let body = objective_planner_model_call_body(
+            "openrouter/test-model",
+            512,
+            &request,
+            provider_reasoning_effort_for_provider(
+                ProviderKind::OpenRouter,
+                ReasoningEffort::Maximum,
+            ),
+        );
+
+        assert_eq!(body["model"], "openrouter/test-model");
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+        assert_eq!(body["max_tokens"], 256);
+
+        let openai_body = objective_planner_model_call_body(
+            "gpt-test",
+            512,
+            &request,
+            provider_reasoning_effort_for_provider(ProviderKind::OpenAi, ReasoningEffort::Deep),
+        );
+        assert_eq!(openai_body["reasoning_effort"], "high");
+        assert!(openai_body.get("reasoning").is_none());
+    }
+
     fn supervisor_tick_lines(output: &str) -> Vec<serde_json::Value> {
         output
             .lines()
@@ -8749,6 +9218,29 @@ mod tests {
             .collect()
     }
 
+    fn integration_turn_settings_fixture() -> opensks_contracts::IntegrationTurnSettingsSnapshot {
+        let settings = opensks_contracts::ConversationTurnSettings {
+            model: opensks_contracts::ModelSelection {
+                mode: opensks_contracts::turn::ModelSelectionMode::Pinned,
+                model_id: Some("provider-1/code-model".to_string()),
+                fallback_model_ids: vec!["provider-1/fallback-code".to_string()],
+            },
+            reasoning_effort: opensks_contracts::ReasoningEffort::Deep,
+            execution_mode: opensks_contracts::ExecutionMode::Worktree,
+            pipeline_id: "integration-test-pipeline".to_string(),
+            graph_revision: Some("graph-rev-1".to_string()),
+            max_parallelism: 6,
+            verifier_count: 3,
+            tool_policy_id: "integration-tools".to_string(),
+            approval_policy_id: "safe-interactive".to_string(),
+            token_budget: Some(12_000),
+            cost_budget_usd: Some(2.5),
+            timeout_ms: Some(45_000),
+            image_model_id: Some("provider-1/image-model".to_string()),
+        };
+        opensks_contracts::IntegrationTurnSettingsSnapshot::from(&settings)
+    }
+
     fn write_candidate_fixture(workspace: &Path, run_id: &str, target: &str, patch: &str) {
         let candidate_dir = workspace
             .join(".opensks")
@@ -8757,6 +9249,8 @@ mod tests {
             .join(run_id);
         std::fs::create_dir_all(&candidate_dir).expect("candidate dir");
         let head = run_git(workspace, &["rev-parse", "HEAD"]);
+        let turn_settings = serde_json::to_value(integration_turn_settings_fixture())
+            .expect("turn settings fixture");
         let candidate = serde_json::json!({
             "schema": "opensks.integration-candidate.v1",
             "id": format!("integration-candidate-{run_id}"),
@@ -8795,13 +9289,17 @@ mod tests {
             "main_workspace_modified": false,
             "integration_required": true,
             "approval_required": true,
+            "approval_policy_id": "safe-interactive",
+            "turn_settings": turn_settings,
             "path_redacted": true,
             "content_redacted": true,
             "generated_at_ms": 1_000,
             "evidence_refs": [
                 "git:isolation-prepared",
                 "patch-engine:atomic-apply",
-                "integration:candidate-ready"
+                "integration:candidate-ready",
+                "settings:approval-policy",
+                "settings:turn-settings-snapshot"
             ]
         });
         std::fs::write(
@@ -8809,6 +9307,45 @@ mod tests {
             serde_json::to_string_pretty(&candidate).expect("candidate json"),
         )
         .expect("write candidate");
+        let selection = serde_json::json!({
+            "schema": "opensks.integration-candidate-selection-receipt.v1",
+            "id": format!("integration-candidate-selection-{run_id}"),
+            "run_id": run_id,
+            "selected_candidate_id": format!("integration-candidate-{run_id}"),
+            "selection_ref": format!("artifact://.opensks/runtime/integration-candidates/{run_id}/selection.json"),
+            "selected_candidate_ref": format!("artifact://.opensks/runtime/integration-candidates/{run_id}/candidate.json"),
+            "selected_patch_ref": format!("artifact://.opensks/runtime/integration-candidates/{run_id}/candidate.patch"),
+            "candidate_pool": candidate["source_candidates"].clone(),
+            "selected_source_candidate_ids": [format!("turn-supervisor-candidate-{run_id}")],
+            "selection_policy": "deterministic_single_ready_candidate",
+            "reason_code": "single_ready_source_selected",
+            "required_verification_gates": [
+                "candidate_receipt_valid",
+                "target_policy_check",
+                "patch_apply_check",
+                "read_only_verifier_lanes",
+                "approval_event"
+            ],
+            "aggregate_candidate_count": 1,
+            "aggregate_target_count": 1,
+            "planned_verifier_count": 1,
+            "approval_policy_id": "safe-interactive",
+            "turn_settings": candidate["turn_settings"].clone(),
+            "target_paths": [target],
+            "path_redacted": true,
+            "content_redacted": true,
+            "evidence_refs": [
+                "integration:candidate-selection-receipt",
+                "schema:integration-candidate-selection-receipt",
+                "settings:approval-policy"
+            ],
+            "generated_at_ms": 1_000
+        });
+        std::fs::write(
+            candidate_dir.join("selection.json"),
+            serde_json::to_string_pretty(&selection).expect("selection json"),
+        )
+        .expect("write selection");
         std::fs::write(candidate_dir.join("candidate.patch"), patch).expect("write patch");
     }
 
@@ -8902,6 +9439,8 @@ mod tests {
             main_workspace_modified: false,
             integration_required: true,
             approval_required: true,
+            approval_policy_id: Some("safe-interactive".to_string()),
+            turn_settings: Some(integration_turn_settings_fixture()),
             path_redacted: true,
             content_redacted: true,
             generated_at_ms: 1_000,
@@ -10385,6 +10924,283 @@ mod tests {
                 .status,
             ConversationStatus::Completed
         );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn conversation_supervisor_tick_blocks_redacted_prompt_without_raw_vault() {
+        let workspace = temp_workspace("conversation-supervisor-redacted-prompt");
+        disable_test_raw_prompt_identity_provisioning(&workspace);
+        let (project_id, conversation_id) = seed_conversation(&workspace);
+        let mut turn_request = turn_start_request(
+            &project_id,
+            &conversation_id,
+            "req-conversation-redacted-prompt-start",
+            "idem-conversation-redacted-prompt-start",
+        );
+        turn_request.message.text = r#"{"local_test":{"op":"create_file","path":"REDACTED_PROMPT_NOTE.md","value":"OPENAI_API_KEY=sk-daemon-redacted-prompt-secret"}}"#.to_string();
+        let start = EngineRequest::conversation_turn_start(turn_request);
+        let tick = EngineRequest::conversation_supervisor_tick(
+            "req-conversation-redacted-prompt-tick",
+            "daemon-test-supervisor",
+            1_000,
+        );
+        let input = [
+            serde_json::to_string(&start).expect("start request"),
+            serde_json::to_string(&tick).expect("tick request"),
+        ]
+        .join("\n");
+
+        let output = run_stdio(
+            &(input + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("stdio");
+        let accepted = accepted_lines(&output);
+        assert_eq!(accepted.len(), 1);
+        let ticks = supervisor_tick_lines(&output);
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0]["executed"]["status"], "executed", "{output}");
+        assert_eq!(ticks[0]["executed"]["run_state"], "failed");
+        assert!(
+            !workspace.join("REDACTED_PROMPT_NOTE.md").exists(),
+            "redacted prompt must not be executed as a local-test write"
+        );
+
+        let repo = ConversationRepository::open_workspace(&workspace).expect("repo");
+        let messages = repo
+            .message_page(&conversation_id, None, 10)
+            .expect("messages");
+        assert!(messages[0].content_redacted.contains("[REDACTED]"));
+        assert_eq!(messages[1].state, MessageState::Failed);
+        assert!(
+            messages[1]
+                .content_redacted
+                .contains("raw prompt vault is unavailable")
+        );
+        let store =
+            opensks_event_store::EventStore::open_workspace(&workspace).expect("event store");
+        let events = store.replay(&accepted[0].run_id).expect("replay events");
+        assert!(
+            events.iter().any(|event| {
+                event.kind == EventKind::VerificationFailed
+                    && event.payload["agent_event_kind"] == "error"
+                    && event.payload["payload"]["code"] == "raw_prompt_unavailable_after_redaction"
+                    && event
+                        .evidence_refs
+                        .iter()
+                        .any(|reference| reference == "conversation:redacted-prompt-fail-closed")
+            }),
+            "raw prompt fail-closed event must be durable: {events:#?}"
+        );
+        assert!(
+            !serde_json::to_string(&events)
+                .expect("events json")
+                .contains("sk-daemon-redacted"),
+            "secret-like raw prompt content must not leak into events: {events:#?}"
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn conversation_supervisor_tick_restores_encrypted_raw_prompt_for_execution() {
+        let workspace = temp_workspace("conversation-supervisor-encrypted-raw-prompt");
+        let (project_id, conversation_id) = seed_conversation(&workspace);
+        let raw_prompt = r#"{"local_test":{"op":"create_file","path":"RESTORED_RAW_PROMPT_NOTE.md","value":"OPENAI_API_KEY=sk-daemon-restored-prompt-secret"}}"#;
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let ciphertext =
+            opensks_vault::encrypt_bytes(raw_prompt.as_bytes(), &recipient).expect("encrypt raw");
+        let secret_identity = identity.to_string();
+        install_test_raw_prompt_identity_text(
+            &workspace,
+            age::secrecy::ExposeSecret::expose_secret(&secret_identity).to_string(),
+        );
+
+        let mut turn_request = turn_start_request(
+            &project_id,
+            &conversation_id,
+            "req-conversation-encrypted-raw-prompt-start",
+            "idem-conversation-encrypted-raw-prompt-start",
+        );
+        turn_request.message.text = raw_prompt.to_string();
+        let start = EngineRequest::conversation_turn_start(turn_request);
+        let start_output = run_stdio(
+            &(serde_json::to_string(&start).expect("start request") + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("start stdio");
+        let accepted = accepted_lines(&start_output);
+        assert_eq!(accepted.len(), 1);
+
+        let repo = ConversationRepository::open_workspace(&workspace).expect("repo");
+        repo.set_message_content_with_raw_ciphertext(
+            &accepted[0].user_message_id,
+            raw_prompt,
+            MessageState::Complete,
+            Some(&opensks_conversation::MessageRawContentCiphertext {
+                ciphertext,
+                nonce: b"age-x25519-v1".to_vec(),
+            }),
+            2_100,
+        )
+        .expect("attach encrypted raw prompt");
+
+        let tick = EngineRequest::conversation_supervisor_tick(
+            "req-conversation-encrypted-raw-prompt-tick",
+            "daemon-test-supervisor",
+            1_000,
+        );
+        let output = run_stdio(
+            &(serde_json::to_string(&tick).expect("tick request") + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("tick stdio");
+        let ticks = supervisor_tick_lines(&output);
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0]["executed"]["status"], "executed", "{output}");
+        assert_eq!(ticks[0]["executed"]["run_state"], "completed");
+        let isolated_workspace = workspace
+            .join(".opensks")
+            .join("runtime")
+            .join("worktrees")
+            .join(&accepted[0].run_id)
+            .join("turn-supervisor");
+        assert_eq!(
+            std::fs::read_to_string(isolated_workspace.join("RESTORED_RAW_PROMPT_NOTE.md"))
+                .expect("restored raw prompt write"),
+            "OPENAI_API_KEY=sk-daemon-restored-prompt-secret"
+        );
+
+        let messages = repo
+            .message_page(&conversation_id, None, 10)
+            .expect("messages");
+        assert!(messages[0].content_redacted.contains("[REDACTED]"));
+        assert!(!messages[0].content_redacted.contains("sk-daemon-restored"));
+        let store =
+            opensks_event_store::EventStore::open_workspace(&workspace).expect("event store");
+        let events = store.replay(&accepted[0].run_id).expect("replay events");
+        assert!(
+            events.iter().any(|event| {
+                event.kind == EventKind::WorkItemRunning
+                    && event.payload["agent_event_kind"] == "warning"
+                    && event.payload["payload"]["code"] == "raw_prompt_restored_after_redaction"
+                    && event
+                        .evidence_refs
+                        .iter()
+                        .any(|reference| reference == "conversation:raw-prompt-vault-decrypt")
+            }),
+            "raw prompt restore event must be durable: {events:#?}"
+        );
+        assert!(
+            !serde_json::to_string(&events)
+                .expect("events json")
+                .contains("sk-daemon-restored"),
+            "secret-like raw prompt content must not leak into events: {events:#?}"
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn conversation_turn_start_encrypts_raw_prompt_for_later_supervisor_restore() {
+        let workspace = temp_workspace("conversation-turn-start-encrypts-raw-prompt");
+        let (project_id, conversation_id) = seed_conversation(&workspace);
+        let raw_prompt = r#"{"local_test":{"op":"create_file","path":"PRODUCED_RAW_PROMPT_NOTE.md","value":"OPENAI_API_KEY=sk-daemon-produced-prompt-secret"}}"#;
+        assert!(
+            test_raw_prompt_identity_text(&workspace).is_none(),
+            "test starts without a pre-provisioned raw prompt identity"
+        );
+
+        let mut turn_request = turn_start_request(
+            &project_id,
+            &conversation_id,
+            "req-conversation-produced-raw-prompt-start",
+            "idem-conversation-produced-raw-prompt-start",
+        );
+        turn_request.message.text = raw_prompt.to_string();
+        let start = EngineRequest::conversation_turn_start(turn_request);
+        let tick = EngineRequest::conversation_supervisor_tick(
+            "req-conversation-produced-raw-prompt-tick",
+            "daemon-test-supervisor",
+            1_000,
+        );
+        let input = [
+            serde_json::to_string(&start).expect("start request"),
+            serde_json::to_string(&tick).expect("tick request"),
+        ]
+        .join("\n");
+        let output = run_stdio(
+            &(input + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("stdio");
+        let accepted = accepted_lines(&output);
+        assert_eq!(accepted.len(), 1);
+        assert!(
+            test_raw_prompt_identity_text(&workspace).is_some(),
+            "turn-start should provision a workspace raw prompt identity"
+        );
+        let ticks = supervisor_tick_lines(&output);
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0]["executed"]["status"], "executed", "{output}");
+        assert_eq!(ticks[0]["executed"]["run_state"], "completed");
+
+        let repo = ConversationRepository::open_workspace(&workspace).expect("repo");
+        let raw = repo
+            .turn_user_message_raw_content_ciphertext(&accepted[0].turn_id)
+            .expect("raw ciphertext")
+            .expect("turn-start should store encrypted raw prompt");
+        assert!(!raw.ciphertext.is_empty());
+        assert_eq!(raw.nonce, b"age-x25519-keychain-v1");
+        assert!(
+            !String::from_utf8_lossy(&raw.ciphertext).contains("sk-daemon-produced"),
+            "ciphertext must not contain raw secret-like token"
+        );
+        let messages = repo
+            .message_page(&conversation_id, None, 10)
+            .expect("messages");
+        assert!(messages[0].content_redacted.contains("[REDACTED]"));
+        assert!(!messages[0].content_redacted.contains("sk-daemon-produced"));
+
+        let isolated_workspace = workspace
+            .join(".opensks")
+            .join("runtime")
+            .join("worktrees")
+            .join(&accepted[0].run_id)
+            .join("turn-supervisor");
+        assert_eq!(
+            std::fs::read_to_string(isolated_workspace.join("PRODUCED_RAW_PROMPT_NOTE.md"))
+                .expect("produced raw prompt write"),
+            "OPENAI_API_KEY=sk-daemon-produced-prompt-secret"
+        );
+        let store =
+            opensks_event_store::EventStore::open_workspace(&workspace).expect("event store");
+        let events = store.replay(&accepted[0].run_id).expect("replay events");
+        assert!(
+            events.iter().any(|event| {
+                event.payload["payload"]["code"] == "raw_prompt_restored_after_redaction"
+                    && event
+                        .evidence_refs
+                        .iter()
+                        .any(|reference| reference == "conversation:raw-prompt-vault-decrypt")
+            }),
+            "raw prompt restore event must be durable: {events:#?}"
+        );
+        assert!(
+            !serde_json::to_string(&events)
+                .expect("events json")
+                .contains("sk-daemon-produced"),
+            "secret-like raw prompt content must not leak into events: {events:#?}"
+        );
+        assert!(!output.contains("sk-daemon-produced"));
         let _ = std::fs::remove_dir_all(workspace);
     }
 
@@ -12167,6 +12983,10 @@ diff --git a/NOTE.md b/NOTE.md
         let receipt = &receipts[0];
         assert_eq!(receipt.state, "integrated");
         assert_eq!(receipt.reason_code, "candidate_applied_to_main_workspace");
+        assert_eq!(
+            receipt.approval_policy_id.as_deref(),
+            Some("safe-interactive")
+        );
         assert!(receipt.repair_ref.is_none());
         let expected_verification_ref = format!(
             "artifact://.opensks/runtime/integration-candidates/{run_id}/verification.json"
@@ -12204,6 +13024,69 @@ diff --git a/NOTE.md b/NOTE.md
             receipt
                 .evidence_refs
                 .contains(&"scheduler:path-scope-external-write".to_string())
+        );
+        assert!(
+            receipt
+                .evidence_refs
+                .contains(&"settings:approval-policy".to_string())
+        );
+        let candidate: opensks_contracts::IntegrationCandidateReceipt = serde_json::from_str(
+            &std::fs::read_to_string(integration_artifact_path(
+                &workspace,
+                run_id,
+                "candidate.json",
+            ))
+            .expect("candidate receipt"),
+        )
+        .expect("candidate json");
+        assert_eq!(
+            candidate.approval_policy_id.as_deref(),
+            Some("safe-interactive")
+        );
+        assert!(
+            candidate
+                .evidence_refs
+                .contains(&"settings:approval-policy".to_string())
+        );
+        assert_eq!(
+            candidate
+                .turn_settings
+                .as_ref()
+                .map(|settings| settings.pipeline_id.as_str()),
+            Some("integration-test-pipeline")
+        );
+        assert_eq!(
+            candidate
+                .turn_settings
+                .as_ref()
+                .map(|settings| settings.max_parallelism),
+            Some(6)
+        );
+        assert!(
+            candidate
+                .evidence_refs
+                .contains(&"settings:turn-settings-snapshot".to_string())
+        );
+        let selection: opensks_contracts::IntegrationCandidateSelectionReceipt =
+            serde_json::from_str(
+                &std::fs::read_to_string(integration_artifact_path(
+                    &workspace,
+                    run_id,
+                    "selection.json",
+                ))
+                .expect("selection receipt"),
+            )
+            .expect("selection json");
+        assert_eq!(
+            selection.approval_policy_id.as_deref(),
+            Some("safe-interactive")
+        );
+        assert_eq!(
+            selection
+                .turn_settings
+                .as_ref()
+                .map(|settings| settings.tool_policy_id.as_str()),
+            Some("integration-tools")
         );
         let verification = read_integration_verification(&workspace, run_id);
         assert_eq!(
@@ -12260,6 +13143,22 @@ diff --git a/NOTE.md b/NOTE.md
         assert_eq!(integration.final_diff_ref, receipt.final_diff_ref);
         assert_eq!(integration.seal_ref, receipt.seal_ref);
         assert_eq!(integration.cleanup_ref, receipt.cleanup_ref);
+        assert_eq!(
+            integration.approval_policy_id.as_deref(),
+            Some("safe-interactive")
+        );
+        assert_eq!(
+            integration
+                .turn_settings
+                .as_ref()
+                .map(|settings| settings.image_model_id.as_deref()),
+            Some(Some("provider-1/image-model"))
+        );
+        assert!(
+            integration
+                .evidence_refs
+                .contains(&"settings:turn-settings-snapshot".to_string())
+        );
         assert!(
             integration
                 .evidence_refs
@@ -12288,6 +13187,13 @@ diff --git a/NOTE.md b/NOTE.md
         assert_eq!(seal.verification_ref, expected_verification_ref);
         assert_eq!(seal.integration_ref, receipt.integration_ref);
         assert_eq!(seal.final_diff_ref, receipt.final_diff_ref);
+        assert_eq!(seal.approval_policy_id.as_deref(), Some("safe-interactive"));
+        assert_eq!(
+            seal.turn_settings
+                .as_ref()
+                .map(|settings| settings.verifier_count),
+            Some(3)
+        );
         assert!(seal.repair_ref.is_none());
         assert_eq!(
             seal.cleanup_ref.as_deref(),
@@ -12318,6 +13224,16 @@ diff --git a/NOTE.md b/NOTE.md
             seal.passed_gates
                 .iter()
                 .any(|gate| gate == "source_isolation_cleanup_receipt")
+        );
+        assert!(
+            seal.passed_gates
+                .iter()
+                .any(|gate| gate == "approval_policy_bound")
+        );
+        assert!(
+            seal.passed_gates
+                .iter()
+                .any(|gate| gate == "turn_settings_snapshot_bound")
         );
         let cleanup = read_integration_cleanup(&workspace, run_id);
         assert_eq!(
@@ -13082,6 +13998,17 @@ diff --git a/NOTE.md b/NOTE.md
         let receipt = &receipts[0];
         assert_eq!(receipt.state, "awaiting_approval");
         assert_eq!(receipt.reason_code, "approval_not_persisted");
+        assert_eq!(
+            receipt.approval_policy_id.as_deref(),
+            Some("safe-interactive")
+        );
+        assert_eq!(
+            receipt
+                .turn_settings
+                .as_ref()
+                .map(|settings| settings.pipeline_id.as_str()),
+            Some("integration-test-pipeline")
+        );
         let expected_verification_ref = format!(
             "artifact://.opensks/runtime/integration-candidates/{run_id}/verification.json"
         );
@@ -13092,6 +14019,16 @@ diff --git a/NOTE.md b/NOTE.md
         assert!(receipt.seal_ref.is_none());
         assert!(!receipt.main_workspace_modified);
         assert!(receipt.verifier_passed);
+        assert!(
+            receipt
+                .evidence_refs
+                .contains(&"settings:approval-policy".to_string())
+        );
+        assert!(
+            receipt
+                .evidence_refs
+                .contains(&"settings:turn-settings-snapshot".to_string())
+        );
         let verification = read_integration_verification(&workspace, run_id);
         assert_eq!(verification.state, "passed");
         assert_eq!(verification.reason_code, "candidate_verification_passed");
@@ -13996,8 +14933,12 @@ diff --git a/NOTE.md b/NOTE.md
             "idem-conversation-turn-start-settings",
         );
         turn_request.thread_settings_updated_at_ms = Some(1_900);
-        turn_request.settings.pipeline_id = "client-request-ignored".to_string();
-        turn_request.settings.max_parallelism = 99;
+        let legacy_settings = turn_request
+            .settings
+            .as_mut()
+            .expect("legacy settings echo");
+        legacy_settings.pipeline_id = "client-request-ignored".to_string();
+        legacy_settings.max_parallelism = 99;
         let request = EngineRequest::conversation_turn_start(turn_request);
         let input = serde_json::to_string(&request).expect("request");
 
@@ -14016,6 +14957,11 @@ diff --git a/NOTE.md b/NOTE.md
             .turn_effective_settings_json(&accepted[0].turn_id)
             .expect("turn settings")
             .expect("turn settings snapshot");
+        let settings_digest = repo
+            .turn_settings_digest(&accepted[0].turn_id)
+            .expect("turn settings digest")
+            .expect("turn settings digest");
+        assert_eq!(accepted[0].settings_digest, settings_digest);
         let settings: ConversationTurnSettings =
             serde_json::from_str(&settings_raw).expect("effective settings");
         assert_eq!(settings.pipeline_id, "daemon-thread-pipeline");

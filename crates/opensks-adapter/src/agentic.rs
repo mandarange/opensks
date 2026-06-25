@@ -29,8 +29,9 @@ use opensks_contracts::projection::RunProjectionState;
 use opensks_contracts::{
     AGENT_EVENT_ENVELOPE_SCHEMA, AgentEventEnvelope, AgentEventKind, ConversationTurnSettings,
     ExecutionMode, FileOperation, FilePatch, ImageAsset, ImageProvenanceReceipt,
-    PATCH_PROPOSAL_SCHEMA, PatchApplyResult, PatchProposal, RiskLevel, Sensitivity,
-    TOOL_POLICY_SCHEMA, ToolPermission, ToolPolicy, ToolPolicyEntry, default_tool_registry,
+    PATCH_PROPOSAL_SCHEMA, PatchApplyResult, PatchProposal, ReasoningEffort, RiskLevel,
+    Sensitivity, TOOL_POLICY_SCHEMA, ToolPermission, ToolPolicy, ToolPolicyEntry,
+    default_tool_registry,
 };
 use opensks_git_service::{DiffOptions, LogOptions};
 use opensks_policy::{Capability, WorkspaceCapabilities};
@@ -356,6 +357,7 @@ impl ToolDriver for SequenceDriver {
 #[derive(Debug, Clone)]
 pub struct AgenticConfig {
     pub max_steps: usize,
+    pub reasoning_effort: ReasoningEffort,
     pub tool_policy: ToolPolicy,
     pub allowed_paths: Vec<String>,
     pub forbidden_paths: Vec<String>,
@@ -366,6 +368,7 @@ impl Default for AgenticConfig {
     fn default() -> Self {
         Self {
             max_steps: 16,
+            reasoning_effort: ReasoningEffort::Standard,
             tool_policy: default_agentic_tool_policy(),
             allowed_paths: vec![],
             forbidden_paths: vec![],
@@ -376,7 +379,10 @@ impl Default for AgenticConfig {
 
 impl AgenticConfig {
     pub fn for_turn_settings(settings: &ConversationTurnSettings) -> Self {
-        let mut config = Self::default();
+        let mut config = Self {
+            reasoning_effort: settings.reasoning_effort,
+            ..Self::default()
+        };
         if matches!(settings.execution_mode, ExecutionMode::ReadOnly) {
             config.tool_policy = read_only_agentic_tool_policy(&settings.tool_policy_id);
         }

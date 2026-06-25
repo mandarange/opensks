@@ -42,7 +42,7 @@ protocol ConversationService: Sendable {
         conversationID: String,
         projectID: String,
         text: String,
-        settings: ConversationTurnSettings,
+        settings: ConversationTurnSettings?,
         threadSettingsUpdatedAtMs: Int64?,
         context: TurnContextSelection,
         idempotencyKey: String
@@ -78,7 +78,7 @@ extension ConversationService {
         conversationID: String,
         projectID: String,
         text: String,
-        settings: ConversationTurnSettings,
+        settings: ConversationTurnSettings? = nil,
         context: TurnContextSelection,
         idempotencyKey: String
     ) async throws -> ConversationTurn {
@@ -103,7 +103,7 @@ extension ConversationService {
             conversationID: conversationID,
             projectID: projectID,
             text: text,
-            settings: .defaultForTurn(),
+            settings: nil,
             threadSettingsUpdatedAtMs: nil,
             context: .empty,
             idempotencyKey: idempotencyKey
@@ -248,7 +248,7 @@ struct LiveConversationService: ConversationService {
         conversationID: String,
         projectID: String,
         text: String,
-        settings: ConversationTurnSettings,
+        settings: ConversationTurnSettings?,
         threadSettingsUpdatedAtMs: Int64?,
         context: TurnContextSelection,
         idempotencyKey: String
@@ -455,7 +455,7 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         conversationID: String,
         projectID: String,
         text: String,
-        settings: ConversationTurnSettings,
+        settings: ConversationTurnSettings?,
         threadSettingsUpdatedAtMs: Int64?,
         context: TurnContextSelection,
         idempotencyKey: String
@@ -839,7 +839,7 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         conversationID: String,
         projectID: String,
         text: String,
-        settings: ConversationTurnSettings,
+        settings: ConversationTurnSettings?,
         threadSettingsUpdatedAtMs: Int64?,
         context: TurnContextSelection,
         idempotencyKey: String
@@ -861,7 +861,7 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         conversationID id: String,
         projectID: String,
         text: String,
-        settings: ConversationTurnSettings,
+        settings: ConversationTurnSettings?,
         threadSettingsUpdatedAtMs: Int64?,
         context: TurnContextSelection,
         idempotencyKey: String

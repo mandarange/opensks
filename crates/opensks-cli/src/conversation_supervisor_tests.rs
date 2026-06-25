@@ -39,7 +39,7 @@ fn supervisor_tick_claims_one_queued_accepted_turn() {
                     attachment_refs: vec![],
                 },
                 thread_settings_updated_at_ms: None,
-                settings: turn_settings_from_thread(&thread_settings),
+                settings: Some(turn_settings_from_thread(&thread_settings)),
                 context: opensks_contracts::TurnContextSelection::default(),
                 idempotency_key: "idem-supervisor-cli".to_string(),
             },

@@ -19,7 +19,7 @@ struct RootView: View {
             Theme.bg.opacity(0.55).ignoresSafeArea()
 
             VStack(spacing: 0) {
-                TitleBarView()
+                TitleBarView(providers: coordinator.providers)
                 Divider().overlay(Theme.stroke)
                 mainBody
                 Divider().overlay(Theme.stroke)

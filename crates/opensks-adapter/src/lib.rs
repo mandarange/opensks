@@ -39,9 +39,10 @@ pub use agentic::{
     run_agentic_loop, run_agentic_loop_with_image_tools,
 };
 pub use openrouter::{
-    ChatCompleter, NativeHttpChatCompleter, OpenAiCompatibleChatCompleter,
-    OpenAiCompatibleImageGenerator, OpenRouterAdapter, OpenRouterToolDriver, parse_step,
-    tool_definitions, tool_definitions_with_extra_available_tools,
+    ChatCompleter, ChatReasoningEffortWire, NativeHttpChatCompleter, OpenAiCompatibleChatCompleter,
+    OpenAiCompatibleImageGenerator, OpenRouterAdapter, OpenRouterToolDriver,
+    openai_reasoning_effort_value, openrouter_reasoning_effort_value, parse_step, tool_definitions,
+    tool_definitions_with_extra_available_tools,
 };
 pub use patch_write::{PatchPathLease, PlannedWrite, apply_file_writes_with_path_lease};
 pub(crate) use patch_write::{

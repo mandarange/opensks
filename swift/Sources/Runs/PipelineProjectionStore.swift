@@ -106,9 +106,10 @@ struct PipelineExecutionProjection: Codable, Sendable, Equatable, Identifiable {
 // MARK: - Lenient state enums with a monotonic rank ("information level")
 
 /// Run lifecycle state. Lenient: an unrecognized server value never crashes
-/// the decoder and is treated as the lowest-information `.queued` rank so it
-/// can never downgrade a terminal run.
+/// the decoder, but it is preserved as `.unknown` instead of being presented as
+/// a valid queued run.
 enum RunProjectionState: String, Codable, Sendable, Equatable, CaseIterable {
+    case unknown
     case queued
     case running
     case paused
@@ -118,7 +119,7 @@ enum RunProjectionState: String, Codable, Sendable, Equatable, CaseIterable {
 
     init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
-        self = RunProjectionState(rawValue: raw) ?? .queued
+        self = RunProjectionState(rawValue: raw) ?? .unknown
     }
 
     /// Monotonic information rank. State only advances to a strictly higher
@@ -126,6 +127,7 @@ enum RunProjectionState: String, Codable, Sendable, Equatable, CaseIterable {
     /// share the top tier so one terminal never clobbers another.
     var rank: Int {
         switch self {
+        case .unknown: return -1
         case .queued: return 0
         case .paused: return 1
         case .running: return 2
@@ -138,6 +140,7 @@ enum RunProjectionState: String, Codable, Sendable, Equatable, CaseIterable {
     /// Run state as surfaced by a `StatusPill` (glyph + tint, never colour alone).
     var pillKind: StatusPill.Kind {
         switch self {
+        case .unknown: return .warning
         case .queued, .running: return .running
         case .paused: return .warning
         case .completed: return .success
@@ -148,6 +151,7 @@ enum RunProjectionState: String, Codable, Sendable, Equatable, CaseIterable {
 
     var displayLabel: String {
         switch self {
+        case .unknown: return "Unknown state · migration required"
         case .queued: return "Queued"
         case .running: return "Running"
         case .paused: return "Paused"
@@ -160,6 +164,7 @@ enum RunProjectionState: String, Codable, Sendable, Equatable, CaseIterable {
 
 /// Per-node lifecycle state. Lenient like `RunProjectionState`.
 enum NodeProjectionState: String, Codable, Sendable, Equatable, CaseIterable {
+    case unknown
     case queued
     case dispatching
     case running
@@ -173,6 +178,7 @@ enum NodeProjectionState: String, Codable, Sendable, Equatable, CaseIterable {
     // decoder's key strategy (the value here is a single string, not a key).
     var rawValue: String {
         switch self {
+        case .unknown: return "unknown"
         case .queued: return "queued"
         case .dispatching: return "dispatching"
         case .running: return "running"
@@ -186,6 +192,7 @@ enum NodeProjectionState: String, Codable, Sendable, Equatable, CaseIterable {
 
     init?(rawValue: String) {
         switch rawValue {
+        case "unknown": self = .unknown
         case "queued": self = .queued
         case "dispatching": self = .dispatching
         case "running": self = .running
@@ -200,7 +207,7 @@ enum NodeProjectionState: String, Codable, Sendable, Equatable, CaseIterable {
 
     init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
-        self = NodeProjectionState(rawValue: raw) ?? .queued
+        self = NodeProjectionState(rawValue: raw) ?? .unknown
     }
 
     func encode(to encoder: Encoder) throws {
@@ -213,6 +220,7 @@ enum NodeProjectionState: String, Codable, Sendable, Equatable, CaseIterable {
     /// downgrade a finished node.
     var rank: Int {
         switch self {
+        case .unknown: return -1
         case .queued: return 0
         case .dispatching: return 1
         case .running: return 2
@@ -225,6 +233,7 @@ enum NodeProjectionState: String, Codable, Sendable, Equatable, CaseIterable {
 
     var pillKind: StatusPill.Kind {
         switch self {
+        case .unknown: return .warning
         case .queued, .dispatching: return .neutral
         case .running: return .running
         case .waitingForApproval: return .warning
@@ -236,6 +245,7 @@ enum NodeProjectionState: String, Codable, Sendable, Equatable, CaseIterable {
 
     var displayLabel: String {
         switch self {
+        case .unknown: return "Unknown state · migration required"
         case .queued: return "Queued"
         case .dispatching: return "Dispatching"
         case .running: return "Running"
@@ -413,6 +423,7 @@ struct PipelineProjectionReducer: Sendable {
             case .failed, .cancelled: m.failed += 1
             case .dispatching, .running, .waitingForApproval: m.active += 1
             case .queued: m.queued += 1
+            case .unknown: break
             }
         }
         projection.metrics = m

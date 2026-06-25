@@ -8,6 +8,7 @@
     "request_id",
     "run_id",
     "schema",
+    "settings_digest",
     "state",
     "stream_id",
     "turn_id",
@@ -24,6 +25,9 @@
       "type": "string"
     },
     "schema": {
+      "type": "string"
+    },
+    "settings_digest": {
       "type": "string"
     },
     "state": {

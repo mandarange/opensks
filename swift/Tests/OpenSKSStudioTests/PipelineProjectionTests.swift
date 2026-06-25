@@ -349,7 +349,7 @@ final class PipelineProjectionTests: XCTestCase {
         XCTAssertTrue(encoded.contains("\"last_public_message\":\"awaiting approval\""))
     }
 
-    func testUnknownStateStringsDecodeLeniently() throws {
+    func testUnknownStateStringsDecodeAsUnknownInsteadOfQueued() throws {
         let json = """
         {
           "schema": "opensks.pipeline-execution-projection.v1",
@@ -366,8 +366,10 @@ final class PipelineProjectionTests: XCTestCase {
         """.data(using: .utf8)!
 
         let projection = try JSONDecoder.opensks.decode(PipelineExecutionProjection.self, from: json)
-        XCTAssertEqual(projection.state, .queued, "unknown run state falls back to lowest rank")
-        XCTAssertEqual(projection.nodes.first?.state, .queued, "unknown node state falls back too")
+        XCTAssertEqual(projection.state, .unknown, "unknown run state must not masquerade as queued")
+        XCTAssertEqual(projection.state.displayLabel, "Unknown state · migration required")
+        XCTAssertEqual(projection.nodes.first?.state, .unknown, "unknown node state must not masquerade as queued")
+        XCTAssertEqual(projection.nodes.first?.state.displayLabel, "Unknown state · migration required")
     }
 
     // MARK: - boundedness

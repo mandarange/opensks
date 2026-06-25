@@ -849,6 +849,8 @@ mod tests {
             reason_code: "candidate_applied_to_main_workspace".to_string(),
             target_paths: vec!["a.rs".to_string()],
             approval_required: true,
+            approval_policy_id: None,
+            turn_settings: None,
             approval_id: Some(format!("approval-integration-{run_id}")),
             candidate_ref: format!(
                 "artifact://.opensks/runtime/integration-candidates/{run_id}/candidate.json"

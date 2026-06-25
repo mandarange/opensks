@@ -33,7 +33,7 @@ final class ProviderStore: ObservableObject {
     }
 
     var eligibleTextModels: [ProviderModelViewModel] {
-        eligibleModels { $0.isEligibleForCode }
+        eligibleModels(requiring: .code)
     }
 
     func textModelSelection(pinning modelID: String) -> ModelSelection {
@@ -51,27 +51,50 @@ final class ProviderStore: ObservableObject {
     }
 
     var eligibleImageModels: [ProviderModelViewModel] {
-        eligibleModels { $0.isEligibleForImage }
+        eligibleModels(requiring: .image)
     }
 
     var eligibleVisionModels: [ProviderModelViewModel] {
-        eligibleModels { $0.isEligibleForVision }
+        eligibleModels(requiring: .vision)
     }
 
-    private func eligibleModels(
-        matching predicate: (ProviderModelViewModel) -> Bool
-    ) -> [ProviderModelViewModel] {
-        let healthyProviderIDs = Set(
-            connections
-                .filter { $0.enabled && $0.health == .healthy }
-                .map(\.id)
-        )
+    func modelIsSelectable(
+        _ model: ProviderModelViewModel,
+        requiring capability: ProviderModelCapability
+    ) -> Bool {
+        guard let provider = connections.first(where: { $0.id == model.providerID }) else {
+            return false
+        }
+        return modelIsSelectable(model, provider: provider, requiring: capability)
+    }
+
+    private func eligibleModels(requiring capability: ProviderModelCapability) -> [ProviderModelViewModel] {
+        let providersByID = Dictionary(uniqueKeysWithValues: connections.map { ($0.id, $0) })
         return models
-            .filter { healthyProviderIDs.contains($0.providerID) && predicate($0) }
+            .filter { model in
+                guard let provider = providersByID[model.providerID] else { return false }
+                return modelIsSelectable(model, provider: provider, requiring: capability)
+            }
             .sorted { left, right in
                 if left.displayName == right.displayName { return left.id < right.id }
                 return left.displayName < right.displayName
             }
+    }
+
+    private func modelIsSelectable(
+        _ model: ProviderModelViewModel,
+        provider: ProviderConnectionViewModel,
+        requiring capability: ProviderModelCapability
+    ) -> Bool {
+        guard provider.enabled, model.enabled, model.capabilities.contains(capability) else {
+            return false
+        }
+        if provider.health == .healthy, model.health == .healthy {
+            return true
+        }
+        return provider.kind == .codexLB
+            && provider.health == .needsProbe
+            && model.health == .needsProbe
     }
 
     var enabledProviderCount: Int {
@@ -586,9 +609,9 @@ private enum ProviderAdapterReadiness {
                 "resolve_OpenAI_models_endpoint",
                 "resolve_OpenRouter_adapter_check_error",
                 "resolve_OpenAI_adapter_check_error":
-                return blocker
+                return message(for: blocker)
             default:
-                return "redacted_provider_check_blocker"
+                return message(for: "redacted_provider_check_blocker")
             }
         }
     }
@@ -606,15 +629,15 @@ private enum ProviderAdapterReadiness {
     private static func message(for blocker: String) -> String {
         switch blocker {
         case "set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1":
-            return "Set OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1 to run live provider checks."
+            return "Set OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1 before running live provider checks."
         case "configure_OPENROUTER_API_KEY_credential":
-            return "Configure OPENROUTER_API_KEY."
+            return "Add an OpenRouter API key credential in Provider Center or Keychain."
         case "configure_OPENAI_API_KEY_credential":
-            return "Configure OPENAI_API_KEY."
+            return "Add an OpenAI API key credential in Provider Center or Keychain."
         case "replace_OPENROUTER_API_KEY_credential":
-            return "Replace OPENROUTER_API_KEY; authentication was rejected."
+            return "Replace the OpenRouter API key credential; authentication was rejected."
         case "replace_OPENAI_API_KEY_credential":
-            return "Replace OPENAI_API_KEY; authentication was rejected."
+            return "Replace the OpenAI API key credential; authentication was rejected."
         case "resolve_OpenRouter_models_endpoint":
             return "OpenRouter models endpoint did not return a reachable response."
         case "resolve_OpenAI_models_endpoint":
@@ -623,6 +646,8 @@ private enum ProviderAdapterReadiness {
             return "OpenRouter adapter check failed before reachability could be confirmed."
         case "resolve_OpenAI_adapter_check_error":
             return "OpenAI adapter check failed before reachability could be confirmed."
+        case "redacted_provider_check_blocker":
+            return "Provider check has a redacted blocker in the local report."
         default:
             return "Provider check has a redacted blocker in the local report."
         }

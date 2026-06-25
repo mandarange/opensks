@@ -134,12 +134,17 @@ final class ProviderTests: XCTestCase {
         let provider = try XCTUnwrap(store.connections.first)
         XCTAssertEqual(
             provider.adapterBlockers,
-            ["configure_OPENROUTER_API_KEY_credential", "redacted_provider_check_blocker"]
+            [
+                "Add an OpenRouter API key credential in Provider Center or Keychain.",
+                "Provider check has a redacted blocker in the local report."
+            ]
         )
-        XCTAssertTrue(provider.adapterDiagnostic?.contains("Configure OPENROUTER_API_KEY") == true)
+        XCTAssertTrue(provider.adapterDiagnostic?.contains("OpenRouter API key") == true)
         XCTAssertFalse(provider.adapterDiagnostic?.contains("sk-test-secret") == true)
         XCTAssertTrue(store.providerReadinessDetail.contains("OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1"))
         XCTAssertFalse(store.providerReadinessDetail.contains("sk-test-secret"))
+        XCTAssertFalse(provider.adapterBlockers.contains { $0.contains("sk-test-secret") })
+        XCTAssertFalse(provider.adapterBlockers.contains("configure_OPENROUTER_API_KEY_credential"))
     }
 
     func testProviderStoreSurfacesHealthCircuitAndDiagnosticReference() async throws {
@@ -335,8 +340,35 @@ final class ProviderTests: XCTestCase {
         XCTAssertTrue(encoded.contains("\"schema\":\"opensks.secret-ref.v1\""))
         XCTAssertEqual(store.models(for: provider.id).count, 2)
         XCTAssertTrue(store.models(for: provider.id).allSatisfy { $0.health == .needsProbe })
-        XCTAssertFalse(store.hasEligibleTextModel)
-        XCTAssertFalse(store.hasEligibleImageModel)
+        XCTAssertTrue(store.hasEligibleTextModel)
+        XCTAssertTrue(store.hasEligibleImageModel)
+        XCTAssertEqual(store.eligibleTextModels.map(\.id), ["\(provider.id)/auto-code"])
+        XCTAssertEqual(store.eligibleImageModels.map(\.id), ["\(provider.id)/auto-image"])
+    }
+
+    func testProviderStoreMakesSavedCodexLbRegistryModelsSelectableBeforeProbe() async throws {
+        let service = RecordingProviderRegistryService()
+        service.state.providers = [
+            Self.providerRecord(
+                kind: .codexLB,
+                health: "unknown",
+                displayName: "codex-lb",
+                endpoint: "https://codex-lb.example.com/backend-api/codex"
+            )
+        ]
+        service.state.models = [
+            Self.modelRecord(health: "unknown"),
+            Self.imageModelRecord(health: "unknown")
+        ]
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore(), service: service)
+
+        await store.refresh()
+
+        XCTAssertEqual(store.connections.first?.health, .needsProbe)
+        XCTAssertTrue(store.hasEligibleTextModel)
+        XCTAssertTrue(store.hasEligibleImageModel)
+        XCTAssertEqual(store.eligibleTextModels.map(\.id), ["provider-1/code-model"])
+        XCTAssertEqual(store.eligibleImageModels.map(\.id), ["provider-1/image-model"])
     }
 
     func testProviderSecretRefDefaultsSchemaWhenDecodingOlderRecords() throws {
@@ -488,8 +520,11 @@ final class ProviderTests: XCTestCase {
     }
 
     nonisolated fileprivate static func providerRecord(
+        kind: ProviderKind = .openRouter,
         health: String = "unknown",
         id: String = "provider-1",
+        displayName: String = "OpenRouter",
+        endpoint: String = "https://openrouter.ai/api/v1",
         circuitOpen: Bool = false,
         checkedAtMs: UInt64? = nil,
         reasonCode: String? = nil,
@@ -498,16 +533,16 @@ final class ProviderTests: XCTestCase {
         ProviderConnectionRecord(
             schema: "opensks.provider-connection.v1",
             id: id,
-            kind: .openRouter,
-            displayName: "OpenRouter",
+            kind: kind,
+            displayName: displayName,
             enabled: true,
             endpoint: ProviderEndpointRecord(
-                baseUrl: "https://openrouter.ai/api/v1",
+                baseUrl: endpoint,
                 allowInsecureHttp: false
             ),
             auth: ProviderSecretRef(
                 store: "macos_keychain",
-                service: "ai.opensks.provider.open_router",
+                service: "ai.opensks.provider.\(kind.rawValue)",
                 account: id,
                 version: 1
             ),

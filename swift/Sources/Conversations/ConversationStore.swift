@@ -56,10 +56,11 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     // cards, these are thread-attached UI affordances, never persisted messages.
     @Published private(set) var pushCardsByConversation: [String: [GitPushCard]] = [:]
 
-    // True while a send is in flight for the selected conversation (the
-    // composer disables its Send button so one Send starts exactly one run).
-    @Published private(set) var isSending = false
-    @Published private(set) var isSavingThreadSettings = false
+    // Per-conversation operation state. A single conversation still admits one
+    // send/settings save at a time, but unrelated conversations can progress
+    // independently.
+    @Published private(set) var sendingConversationIDs: Set<String> = []
+    @Published private(set) var savingThreadSettingsConversationIDs: Set<String> = []
 
     // Filter / search.
     @Published var filter: ConversationFilter = .all
@@ -124,6 +125,28 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     func draft(for id: String) -> String { drafts[id] ?? "" }
 
     func setDraft(_ text: String, for id: String) { drafts[id] = text }
+
+    var isSending: Bool {
+        if let id = selectedConversationID {
+            return isSending(conversationID: id)
+        }
+        return !sendingConversationIDs.isEmpty
+    }
+
+    var isSavingThreadSettings: Bool {
+        if let id = selectedConversationID {
+            return isSavingThreadSettings(for: id)
+        }
+        return !savingThreadSettingsConversationIDs.isEmpty
+    }
+
+    func isSending(conversationID id: String) -> Bool {
+        sendingConversationIDs.contains(id)
+    }
+
+    func isSavingThreadSettings(for id: String) -> Bool {
+        savingThreadSettingsConversationIDs.contains(id)
+    }
 
     /// Runs linked to a conversation (most recent last), for the run card.
     func runs(for id: String) -> [ConversationRunRef] { runsByConversation[id] ?? [] }
@@ -491,10 +514,10 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     /// `drainSupervisorQueue`, but send itself is not the executor.
     func send(conversationID: String, text: String) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !isSending else { return }
-        isSending = true
+        guard !trimmed.isEmpty, !isSending(conversationID: conversationID) else { return }
+        sendingConversationIDs.insert(conversationID)
         errorMessage = nil
-        defer { isSending = false }
+        defer { sendingConversationIDs.remove(conversationID) }
         let key = UUID().uuidString
         guard let summary = summaries.first(where: { $0.id == conversationID }) else {
             errorMessage = "conversation not loaded: \(conversationID)"
@@ -502,13 +525,12 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
         }
         do {
             let threadSettings = threadSettings(for: conversationID)
-            let turnSettings = ConversationTurnSettings.fromThread(threadSettings)
             let context = turnContextSelection(for: conversationID)
             let turn = try await service.turnStart(
                 conversationID: conversationID,
                 projectID: summary.projectId,
                 text: trimmed,
-                settings: turnSettings,
+                settings: nil,
                 threadSettingsUpdatedAtMs: threadSettings.updatedAtMs,
                 context: context,
                 idempotencyKey: key
@@ -520,7 +542,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
                 turnID: turn.turnId
             )
             drafts[conversationID] = nil
-            await refreshConversationReadModels()
+            await refreshConversationReadModels(for: conversationID)
             if let streamFailureMessage = latestLiveStreamFailureMessage(for: conversationID) {
                 errorMessage = streamFailureMessage
             }
@@ -717,9 +739,9 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
         }
     }
 
-    private func refreshConversationReadModels() async {
+    private func refreshConversationReadModels(for conversationID: String? = nil) async {
         await load()
-        if let id = selectedConversationID {
+        if let id = conversationID ?? selectedConversationID {
             await loadRuns(for: id)
             await loadThreadSettings(for: id)
             if activeConversationID == id {
@@ -881,16 +903,23 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
         for id: String,
         mutate: (inout ConversationThreadSettings) -> Void
     ) async {
-        guard !isSavingThreadSettings else { return }
-        isSavingThreadSettings = true
+        guard !isSavingThreadSettings(for: id) else { return }
+        savingThreadSettingsConversationIDs.insert(id)
         errorMessage = nil
-        defer { isSavingThreadSettings = false }
+        defer { savingThreadSettingsConversationIDs.remove(id) }
+        let previous = threadSettingsByConversation[id]
+        var next = threadSettings(for: id)
+        mutate(&next)
+        threadSettingsByConversation[id] = next
         do {
-            var next = threadSettings(for: id)
-            mutate(&next)
             let saved = try await service.setThreadSettings(next, conversationID: id)
             threadSettingsByConversation[id] = saved
         } catch {
+            if let previous {
+                threadSettingsByConversation[id] = previous
+            } else {
+                threadSettingsByConversation.removeValue(forKey: id)
+            }
             errorMessage = error.localizedDescription
         }
     }

@@ -100,8 +100,8 @@ struct ModelPicker: View {
 
     private func isSelectable(_ model: ProviderModelViewModel) -> Bool {
         switch kind {
-        case .text: return model.isEligibleForCode
-        case .image: return model.isEligibleForImage
+        case .text: return providers.modelIsSelectable(model, requiring: .code)
+        case .image: return providers.modelIsSelectable(model, requiring: .image)
         }
     }
 }

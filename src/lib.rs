@@ -404,7 +404,7 @@ struct ProviderStatus {
     definition: ProviderDefinition,
     configured: bool,
     configured_value: Option<String>,
-    credential_source: &'static str,
+    credential_source: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1356,7 +1356,7 @@ fn run_bench_command(_args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksE
     fs::create_dir_all(&dir)?;
     let stamp = ClockStamp::now()?;
     let checks = run_local_qa_checks(cwd);
-    let statuses = provider_statuses();
+    let statuses = provider_statuses(cwd);
     let adapter_check_present = cwd
         .join(OPEN_SKSDIR)
         .join("providers")
@@ -1423,7 +1423,7 @@ fn run_auth_command(_args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksEr
     let dir = cwd.join(OPEN_SKSDIR).join("auth");
     fs::create_dir_all(&dir)?;
     let stamp = ClockStamp::now()?;
-    let statuses = provider_statuses();
+    let statuses = provider_statuses(cwd);
     write_text_atomic(
         &dir.join("auth-registry.json"),
         &render_auth_registry(&stamp, &statuses),
@@ -1458,7 +1458,7 @@ fn run_provider_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSk
     let dir = cwd.join(OPEN_SKSDIR).join("providers");
     fs::create_dir_all(&dir)?;
     let stamp = ClockStamp::now()?;
-    let statuses = provider_statuses();
+    let statuses = provider_statuses(cwd);
 
     match subcommand.as_str() {
         "list" => {
@@ -1520,12 +1520,14 @@ fn run_provider_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSk
             let attempted = checks.iter().filter(|check| check.attempted).count();
             let blockers =
                 provider_adapter_check_blockers(&checks, remote_provider_adapter_probe_opted_in());
+            let blocker_lines = provider_adapter_check_blocker_stdout_lines(&blockers);
             Ok(CliOutput {
                 stdout: format!(
-                    "checked remote provider adapters\nadapters: {}\nattempted: {}\nblockers: {}\nreport: {}\n",
+                    "checked remote provider adapters\nadapters: {}\nattempted: {}\nblockers: {}\n{}report: {}\n",
                     checks.len(),
                     attempted,
                     blockers.len(),
+                    blocker_lines,
                     dir.join("provider-adapter-check.json").display()
                 ),
             })
@@ -5943,31 +5945,41 @@ fn provider_definitions() -> Vec<ProviderDefinition> {
     ]
 }
 
-fn provider_statuses() -> Vec<ProviderStatus> {
-    provider_statuses_with_keychain_command(None)
+fn provider_statuses(workspace: &Path) -> Vec<ProviderStatus> {
+    provider_statuses_with_keychain_command(workspace, None)
 }
 
-fn provider_statuses_with_keychain_command(keychain_command: Option<&Path>) -> Vec<ProviderStatus> {
+fn provider_statuses_with_keychain_command(
+    workspace: &Path,
+    keychain_command: Option<&Path>,
+) -> Vec<ProviderStatus> {
+    let registry_credentials = provider_registry_credentials(workspace, keychain_command);
     provider_definitions()
         .into_iter()
-        .map(|definition| provider_status_for_definition(definition, keychain_command))
+        .map(|definition| {
+            provider_status_for_definition(definition, keychain_command, &registry_credentials)
+        })
         .collect()
 }
 
 fn provider_status_for_definition(
     definition: ProviderDefinition,
     keychain_command: Option<&Path>,
+    registry_credentials: &[ProviderRegistryCredential],
 ) -> ProviderStatus {
     let env_value = env::var(definition.env_var)
         .ok()
         .filter(|value| !value.is_empty());
     let keychain_value = provider_keychain_credential(&definition, keychain_command);
-    let (configured_value, credential_source) = if env_value.is_some() {
-        (env_value, "env")
-    } else if keychain_value.is_some() {
-        (keychain_value, "keychain")
+    let registry_value = provider_registry_credential(&definition, registry_credentials);
+    let (configured_value, credential_source) = if let Some(value) = env_value {
+        (Some(value), "env".to_string())
+    } else if let Some(value) = keychain_value {
+        (Some(value), "keychain_legacy".to_string())
+    } else if let Some((value, source)) = registry_value {
+        (Some(value), source)
     } else {
-        (None, "none")
+        (None, "none".to_string())
     };
     ProviderStatus {
         configured: configured_value.is_some(),
@@ -5975,6 +5987,65 @@ fn provider_status_for_definition(
         credential_source,
         definition,
     }
+}
+
+#[derive(Debug, Clone)]
+struct ProviderRegistryCredential {
+    provider_kind: opensks_contracts::ProviderKind,
+    provider_id: String,
+    value: String,
+}
+
+fn provider_registry_credentials(
+    workspace: &Path,
+    keychain_command: Option<&Path>,
+) -> Vec<ProviderRegistryCredential> {
+    let Ok(repo) = opensks_provider::ProviderRepository::open_workspace(workspace) else {
+        return Vec::new();
+    };
+    let Ok(connections) = repo.list_connections() else {
+        return Vec::new();
+    };
+    connections
+        .into_iter()
+        .filter(|connection| {
+            connection.enabled
+                && matches!(
+                    connection.kind,
+                    opensks_contracts::ProviderKind::OpenRouter
+                        | opensks_contracts::ProviderKind::OpenAi
+                )
+        })
+        .filter_map(|connection| {
+            provider_secret_ref_credential(&connection.auth, keychain_command).map(|value| {
+                ProviderRegistryCredential {
+                    provider_kind: connection.kind,
+                    provider_id: connection.id,
+                    value,
+                }
+            })
+        })
+        .collect()
+}
+
+fn provider_registry_credential(
+    definition: &ProviderDefinition,
+    credentials: &[ProviderRegistryCredential],
+) -> Option<(String, String)> {
+    let wanted = match definition.name {
+        "OpenRouter" => opensks_contracts::ProviderKind::OpenRouter,
+        "OpenAI" => opensks_contracts::ProviderKind::OpenAi,
+        _ => return None,
+    };
+    credentials
+        .iter()
+        .find(|credential| credential.provider_kind == wanted)
+        .map(|credential| {
+            (
+                credential.value.clone(),
+                format!("provider_registry_keychain:{}", credential.provider_id),
+            )
+        })
 }
 
 fn provider_keychain_credential(
@@ -5987,18 +6058,40 @@ fn provider_keychain_credential(
     #[cfg(not(target_os = "macos"))]
     keychain_command?;
 
+    provider_keychain_lookup(
+        PROVIDER_KEYCHAIN_SERVICE,
+        definition.env_var,
+        keychain_command,
+    )
+}
+
+fn provider_secret_ref_credential(
+    auth: &opensks_contracts::SecretRef,
+    keychain_command: Option<&Path>,
+) -> Option<String> {
+    if auth.store != opensks_contracts::SecretStoreKind::MacosKeychain {
+        return None;
+    }
+
+    #[cfg(test)]
+    keychain_command?;
+
+    #[cfg(not(target_os = "macos"))]
+    keychain_command?;
+
+    provider_keychain_lookup(&auth.service, &auth.account, keychain_command)
+}
+
+fn provider_keychain_lookup(
+    service: &str,
+    account: &str,
+    keychain_command: Option<&Path>,
+) -> Option<String> {
     let command = keychain_command
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("security"));
     let output = process::Command::new(command)
-        .args([
-            "find-generic-password",
-            "-s",
-            PROVIDER_KEYCHAIN_SERVICE,
-            "-a",
-            definition.env_var,
-            "-w",
-        ])
+        .args(["find-generic-password", "-s", service, "-a", account, "-w"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -6013,11 +6106,16 @@ fn provider_keychain_credential(
 }
 
 fn provider_auth_posture(status: &ProviderStatus) -> &'static str {
-    match (status.configured, status.credential_source) {
-        (true, "keychain") => "configured_keychain_fallback",
-        (true, "env") => "configured_env_override",
-        (true, _) => "configured",
-        (false, _) => "not_configured",
+    if !status.configured {
+        return "not_configured";
+    }
+    match status.credential_source.as_str() {
+        "env" => "configured_env_override",
+        "keychain_legacy" => "configured_keychain_fallback",
+        source if source.starts_with("provider_registry_keychain:") => {
+            "configured_provider_registry_keychain"
+        }
+        _ => "configured",
     }
 }
 
@@ -6036,7 +6134,7 @@ fn render_provider_statuses_json(statuses: &[ProviderStatus]) -> String {
                 json_string(status.definition.kind),
                 json_string(status.definition.env_var),
                 status.configured,
-                json_string(status.credential_source),
+                json_string(&status.credential_source),
                 json_string(provider_auth_posture(status)),
                 json_string(status.definition.model_profile),
                 json_string(status.definition.cache_support),
@@ -6146,7 +6244,7 @@ fn check_provider_adapter(
                 "configure_{}_credential",
                 status.definition.env_var
             )],
-            credential_source: status.credential_source.to_string(),
+            credential_source: status.credential_source.clone(),
             endpoint: endpoint.to_string(),
             http_code: None,
             duration_ms: 0,
@@ -6162,7 +6260,7 @@ fn check_provider_adapter(
             attempted: false,
             status: "remote_probe_requires_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1".to_string(),
             blockers: vec!["set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1".to_string()],
-            credential_source: status.credential_source.to_string(),
+            credential_source: status.credential_source.clone(),
             endpoint: endpoint.to_string(),
             http_code: None,
             duration_ms: 0,
@@ -6181,7 +6279,7 @@ fn check_provider_adapter(
                 "configure_{}_credential",
                 status.definition.env_var
             )],
-            credential_source: status.credential_source.to_string(),
+            credential_source: status.credential_source.clone(),
             endpoint: endpoint.to_string(),
             http_code: None,
             duration_ms: 0,
@@ -6218,7 +6316,7 @@ fn check_provider_adapter(
                 attempted: true,
                 status: status_text.to_string(),
                 blockers,
-                credential_source: status.credential_source.to_string(),
+                credential_source: status.credential_source.clone(),
                 endpoint: endpoint.to_string(),
                 http_code: if response.http_code.is_empty() {
                     None
@@ -6239,7 +6337,7 @@ fn check_provider_adapter(
                 "resolve_{}_adapter_check_error",
                 status.definition.name
             )],
-            credential_source: status.credential_source.to_string(),
+            credential_source: status.credential_source.clone(),
             endpoint: endpoint.to_string(),
             http_code: None,
             duration_ms: started.elapsed().as_millis(),
@@ -7829,9 +7927,12 @@ fn render_collaboration_provider_readiness(statuses: &[ProviderStatus]) -> Strin
 }
 
 fn keychain_integration_available(statuses: &[ProviderStatus]) -> bool {
-    statuses
-        .iter()
-        .any(|status| status.credential_source == "keychain")
+    statuses.iter().any(|status| {
+        status.credential_source == "keychain_legacy"
+            || status
+                .credential_source
+                .starts_with("provider_registry_keychain:")
+    })
 }
 
 fn render_auth_registry(stamp: &ClockStamp, statuses: &[ProviderStatus]) -> String {
@@ -8023,7 +8124,7 @@ fn render_provider_profiles_json(statuses: &[ProviderStatus]) -> String {
                 json_string(status.definition.auth_method),
                 json_string(status.definition.kind),
                 status.configured,
-                json_string(status.credential_source),
+                json_string(&status.credential_source),
                 json_string(provider_auth_posture(status))
             )
         })
@@ -10968,6 +11069,16 @@ fn provider_adapter_check_blockers(
         }
     }
     blockers
+}
+
+fn provider_adapter_check_blocker_stdout_lines(blockers: &[String]) -> String {
+    if blockers.is_empty() {
+        return String::new();
+    }
+    blockers
+        .iter()
+        .map(|blocker| format!("blocker: {blocker}\n"))
+        .collect()
 }
 
 fn render_provider_adapter_checks_json(checks: &[ProviderAdapterCheck]) -> String {

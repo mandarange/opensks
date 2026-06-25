@@ -18,6 +18,8 @@ extension NodeProjectionState {
     /// `glyph` at sufficient zoom to satisfy the no-colour-alone rule.
     var graphTint: Color {
         switch self {
+        case .unknown:
+            return GeneratedDesignTokens.colorStatusWarning
         case .queued, .dispatching:
             return Theme.muted
         case .running:
@@ -37,6 +39,7 @@ extension NodeProjectionState {
     /// without relying on colour alone.
     var graphGlyph: String {
         switch self {
+        case .unknown: return "questionmark"
         case .queued: return "circle"
         case .dispatching: return "circle.dotted"
         case .running: return "arrow.triangle.2.circlepath"

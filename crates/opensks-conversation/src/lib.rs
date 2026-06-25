@@ -39,6 +39,8 @@ pub enum ConversationError {
     DuplicateAnchor(String),
     #[error("missing run projection for accepted replay: {0}")]
     ProjectionMissing(String),
+    #[error("missing settings digest for accepted turn: {0}")]
+    AcceptedSettingsDigestMissing(String),
     #[error("invalid run projection state: {0}")]
     InvalidRunProjectionState(String),
     #[error("stale turn supervisor lease for run: {0}")]
@@ -94,6 +96,15 @@ pub struct TurnRunSnapshot<'a> {
     pub settings_digest: &'a str,
     pub model_routing_decision_json: Option<&'a str>,
     pub now_ms: u64,
+}
+
+/// Opaque encrypted raw content for a message. Callers own encryption and key
+/// provenance; the conversation store only persists ciphertext separately from
+/// the searchable redacted copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageRawContentCiphertext {
+    pub ciphertext: Vec<u8>,
+    pub nonce: Vec<u8>,
 }
 
 /// A queued turn claimed by a TurnSupervisor lease. This is the durable handoff
@@ -833,6 +844,33 @@ impl ConversationRepository {
         content_raw: &str,
         now_ms: u64,
     ) -> Result<String> {
+        self.append_message_with_raw_ciphertext(
+            project_id,
+            conversation_id,
+            turn_id,
+            role,
+            state,
+            content_raw,
+            None,
+            now_ms,
+        )
+    }
+
+    /// Append a message with an optional encrypted raw-content payload. The
+    /// searchable/read-model copy remains redacted; ciphertext is returned only
+    /// through explicit ciphertext APIs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_message_with_raw_ciphertext(
+        &self,
+        project_id: &str,
+        conversation_id: &str,
+        turn_id: &str,
+        role: MessageRole,
+        state: MessageState,
+        content_raw: &str,
+        raw_content: Option<&MessageRawContentCiphertext>,
+        now_ms: u64,
+    ) -> Result<String> {
         let content_redacted = redact_secrets(content_raw);
         let id = self.new_id()?;
         let sequence: i64 = self.conn.query_row(
@@ -841,9 +879,21 @@ impl ConversationRepository {
             |r| r.get(0),
         )?;
         self.conn.execute(
-            "INSERT INTO messages(id, project_id, conversation_id, turn_id, role, state, content_redacted, created_at_ms, updated_at_ms, sequence)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9)",
-            params![id, project_id, conversation_id, turn_id, enum_to_str(&role), enum_to_str(&state), content_redacted, now_ms as i64, sequence],
+            "INSERT INTO messages(id, project_id, conversation_id, turn_id, role, state, content_redacted, content_ciphertext, content_nonce, created_at_ms, updated_at_ms, sequence)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)",
+            params![
+                id,
+                project_id,
+                conversation_id,
+                turn_id,
+                enum_to_str(&role),
+                enum_to_str(&state),
+                content_redacted,
+                raw_content.map(|content| content.ciphertext.as_slice()),
+                raw_content.map(|content| content.nonce.as_slice()),
+                now_ms as i64,
+                sequence
+            ],
         )?;
         self.conn.execute(
             "INSERT INTO messages_fts(conversation_id, message_id, content_redacted) VALUES(?1, ?2, ?3)",
@@ -871,10 +921,31 @@ impl ConversationRepository {
         state: MessageState,
         now_ms: u64,
     ) -> Result<()> {
+        self.set_message_content_with_raw_ciphertext(message_id, content_raw, state, None, now_ms)
+    }
+
+    /// Replace message content and optional encrypted raw-content payload.
+    /// Passing `None` clears any prior ciphertext so stale raw payloads cannot
+    /// survive a redacted content update.
+    pub fn set_message_content_with_raw_ciphertext(
+        &self,
+        message_id: &str,
+        content_raw: &str,
+        state: MessageState,
+        raw_content: Option<&MessageRawContentCiphertext>,
+        now_ms: u64,
+    ) -> Result<()> {
         let content_redacted = redact_secrets(content_raw);
         let n = self.conn.execute(
-            "UPDATE messages SET content_redacted = ?1, state = ?2, updated_at_ms = ?3 WHERE id = ?4",
-            params![content_redacted, enum_to_str(&state), now_ms as i64, message_id],
+            "UPDATE messages SET content_redacted = ?1, state = ?2, content_ciphertext = ?3, content_nonce = ?4, updated_at_ms = ?5 WHERE id = ?6",
+            params![
+                content_redacted,
+                enum_to_str(&state),
+                raw_content.map(|content| content.ciphertext.as_slice()),
+                raw_content.map(|content| content.nonce.as_slice()),
+                now_ms as i64,
+                message_id
+            ],
         )?;
         if n == 0 {
             return Err(ConversationError::NotFound(message_id.to_string()));
@@ -884,6 +955,54 @@ impl ConversationRepository {
             params![content_redacted, message_id],
         )?;
         Ok(())
+    }
+
+    /// Fetch encrypted raw-content payload for a message, when present. This is
+    /// deliberately separate from message pagination/search/digest APIs.
+    pub fn message_raw_content_ciphertext(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<MessageRawContentCiphertext>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT content_ciphertext, content_nonce FROM messages WHERE id = ?1")?;
+        let mut rows = stmt.query(params![message_id])?;
+        match rows.next()? {
+            Some(row) => {
+                let ciphertext: Option<Vec<u8>> = row.get(0)?;
+                let nonce: Option<Vec<u8>> = row.get(1)?;
+                Ok(ciphertext.map(|ciphertext| MessageRawContentCiphertext {
+                    ciphertext,
+                    nonce: nonce.unwrap_or_default(),
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Fetch encrypted raw-content payload for the first user message in a turn.
+    pub fn turn_user_message_raw_content_ciphertext(
+        &self,
+        turn_id: &str,
+    ) -> Result<Option<MessageRawContentCiphertext>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT content_ciphertext, content_nonce FROM messages
+             WHERE turn_id = ?1 AND role = 'user'
+             ORDER BY sequence ASC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![turn_id])?;
+        match rows.next()? {
+            Some(row) => {
+                let ciphertext: Option<Vec<u8>> = row.get(0)?;
+                let nonce: Option<Vec<u8>> = row.get(1)?;
+                Ok(ciphertext.map(|ciphertext| MessageRawContentCiphertext {
+                    ciphertext,
+                    nonce: nonce.unwrap_or_default(),
+                }))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Link a run to a conversation/message/turn in the `conversation_runs`
@@ -2242,9 +2361,27 @@ impl ConversationRepository {
         request: &ConversationTurnStartRequest,
         now_ms: u64,
     ) -> Result<ConversationTurnAccepted> {
+        self.accept_conversation_turn_with_raw_ciphertext(request, None, now_ms)
+    }
+
+    /// Accept a v2 conversation turn while optionally attaching encrypted raw
+    /// content to the user message. Read models still store/index only the
+    /// redacted copy; ciphertext is visible only through explicit raw-content
+    /// retrieval APIs.
+    pub fn accept_conversation_turn_with_raw_ciphertext(
+        &self,
+        request: &ConversationTurnStartRequest,
+        raw_content: Option<&MessageRawContentCiphertext>,
+        now_ms: u64,
+    ) -> Result<ConversationTurnAccepted> {
         if let Some(existing) =
             self.lookup_turn_idempotency(&request.idempotency_key, &request.conversation_id)?
         {
+            let settings_digest =
+                self.turn_settings_digest(&existing.turn_id)?
+                    .ok_or_else(|| {
+                        ConversationError::AcceptedSettingsDigestMissing(existing.turn_id.clone())
+                    })?;
             let state = self
                 .run_projection_state(&existing.run_id)?
                 .ok_or_else(|| ConversationError::ProjectionMissing(existing.run_id.clone()))
@@ -2257,6 +2394,7 @@ impl ConversationRepository {
                 user_message_id: existing.user_message_id,
                 assistant_message_id: existing.assistant_message_id,
                 stream_id: format!("stream-{}", existing.turn_id),
+                settings_digest,
                 state,
             });
         }
@@ -2281,8 +2419,8 @@ impl ConversationRepository {
             )?;
             let assistant_sequence = user_sequence + 1;
             self.conn.execute(
-                "INSERT INTO messages(id, project_id, conversation_id, turn_id, role, state, content_redacted, created_at_ms, updated_at_ms, sequence)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9)",
+                "INSERT INTO messages(id, project_id, conversation_id, turn_id, role, state, content_redacted, content_ciphertext, content_nonce, created_at_ms, updated_at_ms, sequence)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)",
                 params![
                     user_message_id,
                     request.project_id,
@@ -2291,6 +2429,8 @@ impl ConversationRepository {
                     enum_to_str(&MessageRole::User),
                     enum_to_str(&MessageState::Complete),
                     user_content_redacted,
+                    raw_content.map(|content| content.ciphertext.as_slice()),
+                    raw_content.map(|content| content.nonce.as_slice()),
                     now_ms as i64,
                     user_sequence,
                 ],
@@ -2409,6 +2549,10 @@ impl ConversationRepository {
             }
         }
 
+        let settings_digest = self
+            .turn_settings_digest(&turn_id)?
+            .ok_or_else(|| ConversationError::AcceptedSettingsDigestMissing(turn_id.clone()))?;
+
         Ok(ConversationTurnAccepted {
             schema: CONVERSATION_TURN_ACCEPTED_SCHEMA.to_string(),
             request_id: request.request_id.clone(),
@@ -2417,6 +2561,7 @@ impl ConversationRepository {
             user_message_id,
             assistant_message_id,
             stream_id,
+            settings_digest,
             state: RunProjectionState::Queued,
         })
     }
@@ -3487,7 +3632,7 @@ mod tests {
                 attachment_refs: vec![],
             },
             thread_settings_updated_at_ms: None,
-            settings: opensks_contracts::ConversationTurnSettings {
+            settings: Some(opensks_contracts::ConversationTurnSettings {
                 model: opensks_contracts::ModelSelection {
                     mode: opensks_contracts::ModelSelectionMode::Auto,
                     model_id: None,
@@ -3505,7 +3650,7 @@ mod tests {
                 cost_budget_usd: None,
                 timeout_ms: None,
                 image_model_id: None,
-            },
+            }),
             context: opensks_contracts::TurnContextSelection::default(),
             idempotency_key: idempotency_key.to_string(),
         }
@@ -3991,8 +4136,9 @@ mod tests {
         let mut request =
             sample_turn_start_request(&pid, &cid, "req-thread-settings", "idem-thread-settings");
         request.thread_settings_updated_at_ms = Some(1_900);
-        request.settings.pipeline_id = "client-sent-ignored".to_string();
-        request.settings.max_parallelism = 99;
+        let legacy_settings = request.settings.as_mut().expect("legacy settings echo");
+        legacy_settings.pipeline_id = "client-sent-ignored".to_string();
+        legacy_settings.max_parallelism = 99;
 
         let accepted = repo.accept_conversation_turn(&request, 2_000).unwrap();
         let effective_raw = repo
@@ -4000,6 +4146,11 @@ mod tests {
             .unwrap()
             .expect("turn settings snapshot");
         let effective: ConversationTurnSettings = serde_json::from_str(&effective_raw).unwrap();
+        let stored_digest = repo
+            .turn_settings_digest(&accepted.turn_id)
+            .unwrap()
+            .expect("stored settings digest");
+        assert_eq!(accepted.settings_digest, stored_digest);
 
         assert_eq!(effective.pipeline_id, "parallel-build");
         assert_eq!(effective.max_parallelism, 7);
@@ -4027,6 +4178,10 @@ mod tests {
                 .as_deref(),
             Some("parallel-build")
         );
+        let replayed = repo.accept_conversation_turn(&request, 2_050).unwrap();
+        assert_eq!(replayed.turn_id, accepted.turn_id);
+        assert_eq!(replayed.run_id, accepted.run_id);
+        assert_eq!(replayed.settings_digest, accepted.settings_digest);
     }
 
     #[test]
@@ -5387,5 +5542,64 @@ mod tests {
         assert_eq!(digest.source_message_sequence, 1);
         assert_eq!(digest.generated_at_ms, 3_000);
         assert!(!digest.summary_redacted.contains(SECRET));
+    }
+
+    #[test]
+    fn encrypted_raw_content_is_separate_from_redacted_read_models() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let (pid, cid) = project_and_conversation(&repo);
+        let encrypted = MessageRawContentCiphertext {
+            ciphertext: b"age-encryption.org/v1\nopaque-ciphertext".to_vec(),
+            nonce: b"nonce-v1".to_vec(),
+        };
+        let mid = repo
+            .append_message_with_raw_ciphertext(
+                &pid,
+                &cid,
+                "turn-encrypted-raw",
+                MessageRole::User,
+                MessageState::Complete,
+                &format!("configure OPENAI_API_KEY={SECRET} for this test"),
+                Some(&encrypted),
+                2_000,
+            )
+            .unwrap();
+
+        let page = repo.message_page(&cid, None, 10).unwrap();
+        assert_eq!(page.len(), 1);
+        assert!(page[0].content_redacted.contains("[REDACTED]"));
+        assert!(!page[0].content_redacted.contains(SECRET));
+        assert!(
+            !serde_json::to_string(&page)
+                .unwrap()
+                .contains("opaque-ciphertext")
+        );
+        assert_eq!(
+            repo.search_messages(&cid, "configure").unwrap(),
+            vec![mid.clone()]
+        );
+        assert!(repo.search_messages(&cid, "opaque").unwrap().is_empty());
+
+        assert_eq!(
+            repo.message_raw_content_ciphertext(&mid).unwrap(),
+            Some(encrypted.clone())
+        );
+        assert_eq!(
+            repo.turn_user_message_raw_content_ciphertext("turn-encrypted-raw")
+                .unwrap(),
+            Some(encrypted)
+        );
+
+        repo.upsert_summary(
+            &cid,
+            &format!("Decision: keep {SECRET} encrypted"),
+            1,
+            3_000,
+        )
+        .unwrap();
+        let digest = repo.get_digest(&cid).unwrap().unwrap();
+        let digest_json = serde_json::to_string(&digest).unwrap();
+        assert!(!digest_json.contains(SECRET));
+        assert!(!digest_json.contains("opaque-ciphertext"));
     }
 }

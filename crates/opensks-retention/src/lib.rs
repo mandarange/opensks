@@ -92,7 +92,11 @@ pub fn release_proof_with_artifacts(
             message: "release proof could not bind artifacts to a git HEAD commit".to_string(),
         });
     }
-    if workspace_dirty {
+    if workspace_dirty
+        && !blockers
+            .iter()
+            .any(|blocker| blocker.code == "workspace_dirty")
+    {
         blockers.push(ReleaseProofBlocker {
             code: "workspace_dirty".to_string(),
             message: "tracked workspace changes prevent same-SHA release artifact binding"

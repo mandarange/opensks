@@ -93,14 +93,16 @@ pub fn run_release_command(args: &[String], cwd: &Path) -> Result<CliOutput, Cli
             .map_err(|error| CliError::Invalid(format!("serialize release proof: {error}")))?
             + "\n"),
     )?;
+    let blocker_lines = release_blocker_stdout_lines(&proof.blockers);
     Ok(CliOutput {
         stdout: format!(
-            "wrote release hardening proof\nstatus: {:?}\nsigned_app: {}\nartifact_digest_gate_passed: {}\nsame_sha_artifact_binding: {}\nblockers: {}\nartifact: {}\n",
+            "wrote release hardening proof\nstatus: {:?}\nsigned_app: {}\nartifact_digest_gate_passed: {}\nsame_sha_artifact_binding: {}\nblockers: {}\n{}artifact: {}\n",
             proof.status,
             proof.signed_app,
             proof.artifact_digest_gate_passed,
             proof.same_sha_artifact_binding,
             proof.blockers.len(),
+            blocker_lines,
             dir.join("release-proof.json").display()
         ),
     })
@@ -169,7 +171,34 @@ fn release_workspace_dirty(cwd: &Path) -> (bool, Vec<opensks_contracts::ReleaseP
         }
     };
     if output.status.success() {
-        return (!output.stdout.is_empty(), Vec::new());
+        let dirty_paths = tracked_dirty_paths_from_porcelain(&output.stdout);
+        if dirty_paths.is_empty() {
+            return (false, Vec::new());
+        }
+        let sample_paths = dirty_paths
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let remaining = dirty_paths.len().saturating_sub(5);
+        let suffix = if remaining > 0 {
+            format!("; plus {remaining} more")
+        } else {
+            String::new()
+        };
+        return (
+            true,
+            vec![opensks_contracts::ReleaseProofBlocker {
+                code: "workspace_dirty".to_string(),
+                message: format!(
+                    "tracked workspace changes prevent same-SHA release artifact binding ({} tracked paths: {}{})",
+                    dirty_paths.len(),
+                    sample_paths,
+                    suffix
+                ),
+            }],
+        );
     }
     (
         false,
@@ -178,6 +207,29 @@ fn release_workspace_dirty(cwd: &Path) -> (bool, Vec<opensks_contracts::ReleaseP
             message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         }],
     )
+}
+
+fn tracked_dirty_paths_from_porcelain(stdout: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(|line| {
+            let path = line.get(3..)?.trim();
+            if path.is_empty() {
+                return None;
+            }
+            Some(path.rsplit(" -> ").next().unwrap_or(path).to_string())
+        })
+        .collect()
+}
+
+fn release_blocker_stdout_lines(blockers: &[opensks_contracts::ReleaseProofBlocker]) -> String {
+    if blockers.is_empty() {
+        return String::new();
+    }
+    blockers
+        .iter()
+        .map(|blocker| format!("blocker: {} - {}\n", blocker.code, blocker.message))
+        .collect()
 }
 
 fn collect_release_artifact_digests(
@@ -286,6 +338,55 @@ mod tests {
             );
             assert_eq!(artifact["source_commit_sha"], source_commit);
         }
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn release_proof_dirty_workspace_blocker_names_tracked_path_samples() {
+        let root = temp_workspace("opensks-cli-release-proof-dirty-samples");
+        run_repo_git(&root, &["init"]);
+        run_repo_git(&root, &["config", "user.email", "opensks@example.test"]);
+        run_repo_git(&root, &["config", "user.name", "OpenSKS Test"]);
+        for (_, relative_path) in RELEASE_PROOF_REQUIRED_ARTIFACTS {
+            let path = root.join(relative_path);
+            fs::create_dir_all(path.parent().expect("artifact parent")).expect("artifact dir");
+            fs::write(
+                &path,
+                format!("release artifact fixture: {relative_path}\n"),
+            )
+            .expect("write release artifact");
+        }
+        run_repo_git(&root, &["add", "."]);
+        run_repo_git(&root, &["commit", "-m", "release artifacts"]);
+        fs::write(
+            root.join("docs").join("runtime-truth-matrix.generated.md"),
+            "dirty release artifact fixture\n",
+        )
+        .expect("dirty release artifact");
+
+        let release = run_release_command(&["proof".to_string()], &root).expect("release proof");
+        assert!(release.stdout.contains("blockers: 1"));
+        assert!(release.stdout.contains("blocker: workspace_dirty - "));
+        assert!(
+            release
+                .stdout
+                .contains("docs/runtime-truth-matrix.generated.md")
+        );
+        let release_proof = read_json(
+            &root
+                .join(".opensks")
+                .join("release")
+                .join("release-proof.json"),
+        );
+        let blockers = release_proof["blockers"]
+            .as_array()
+            .expect("release blockers");
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0]["code"], "workspace_dirty");
+        let message = blockers[0]["message"].as_str().expect("blocker message");
+        assert!(message.contains("1 tracked paths"));
+        assert!(message.contains("docs/runtime-truth-matrix.generated.md"));
 
         fs::remove_dir_all(root).ok();
     }

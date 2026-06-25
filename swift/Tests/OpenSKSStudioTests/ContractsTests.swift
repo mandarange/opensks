@@ -424,7 +424,7 @@ final class ContractsTests: XCTestCase {
             clientTurnId: "client-turn-1",
             message: UserMessageInput(text: "start this turn", attachmentRefs: []),
             threadSettingsUpdatedAtMs: 42,
-            settings: .defaultForTurn(),
+            settings: nil,
             context: .empty,
             idempotencyKey: "idem-1"
         )
@@ -434,8 +434,6 @@ final class ContractsTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let params = try XCTUnwrap(object["params"] as? [String: Any])
         let nested = try XCTUnwrap(params["conversation_turn_start"] as? [String: Any])
-        let settings = try XCTUnwrap(nested["settings"] as? [String: Any])
-        let model = try XCTUnwrap(settings["model"] as? [String: Any])
 
         XCTAssertTrue(json.contains("\"kind\":\"conversation_turn_start\""))
         XCTAssertEqual(object["id"] as? String, "req-conversation-turn")
@@ -444,10 +442,7 @@ final class ContractsTests: XCTestCase {
         XCTAssertEqual(nested["conversation_id"] as? String, "conversation-1")
         XCTAssertEqual(nested["thread_settings_updated_at_ms"] as? Int, 42)
         XCTAssertEqual(nested["idempotency_key"] as? String, "idem-1")
-        XCTAssertEqual(settings["execution_mode"] as? String, "worktree")
-        XCTAssertEqual(settings["reasoning_effort"] as? String, "standard")
-        XCTAssertEqual(settings["pipeline_id"] as? String, "auto")
-        XCTAssertEqual(model["mode"] as? String, "auto")
+        XCTAssertNil(nested["settings"])
     }
 
     func testConversationThreadSettingsRoundTripsSnakeCaseWireContract() throws {
@@ -495,7 +490,7 @@ final class ContractsTests: XCTestCase {
     func testConversationTurnAcceptedDecodesFromDaemonResponseLine() throws {
         let lines = [
             """
-            {"schema":"opensks.conversation-turn-accepted.v1","request_id":"req-conversation-turn","turn_id":"turn-1","run_id":"turn-turn-1","user_message_id":"user-1","assistant_message_id":"assistant-1","stream_id":"stream-turn-1","state":"queued"}
+            {"schema":"opensks.conversation-turn-accepted.v1","request_id":"req-conversation-turn","turn_id":"turn-1","run_id":"turn-turn-1","user_message_id":"user-1","assistant_message_id":"assistant-1","stream_id":"stream-turn-1","settings_digest":"sha256:v1:accepted-settings","state":"queued"}
             """
         ]
         let accepted = try XCTUnwrap(EngineProcess.decodeConversationTurnAccepted(lines))
@@ -505,6 +500,7 @@ final class ContractsTests: XCTestCase {
         XCTAssertEqual(accepted.userMessageId, "user-1")
         XCTAssertEqual(accepted.assistantMessageId, "assistant-1")
         XCTAssertEqual(accepted.streamId, "stream-turn-1")
+        XCTAssertEqual(accepted.settingsDigest, "sha256:v1:accepted-settings")
         XCTAssertEqual(accepted.state, .queued)
     }
 
@@ -518,13 +514,13 @@ final class ContractsTests: XCTestCase {
             clientTurnId: "client-turn-1",
             message: UserMessageInput(text: "start this turn", attachmentRefs: []),
             threadSettingsUpdatedAtMs: nil,
-            settings: .defaultForTurn(),
+            settings: nil,
             context: .empty,
             idempotencyKey: "idem-1"
         )
         router.register(.conversationTurnStart(turnRequest))
         router.append(Data("""
-        {"schema":"opensks.conversation-turn-accepted.v1","request_id":"req-conversation-turn","turn_id":"turn-1","run_id":"turn-turn-1","user_message_id":"user-1","assistant_message_id":"assistant-1","stream_id":"stream-turn-1","state":"queued"}
+        {"schema":"opensks.conversation-turn-accepted.v1","request_id":"req-conversation-turn","turn_id":"turn-1","run_id":"turn-turn-1","user_message_id":"user-1","assistant_message_id":"assistant-1","stream_id":"stream-turn-1","settings_digest":"sha256:v1:accepted-settings","state":"queued"}
         {"schema":"opensks.engine-event.v1","event_id":"engine-request-completed-req-conversation-turn","request_id":"req-conversation-turn","event_type":"request_completed","severity":"info","message":"request completed","protocol_version":"opensks.contracts.v1","timestamp_ms":2,"evidence_refs":["daemon:request-completed"],"redacted":true}
 
         """.utf8))
@@ -536,6 +532,7 @@ final class ContractsTests: XCTestCase {
         XCTAssertTrue(snapshot.lines[0].contains("opensks.conversation-turn-accepted.v1"))
         let accepted = try XCTUnwrap(EngineProcess.decodeConversationTurnAccepted(snapshot.lines))
         XCTAssertEqual(accepted.runId, "turn-turn-1")
+        XCTAssertEqual(accepted.settingsDigest, "sha256:v1:accepted-settings")
     }
 
     func testConversationTimelineItemDecodesExecutionDetailFields() throws {

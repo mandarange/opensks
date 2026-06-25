@@ -10,8 +10,7 @@
     "message",
     "project_id",
     "request_id",
-    "schema",
-    "settings"
+    "schema"
   ],
   "properties": {
     "client_turn_id": {
@@ -44,10 +43,18 @@
       "type": "string"
     },
     "settings": {
-      "$ref": "#/definitions/ConversationTurnSettings"
+      "description": "Legacy compatibility echo from older clients. Runtime settings are always snapshotted from durable thread settings instead.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ConversationTurnSettings"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "thread_settings_updated_at_ms": {
-      "description": "Client-observed durable thread settings revision. The daemon uses this as a compare-and-snapshot guard before accepting a turn; the full `settings` payload below is retained as a compatibility echo and is not the runtime source of truth.",
+      "description": "Client-observed durable thread settings revision. The daemon uses this as a compare-and-snapshot guard before accepting a turn.",
       "type": [
         "integer",
         "null"

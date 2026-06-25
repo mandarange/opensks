@@ -57,6 +57,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # our own cipher/KDF/MAC/nonce/key-exchange. Default features only (x25519 is
 # built in; we deliberately avoid `cli-common` so no console/tty deps leak in).
 age = "0.11"
+security-framework = "3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

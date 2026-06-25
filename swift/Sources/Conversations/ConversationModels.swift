@@ -793,7 +793,7 @@ struct ConversationTurnStartRequest: Codable, Sendable, Equatable {
     let clientTurnId: String
     let message: UserMessageInput
     let threadSettingsUpdatedAtMs: Int64?
-    let settings: ConversationTurnSettings
+    let settings: ConversationTurnSettings?
     let context: TurnContextSelection
     let idempotencyKey: String
 }
@@ -807,6 +807,7 @@ struct ConversationTurnAccepted: Codable, Sendable, Equatable {
     let userMessageId: String
     let assistantMessageId: String
     let streamId: String
+    let settingsDigest: String
     let state: RunState
 }
 

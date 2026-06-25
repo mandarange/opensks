@@ -48,6 +48,17 @@ fn test_provider_definition(env_var: &'static str) -> ProviderDefinition {
 
 #[cfg(unix)]
 fn write_mock_security_command(root: &Path, env_var: &str, secret: &str, found: bool) -> PathBuf {
+    write_mock_security_command_for(root, PROVIDER_KEYCHAIN_SERVICE, env_var, secret, found)
+}
+
+#[cfg(unix)]
+fn write_mock_security_command_for(
+    root: &Path,
+    service: &str,
+    account: &str,
+    secret: &str,
+    found: bool,
+) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
     let path = root.join("mock-security");
@@ -65,7 +76,7 @@ fn write_mock_security_command(root: &Path, env_var: &str, secret: &str, found: 
                 "printf 'unexpected mock security arguments\\n' >&2\n",
                 "exit 64\n"
             ),
-            PROVIDER_KEYCHAIN_SERVICE, env_var, secret
+            service, account, secret
         )
     } else {
         "#!/bin/sh\nprintf 'not found\\n' >&2\nexit 44\n".to_string()
@@ -3589,6 +3600,21 @@ fn provider_commands_write_zero_leak_registry_probe_and_usage() {
     assert!(adapter_report.contains("OpenRouter"));
     assert!(adapter_report.contains("OpenAI"));
     assert!(adapter.stdout.contains("blockers: 3"));
+    assert!(
+        adapter
+            .stdout
+            .contains("blocker: set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1")
+    );
+    assert!(
+        adapter
+            .stdout
+            .contains("blocker: configure_OPENROUTER_API_KEY_credential")
+    );
+    assert!(
+        adapter
+            .stdout
+            .contains("blocker: configure_OPENAI_API_KEY_credential")
+    );
     assert!(adapter_report.contains(
         "\"blockers\": [\"set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1\",\"configure_OPENROUTER_API_KEY_credential\",\"configure_OPENAI_API_KEY_credential\"]"
     ));
@@ -3684,7 +3710,8 @@ fn provider_env_source_overrides_keychain_without_serializing_secrets() {
         env::remove_var("OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE");
     }
 
-    let status = provider_status_for_definition(test_provider_definition(env_var), Some(&command));
+    let status =
+        provider_status_for_definition(test_provider_definition(env_var), Some(&command), &[]);
 
     unsafe {
         env::remove_var(env_var);
@@ -3726,17 +3753,97 @@ fn provider_keychain_source_fills_missing_env_without_serializing_secret() {
         env::remove_var(env_var);
     }
 
-    let status = provider_status_for_definition(test_provider_definition(env_var), Some(&command));
+    let status =
+        provider_status_for_definition(test_provider_definition(env_var), Some(&command), &[]);
 
     assert!(status.configured);
-    assert_eq!(status.credential_source, "keychain");
+    assert_eq!(status.credential_source, "keychain_legacy");
     assert_eq!(status.configured_value.as_deref(), Some(keychain_secret));
 
     let statuses = vec![status];
     let registry_statuses = render_provider_statuses_json(&statuses);
-    assert!(registry_statuses.contains("\"credential_source\":\"keychain\""));
+    assert!(registry_statuses.contains("\"credential_source\":\"keychain_legacy\""));
     assert!(registry_statuses.contains("\"auth_posture\":\"configured_keychain_fallback\""));
     assert!(!registry_statuses.contains(keychain_secret));
+}
+
+#[test]
+#[cfg(unix)]
+fn provider_adapter_check_uses_registry_keychain_secret_ref_without_serializing_secret() {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let root = temp_workspace("provider-registry-keychain-adapter-check");
+    let service = "ai.opensks.provider.openrouter";
+    let account = "provider-openrouter";
+    let secret = "registry-keychain-secret-should-not-serialize";
+    let command = write_mock_security_command_for(&root, service, account, secret, true);
+    unsafe {
+        env::remove_var("OPENROUTER_API_KEY");
+        env::remove_var("OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE");
+    }
+
+    let repo = opensks_provider::ProviderRepository::open_workspace(&root).expect("provider repo");
+    let connection = opensks_contracts::ProviderConnection {
+        schema: opensks_contracts::PROVIDER_CONNECTION_SCHEMA.to_string(),
+        id: account.to_string(),
+        kind: opensks_contracts::ProviderKind::OpenRouter,
+        display_name: "OpenRouter".to_string(),
+        enabled: true,
+        endpoint: opensks_contracts::ProviderEndpoint {
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            allow_insecure_http: false,
+        },
+        auth: opensks_contracts::SecretRef::macos_keychain(service, account, 1),
+        organization_ref: None,
+        project_ref: None,
+        health: opensks_contracts::ProviderHealthSnapshot::unknown(),
+        concurrency: opensks_contracts::ProviderConcurrencyPolicy::default(),
+        created_at_ms: 10,
+        updated_at_ms: 10,
+        revision: 1,
+    };
+    repo.upsert_connection(&connection, None, 10)
+        .expect("save provider connection");
+
+    let statuses = provider_statuses_with_keychain_command(&root, Some(&command));
+    let openrouter = statuses
+        .iter()
+        .find(|status| status.definition.name == "OpenRouter")
+        .expect("openrouter status");
+    assert!(openrouter.configured);
+    assert_eq!(
+        openrouter.credential_source,
+        "provider_registry_keychain:provider-openrouter"
+    );
+    assert_eq!(openrouter.configured_value.as_deref(), Some(secret));
+
+    let registry_statuses = render_provider_statuses_json(&statuses);
+    assert!(
+        registry_statuses.contains("\"auth_posture\":\"configured_provider_registry_keychain\"")
+    );
+    assert!(
+        registry_statuses
+            .contains("\"credential_source\":\"provider_registry_keychain:provider-openrouter\"")
+    );
+    assert!(!registry_statuses.contains(secret));
+
+    let adapter_check = check_provider_adapter(
+        &root.join(OPEN_SKSDIR).join("providers"),
+        openrouter,
+        "https://openrouter.ai/api/v1/models",
+    );
+    assert!(adapter_check.configured);
+    assert!(!adapter_check.attempted);
+    assert_eq!(
+        adapter_check.blockers,
+        vec!["set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1".to_string()]
+    );
+    let adapter_json = render_provider_adapter_checks_json(&[adapter_check]);
+    assert!(
+        adapter_json
+            .contains("\"credential_source\":\"provider_registry_keychain:provider-openrouter\"")
+    );
+    assert!(!adapter_json.contains("configure_OPENROUTER_API_KEY_credential"));
+    assert!(!adapter_json.contains(secret));
 }
 
 #[test]
@@ -3750,7 +3857,8 @@ fn provider_keychain_miss_stays_unconfigured_when_env_missing() {
         env::remove_var(env_var);
     }
 
-    let status = provider_status_for_definition(test_provider_definition(env_var), Some(&command));
+    let status =
+        provider_status_for_definition(test_provider_definition(env_var), Some(&command), &[]);
 
     assert!(!status.configured);
     assert_eq!(status.credential_source, "none");

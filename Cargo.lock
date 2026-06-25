@@ -1190,6 +1190,7 @@ dependencies = [
 name = "opensks-daemon"
 version = "0.1.0"
 dependencies = [
+ "age",
  "opensks-adapter",
  "opensks-context",
  "opensks-contracts",
@@ -1202,6 +1203,8 @@ dependencies = [
  "opensks-provider",
  "opensks-scheduler",
  "opensks-stream",
+ "opensks-vault",
+ "security-framework",
  "serde_json",
  "thiserror 2.0.18",
 ]

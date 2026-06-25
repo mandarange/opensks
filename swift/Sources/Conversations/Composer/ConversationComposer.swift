@@ -27,7 +27,7 @@ struct ConversationComposer: View {
     }
 
     private var canSend: Bool {
-        !trimmedDraft.isEmpty && !store.isSending && providers.hasEligibleTextModel
+        !trimmedDraft.isEmpty && !store.isSending(conversationID: conversationID) && providers.hasEligibleTextModel
     }
 
     private var settings: ConversationThreadSettings {
@@ -131,7 +131,10 @@ struct ConversationComposer: View {
             toolPolicyMenu
             Spacer(minLength: 0)
         }
-        .disabled(store.isSavingThreadSettings || store.isSending)
+        .disabled(
+            store.isSavingThreadSettings(for: conversationID)
+                || store.isSending(conversationID: conversationID)
+        )
         .accessibilityIdentifier("conversation.composer.settings")
     }
 
@@ -360,7 +363,7 @@ struct ConversationComposer: View {
 
     private var sendHelp: String {
         if trimmedDraft.isEmpty { return "Enter a message before sending." }
-        if store.isSending { return "A send is already in flight." }
+        if store.isSending(conversationID: conversationID) { return "A send is already in flight." }
         if !providers.hasEligibleTextModel { return providerReadinessDetail }
         if staleContextCount > 0 { return "Attached context changed since capture." }
         return "Start a conversation turn."

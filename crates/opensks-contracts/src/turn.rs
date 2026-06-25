@@ -110,12 +110,13 @@ pub struct ConversationTurnStartRequest {
     pub client_turn_id: String,
     pub message: UserMessageInput,
     /// Client-observed durable thread settings revision. The daemon uses this
-    /// as a compare-and-snapshot guard before accepting a turn; the full
-    /// `settings` payload below is retained as a compatibility echo and is not
-    /// the runtime source of truth.
+    /// as a compare-and-snapshot guard before accepting a turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_settings_updated_at_ms: Option<u64>,
-    pub settings: ConversationTurnSettings,
+    /// Legacy compatibility echo from older clients. Runtime settings are
+    /// always snapshotted from durable thread settings instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<ConversationTurnSettings>,
     #[serde(default)]
     pub context: TurnContextSelection,
     pub idempotency_key: String,
@@ -132,6 +133,7 @@ pub struct ConversationTurnAccepted {
     pub user_message_id: String,
     pub assistant_message_id: String,
     pub stream_id: String,
+    pub settings_digest: String,
     pub state: RunProjectionState,
 }
 
@@ -242,7 +244,7 @@ mod tests {
                 attachment_refs: vec![],
             },
             thread_settings_updated_at_ms: Some(42),
-            settings: ConversationTurnSettings {
+            settings: Some(ConversationTurnSettings {
                 model: ModelSelection {
                     mode: ModelSelectionMode::Auto,
                     model_id: None,
@@ -260,7 +262,7 @@ mod tests {
                 cost_budget_usd: Some(1.5),
                 timeout_ms: Some(600_000),
                 image_model_id: None,
-            },
+            }),
             context: TurnContextSelection::default(),
             idempotency_key: "idem-1".to_string(),
         }
@@ -275,6 +277,23 @@ mod tests {
     }
 
     #[test]
+    fn turn_request_decodes_without_legacy_settings_echo() {
+        let json = r#"{
+            "schema":"opensks.conversation-turn-start-request.v1",
+            "request_id":"req-1",
+            "project_id":"proj-1",
+            "conversation_id":"conv-1",
+            "client_turn_id":"ct-1",
+            "message":{"text":"add a test","attachment_refs":[]},
+            "thread_settings_updated_at_ms":42,
+            "context":{"refs":[]},
+            "idempotency_key":"idem-1"
+        }"#;
+        let parsed: ConversationTurnStartRequest = serde_json::from_str(json).unwrap();
+        assert!(parsed.settings.is_none());
+    }
+
+    #[test]
     fn accepted_state_is_not_terminal() {
         let accepted = ConversationTurnAccepted {
             schema: CONVERSATION_TURN_ACCEPTED_SCHEMA.to_string(),
@@ -284,6 +303,7 @@ mod tests {
             user_message_id: "um-1".to_string(),
             assistant_message_id: "am-1".to_string(),
             stream_id: "stream-1".to_string(),
+            settings_digest: "sha256:v1:accepted-settings".to_string(),
             state: RunProjectionState::Queued,
         };
         assert!(!accepted.state.is_terminal());

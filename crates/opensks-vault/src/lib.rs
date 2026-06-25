@@ -23,6 +23,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use age::secrecy::ExposeSecret;
 use age::x25519::{Identity, Recipient};
 use opensks_contracts::{VaultEntry, VaultStatusResult, VaultSummary, VaultSummaryEntry};
 use opensks_conversation::ConversationRepository;
@@ -340,10 +341,9 @@ pub fn decrypt_bytes(ciphertext: &[u8], identities: &[Identity]) -> Result<Vec<u
     Ok(plaintext)
 }
 
-/// Load age X25519 identities from an identity file. Each non-comment,
-/// non-empty line that parses as an `AGE-SECRET-KEY-1...` identity is used.
-pub fn load_identities(identity_file: &Path) -> Result<Vec<Identity>> {
-    let contents = std::fs::read_to_string(identity_file)?;
+/// Parse age X25519 identities from text. Each non-comment, non-empty line that
+/// parses as an `AGE-SECRET-KEY-1...` identity is used.
+pub fn parse_identities(contents: &str) -> Result<Vec<Identity>> {
     let mut identities = Vec::new();
     for line in contents.lines() {
         let line = line.trim();
@@ -358,6 +358,43 @@ pub fn load_identities(identity_file: &Path) -> Result<Vec<Identity>> {
         return Err(VaultError::DecryptFailed);
     }
     Ok(identities)
+}
+
+/// Decrypt ciphertext with identity text from a secure store. The identity text
+/// is never written by this crate; callers own secret-store provenance.
+pub fn decrypt_bytes_with_identity_text(ciphertext: &[u8], identity_text: &str) -> Result<Vec<u8>> {
+    let identities = parse_identities(identity_text)?;
+    decrypt_bytes(ciphertext, &identities)
+}
+
+/// Encrypt plaintext with the public recipient derived from the first identity
+/// in secure-store text. This lets a workspace raw-prompt vault use one stored
+/// age identity for both producer-side encryption and supervisor-side decrypt.
+pub fn encrypt_bytes_with_identity_text(plaintext: &[u8], identity_text: &str) -> Result<Vec<u8>> {
+    let identities = parse_identities(identity_text)?;
+    let recipient = identities
+        .first()
+        .ok_or(VaultError::EncryptFailed)?
+        .to_public();
+    encrypt_bytes(plaintext, &recipient)
+}
+
+/// Generate a fresh age X25519 identity in the text format accepted by
+/// [`parse_identities`]. Callers must immediately place the returned secret text
+/// in a secure store and must never log or persist it elsewhere.
+pub fn generate_identity_text() -> String {
+    let identity = Identity::generate();
+    let secret = identity.to_string();
+    format!(
+        "# OpenSKS raw prompt vault identity\n{}\n",
+        secret.expose_secret()
+    )
+}
+
+/// Load age X25519 identities from an identity file.
+pub fn load_identities(identity_file: &Path) -> Result<Vec<Identity>> {
+    let contents = std::fs::read_to_string(identity_file)?;
+    parse_identities(&contents)
 }
 
 /// Decrypt a `.age` vault file with an identity file and recover the transcript.
@@ -864,6 +901,22 @@ mod tests {
         let ciphertext = encrypt_bytes(b"hello vault", &recipient).expect("encrypt");
         let plaintext = decrypt_bytes(&ciphertext, &[identity]).expect("decrypt");
         assert_eq!(plaintext, b"hello vault");
+    }
+
+    #[test]
+    fn identity_text_encrypt_decrypt_roundtrips() {
+        let identity = Identity::generate();
+        let secret = identity.to_string();
+        let identity_text = format!(
+            "# workspace raw prompt vault identity\n{}\n",
+            secret.expose_secret()
+        );
+        let ciphertext =
+            encrypt_bytes_with_identity_text(b"raw prompt bytes", &identity_text).expect("encrypt");
+        assert!(!String::from_utf8_lossy(&ciphertext).contains("raw prompt bytes"));
+        let plaintext =
+            decrypt_bytes_with_identity_text(&ciphertext, &identity_text).expect("decrypt");
+        assert_eq!(plaintext, b"raw prompt bytes");
     }
 
     /// Git-trackability policy (PR-042): a raw transcript path IS ignored while a

@@ -6,7 +6,7 @@ import SwiftUI
 
 struct TitleBarView: View {
     @EnvironmentObject private var state: AppState
-    @EnvironmentObject private var coordinator: AppCoordinator
+    @ObservedObject var providers: ProviderStore
 
     var body: some View {
         ZStack {
@@ -46,7 +46,7 @@ struct TitleBarView: View {
     }
 
     private var providerReadiness: some View {
-        let count = coordinator.providers.connections.count
+        let count = providers.connections.count
         return HStack(spacing: 6) {
             Image(systemName: "dot.radiowaves.left.and.right")
                 .font(.system(size: 11))
