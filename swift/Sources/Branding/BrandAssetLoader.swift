@@ -7,14 +7,33 @@
 import AppKit
 
 enum BrandAssetLoader {
+    private static let resourceBundleName = "OpenSKSStudio_OpenSKSStudio"
+
     /// The canonical OpenSKS logo, or `nil` if the bundled resource is missing.
     static func logoImage() -> NSImage? {
-        guard
-            let url = Bundle.module.url(forResource: "OpenSKSLogo", withExtension: "png"),
-            let image = NSImage(contentsOf: url)
-        else {
-            return nil
+        for bundle in candidateResourceBundles() {
+            if
+                let url = bundle.url(forResource: "OpenSKSLogo", withExtension: "png"),
+                let image = NSImage(contentsOf: url)
+            {
+                return image
+            }
         }
-        return image
+        return nil
+    }
+
+    private static func candidateResourceBundles() -> [Bundle] {
+        let bundleFileName = "\(resourceBundleName).bundle"
+        let packagedCandidates = [
+            Bundle.main.resourceURL?.appendingPathComponent(bundleFileName, isDirectory: true),
+            Bundle.main.executableURL?
+                .deletingLastPathComponent()
+                .appendingPathComponent(bundleFileName, isDirectory: true),
+        ]
+        let bundles = packagedCandidates.compactMap { url -> Bundle? in
+            guard let url else { return nil }
+            return Bundle(url: url)
+        }
+        return bundles.isEmpty ? [Bundle.module] : bundles
     }
 }

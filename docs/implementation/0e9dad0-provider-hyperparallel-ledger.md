@@ -1331,3 +1331,14 @@ Follow-up evidence: `cargo test provider_commands_write_zero_leak_registry_probe
 - migration: additive `app-data` field only; Swift decodes the field as optional so older app-data remains compatible.
 - removal/deletion: none.
 - final evidence: `opensks-cli app-data` now exposes release status `not_verified`, blockers `signed_app_missing` and `notarization_missing`, and two `release_signing` remediation actions to Swift. Evidence renders those release blockers/actions from decoded `AppData` without fabricating release completion.
+
+### Cross-cutting - macOS App Resource Bundle Signing Hygiene
+
+- status: Partially verified; LaunchServices still blocked locally
+- owner file/module: `src/lib.rs`, `src/tests.rs`, `swift/Sources/Branding/BrandAssetLoader.swift`
+- current evidence: rebuilding `.opensks/macos/OpenSKS.app` for Computer Use validation exposed that the generated SwiftPM resource bundle was copied into the app root and `Contents/MacOS`, which made `codesign --force --deep --sign -` fail with unsealed root contents or an invalid nested resource bundle.
+- target change: load brand resources from `Contents/Resources/OpenSKSStudio_OpenSKSStudio.bundle` before falling back to `Bundle.module`, copy SwiftPM resource bundles only into `Contents/Resources`, remove stale app-root/`Contents/MacOS` resource bundles during regeneration, and write `Contents/PkgInfo` for stricter LaunchServices scanners.
+- tests: `cargo test -p opensks empty_args_creates_native_app_bundle --locked -- --test-threads=1`, `cargo clippy -p opensks --all-targets -- -D warnings`, `cargo fmt --all --check`, and `swift test --disable-sandbox --package-path swift --scratch-path /tmp/opensks-swift-build-release-app-data --filter OpenSKSStudioTests.BrandingTests` passed. Rebuilt `.opensks/macos/OpenSKS.app` now has resource bundles only under `Contents/Resources`; `codesign --force --deep --sign - .opensks/macos/OpenSKS.app` succeeds and `codesign --verify --deep --strict --verbose=2` reports valid on disk.
+- migration: generated app bundle layout only; no user data migration.
+- removal/deletion: stale generated resource-bundle copies under the app root and `Contents/MacOS` are removed on regeneration.
+- final evidence: local code-signing structure is healthier, but `open .opensks/macos/OpenSKS.app` and `lsregister -f` still fail locally with LaunchServices errors `kLSNoExecutableErr` / `-10822`, and `spctl` still reports an internal Code Signing subsystem error. Computer Use verification of the newly rebuilt app window remains blocked by that packaging/OS registration issue.

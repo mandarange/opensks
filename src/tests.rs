@@ -854,6 +854,10 @@ fn empty_args_creates_native_app_bundle() {
     assert!(output.stdout.contains("OpenSKS.app"));
     let bundle = native_app_bundle_path(&root);
     assert!(bundle.join("Contents").join("Info.plist").exists());
+    assert_eq!(
+        fs::read_to_string(bundle.join("Contents").join("PkgInfo")).expect("read PkgInfo"),
+        "APPL????"
+    );
     assert!(
         bundle
             .join("Contents")

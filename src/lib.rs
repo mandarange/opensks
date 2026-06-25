@@ -13484,6 +13484,7 @@ fn create_native_app_bundle(cwd: &Path) -> Result<PathBuf, OpenSksError> {
     create_macos_icon_assets(&resources_dir)?;
 
     write_text_atomic(&contents.join("Info.plist"), &render_macos_app_info_plist())?;
+    write_text_atomic(&contents.join("PkgInfo"), "APPL????")?;
     Ok(bundle)
 }
 
@@ -13607,23 +13608,13 @@ fn compile_swift_app(cwd: &Path, output: &Path) -> Result<(), OpenSksError> {
         )));
     }
     fs::copy(&built_executable, output)?;
-    // SPM targets that declare `resources:` generate `Bundle.module`, which at
-    // runtime looks for `<Product>_<Target>.bundle` next to the executable and in
-    // the app's Resources. A hand-assembled `.app` must therefore SHIP that
-    // bundle, or the first `Bundle.module` access (e.g. the logo) traps with a
-    // fatal error — which crashes the app only when launched via Finder/`open`
-    // (a direct terminal run happens to resolve it from the build dir). Copy every
-    // resource bundle the build produced into both `Contents/MacOS` (beside the
-    // binary) and `Contents/Resources`.
+    // SPM targets that declare `resources:` generate a companion resource bundle.
+    // Ship it under `Contents/Resources`; app-root payloads break macOS code
+    // signing as unsealed contents, and `Contents/MacOS` resource bundles are
+    // treated as invalid nested code by `codesign --deep`.
     if let Some(macos_dir) = output.parent() {
         let contents_dir = macos_dir.parent();
         let resources_dir = contents_dir.map(|c| c.join("Resources"));
-        // The SPM-generated `Bundle.module` accessor resolves the resource bundle
-        // from `Bundle.main.bundleURL` (the `.app` ROOT for a packaged app) and
-        // from the build scratch dir. The scratch dir is deleted below, so the
-        // ONLY stable location it will find is the `.app` root — copy there first,
-        // and additionally into Contents/MacOS and Contents/Resources for
-        // robustness across bundle layouts.
         let app_root = contents_dir.and_then(|c| c.parent());
         for entry in fs::read_dir(&bin_dir)? {
             let entry = entry?;
@@ -13632,10 +13623,11 @@ fn compile_swift_app(cwd: &Path, output: &Path) -> Result<(), OpenSksError> {
                 continue;
             }
             let name = entry.file_name();
-            let mut targets = vec![macos_dir.join(&name)];
             if let Some(root) = app_root {
-                targets.push(root.join(&name));
+                let _ = fs::remove_dir_all(root.join(&name));
             }
+            let _ = fs::remove_dir_all(macos_dir.join(&name));
+            let mut targets = Vec::new();
             if let Some(ref res) = resources_dir {
                 targets.push(res.join(&name));
             }
