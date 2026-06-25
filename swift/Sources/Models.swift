@@ -14,6 +14,7 @@ struct AppData: Codable, Sendable {
     let missionsDir: String
     let cliPath: String
     let acceptance: Acceptance
+    let release: ReleaseProofSummary?
     let gui: Gui
     let workerLanes: [WorkerLane]
 }
@@ -26,6 +27,45 @@ struct Acceptance: Codable, Sendable {
     let goalComplete: Bool?
 
     var ratio: Double { total == 0 ? 0 : min(1, Double(passed) / Double(total)) }
+}
+
+struct ReleaseProofSummary: Codable, Sendable {
+    let status: String
+    let blockers: [ReleaseProofBlocker]
+    let remediationActions: [ReleaseRemediationAction]
+
+    var hasEvidence: Bool {
+        status != "not_audited" || !blockers.isEmpty || !remediationActions.isEmpty
+    }
+
+    var displayStatus: String {
+        status
+            .split(separator: "_")
+            .map { part in part.prefix(1).uppercased() + String(part.dropFirst()) }
+            .joined(separator: " ")
+    }
+
+    var pillKind: StatusPill.Kind {
+        if status == "verified" || status == "passed" { return .success }
+        if status == "invalid" || status == "failed" { return .danger }
+        if !blockers.isEmpty || status == "not_verified" { return .warning }
+        return .neutral
+    }
+}
+
+struct ReleaseProofBlocker: Codable, Sendable, Identifiable {
+    let code: String
+    let message: String
+
+    var id: String { code }
+}
+
+struct ReleaseRemediationAction: Codable, Sendable, Identifiable {
+    let blocker: String
+    let action: String
+    let scope: String
+
+    var id: String { "\(scope):\(blocker):\(action)" }
 }
 
 struct Gui: Codable, Sendable {

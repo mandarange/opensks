@@ -113,6 +113,63 @@ final class ReleaseReadinessTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testEvidenceWorkspaceRendersReleaseProofActions() throws {
+        let state = AppState()
+        state.data = AppData(
+            schema: "opensks.app-data.v1",
+            workspace: "/tmp/opensks",
+            workspaceLabel: "~/opensks",
+            appBundle: "/tmp/opensks/.opensks/macos/OpenSKS.app",
+            artifactDir: "/tmp/opensks/.opensks/app",
+            dashboardHtml: "/tmp/opensks/.opensks/app/dashboard.html",
+            missionsDir: "/tmp/opensks/.opensks/missions",
+            cliPath: "/tmp/opensks/target/debug/opensks",
+            acceptance: Acceptance(total: 23, passed: 22, partial: 1, failed: 0, goalComplete: false),
+            release: ReleaseProofSummary(
+                status: "not_verified",
+                blockers: [
+                    ReleaseProofBlocker(
+                        code: "signed_app_missing",
+                        message: "release proof requires production app signing evidence"
+                    )
+                ],
+                remediationActions: [
+                    ReleaseRemediationAction(
+                        blocker: "signed_app_missing",
+                        action: "Build and sign the macOS app, then rerun release proof.",
+                        scope: "release_signing"
+                    )
+                ]
+            ),
+            gui: Gui(
+                prdTotal: 1,
+                prdImplemented: 1,
+                prdArtifactMvp: 1,
+                prdPlanned: 0,
+                prdMissingLive: 0,
+                qaStatus: "passed",
+                securityStatus: "passed",
+                providerConfiguredCount: 1,
+                voxelCount: 424,
+                missionCount: 14,
+                browserSessions: 0,
+                computerSessions: 1,
+                appSessions: 1,
+                workerLaneMissions: 8,
+                workerLaneCount: 8
+            ),
+            workerLanes: []
+        )
+
+        let view = EvidenceWorkspaceView().environmentObject(state)
+
+        XCTAssertNotNil(
+            ImageRenderer(content: view).nsImage,
+            "release proof blocker/action card must render from app-data"
+        )
+    }
+
     // MARK: - Settings workspace (PR-045)
 
     /// The Settings route renders the real SettingsWorkspaceView (with the

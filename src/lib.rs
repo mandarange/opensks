@@ -335,6 +335,7 @@ struct NativeAppDashboard {
     dashboard_html: PathBuf,
     cli_path: PathBuf,
     acceptance: NativeAcceptanceStatus,
+    release: NativeReleaseStatus,
     gui: GuiSnapshot,
 }
 
@@ -345,6 +346,26 @@ struct NativeAcceptanceStatus {
     partial: usize,
     failed: usize,
     goal_complete: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct NativeReleaseStatus {
+    status: String,
+    blockers: Vec<NativeReleaseBlocker>,
+    remediation_actions: Vec<NativeReleaseRemediationAction>,
+}
+
+#[derive(Debug, Clone)]
+struct NativeReleaseBlocker {
+    code: String,
+    message: String,
+}
+
+#[derive(Debug, Clone)]
+struct NativeReleaseRemediationAction {
+    blocker: String,
+    action: String,
+    scope: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1717,6 +1738,7 @@ fn render_app_data_json(d: &NativeAppDashboard) -> String {
         Some(false) => "false",
         None => "null",
     };
+    let release = render_native_release_json(&d.release);
     let lanes = render_worker_lane_items_json(&g.worker_lanes);
     format!(
         concat!(
@@ -1731,6 +1753,7 @@ fn render_app_data_json(d: &NativeAppDashboard) -> String {
             "  \"cli_path\": {cli_path},\n",
             "  \"acceptance\": {{\"total\": {total}, \"passed\": {passed}, ",
             "\"partial\": {partial}, \"failed\": {failed}, \"goal_complete\": {goal_complete}}},\n",
+            "  \"release\": {release},\n",
             "  \"gui\": {{\"prd_total\": {prd_total}, \"prd_implemented\": {prd_implemented}, ",
             "\"prd_artifact_mvp\": {prd_artifact_mvp}, \"prd_planned\": {prd_planned}, ",
             "\"prd_missing_live\": {prd_missing_live}, \"qa_status\": {qa_status}, ",
@@ -1761,6 +1784,7 @@ fn render_app_data_json(d: &NativeAppDashboard) -> String {
         partial = a.partial,
         failed = a.failed,
         goal_complete = goal_complete,
+        release = release,
         prd_total = g.prd_total,
         prd_implemented = g.prd_implemented,
         prd_artifact_mvp = g.prd_artifact_mvp,
@@ -1778,6 +1802,50 @@ fn render_app_data_json(d: &NativeAppDashboard) -> String {
         worker_lane_count = g.worker_lane_count,
         lanes = lanes,
     )
+}
+
+fn render_native_release_json(release: &NativeReleaseStatus) -> String {
+    format!(
+        concat!(
+            "{{\"status\": {status}, ",
+            "\"blockers\": {blockers}, ",
+            "\"remediation_actions\": {actions}}}"
+        ),
+        status = json_string(&release.status),
+        blockers = render_native_release_blockers_json(&release.blockers),
+        actions = render_native_release_actions_json(&release.remediation_actions),
+    )
+}
+
+fn render_native_release_blockers_json(blockers: &[NativeReleaseBlocker]) -> String {
+    let items = blockers
+        .iter()
+        .map(|blocker| {
+            format!(
+                "{{\"code\": {code}, \"message\": {message}}}",
+                code = json_string(&blocker.code),
+                message = json_string(&blocker.message)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{items}]")
+}
+
+fn render_native_release_actions_json(actions: &[NativeReleaseRemediationAction]) -> String {
+    let items = actions
+        .iter()
+        .map(|action| {
+            format!(
+                "{{\"blocker\": {blocker}, \"action\": {action_text}, \"scope\": {scope}}}",
+                blocker = json_string(&action.blocker),
+                action_text = json_string(&action.action),
+                scope = json_string(&action.scope)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{items}]")
 }
 
 fn run_scheduler_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
@@ -13839,8 +13907,86 @@ fn native_app_dashboard(workspace: &Path) -> Result<NativeAppDashboard, OpenSksE
             failed: extract_json_number_field(&acceptance, "failed").unwrap_or(0),
             goal_complete,
         },
+        release: collect_native_release_status(workspace),
         gui: collect_gui_snapshot(workspace),
     })
+}
+
+fn collect_native_release_status(workspace: &Path) -> NativeReleaseStatus {
+    let proof_path = workspace
+        .join(OPEN_SKSDIR)
+        .join("release")
+        .join("release-proof.json");
+    let raw = fs::read_to_string(proof_path).unwrap_or_default();
+    if raw.trim().is_empty() {
+        return NativeReleaseStatus {
+            status: "not_audited".to_string(),
+            blockers: Vec::new(),
+            remediation_actions: Vec::new(),
+        };
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return NativeReleaseStatus {
+            status: "invalid".to_string(),
+            blockers: Vec::new(),
+            remediation_actions: Vec::new(),
+        };
+    };
+    let status = value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("not_audited")
+        .to_string();
+    let blockers = value
+        .get("blockers")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let code = item.get("code")?.as_str()?.to_string();
+                    let message = item
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    Some(NativeReleaseBlocker { code, message })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let remediation_actions = value
+        .get("remediation_actions")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let blocker = item.get("blocker")?.as_str()?.to_string();
+                    let action = item
+                        .get("action")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let scope = item
+                        .get("scope")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("release")
+                        .to_string();
+                    Some(NativeReleaseRemediationAction {
+                        blocker,
+                        action,
+                        scope,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    NativeReleaseStatus {
+        status,
+        blockers,
+        remediation_actions,
+    }
 }
 
 fn compact_display_path(path: &Path) -> String {

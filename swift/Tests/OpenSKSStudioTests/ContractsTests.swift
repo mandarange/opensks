@@ -825,6 +825,74 @@ final class ContractsTests: XCTestCase {
         XCTAssertFalse(HonestText.statusLine(acceptance).lowercased().contains("complete"))
     }
 
+    func testAppDataDecodesReleaseProofRemediationActions() throws {
+        let json = Data("""
+        {
+          "schema": "opensks.app-data.v1",
+          "workspace": "/tmp/opensks",
+          "workspace_label": "~/opensks",
+          "app_bundle": "/tmp/opensks/.opensks/macos/OpenSKS.app",
+          "artifact_dir": "/tmp/opensks/.opensks/app",
+          "dashboard_html": "/tmp/opensks/.opensks/app/dashboard.html",
+          "missions_dir": "/tmp/opensks/.opensks/missions",
+          "cli_path": "/tmp/opensks/opensks-cli",
+          "acceptance": {
+            "total": 23,
+            "passed": 22,
+            "partial": 1,
+            "failed": 0,
+            "goal_complete": false
+          },
+          "release": {
+            "status": "not_verified",
+            "blockers": [
+              {
+                "code": "signed_app_missing",
+                "message": "release proof requires production app signing evidence"
+              }
+            ],
+            "remediation_actions": [
+              {
+                "blocker": "signed_app_missing",
+                "action": "Build and sign the macOS app with a production Developer ID Application identity, then rerun release proof.",
+                "scope": "release_signing"
+              }
+            ]
+          },
+          "gui": {
+            "prd_total": 1,
+            "prd_implemented": 1,
+            "prd_artifact_mvp": 1,
+            "prd_planned": 0,
+            "prd_missing_live": 0,
+            "qa_status": "passed",
+            "security_status": "passed",
+            "provider_configured_count": 1,
+            "voxel_count": 424,
+            "mission_count": 14,
+            "browser_sessions": 0,
+            "computer_sessions": 1,
+            "app_sessions": 1,
+            "worker_lane_missions": 8,
+            "worker_lane_count": 8
+          },
+          "worker_lanes": []
+        }
+        """.utf8)
+
+        let data = try JSONDecoder.opensks.decode(AppData.self, from: json)
+
+        XCTAssertEqual(data.release?.status, "not_verified")
+        XCTAssertEqual(data.release?.displayStatus, "Not Verified")
+        XCTAssertEqual(data.release?.blockers.first?.code, "signed_app_missing")
+        XCTAssertEqual(data.release?.remediationActions.first?.scope, "release_signing")
+        if case .warning? = data.release?.pillKind {
+            // Expected release proof state for an unsigned/notarization-missing build.
+        } else {
+            XCTFail("release proof blockers should surface as warning posture")
+        }
+    }
+
     @MainActor
     func testExecutionStoreRebuildsRunAndQueueFromEventStream() throws {
         let data = """

@@ -43,6 +43,9 @@ struct EvidenceWorkspaceView: View {
                 } else {
                     acceptanceCard(data.acceptance)
                 }
+                if let release = data.release, release.hasEvidence {
+                    releaseProofCard(release)
+                }
                 postureCard(data.gui)
                 Text("Evidence reflects only what acceptance has verified. A result is never shown as passed unless the audit reported it.")
                     .font(Theme.ui(11))
@@ -156,6 +159,98 @@ struct EvidenceWorkspaceView: View {
 
     private var tallyDivider: some View {
         Rectangle().fill(Theme.stroke).frame(width: 1, height: 34).padding(.horizontal, 18)
+    }
+
+    // MARK: - Release proof
+
+    private func releaseProofCard(_ release: ReleaseProofSummary) -> some View {
+        card {
+            VStack(alignment: .leading, spacing: Theme.s12) {
+                HStack(spacing: Theme.s8) {
+                    Text("Release proof")
+                        .font(Theme.ui(13, .semibold))
+                        .foregroundStyle(Theme.text)
+                    Spacer()
+                    StatusPill(kind: release.pillKind, label: release.displayStatus)
+                }
+                if !release.blockers.isEmpty {
+                    VStack(alignment: .leading, spacing: Theme.s8) {
+                        Text("Blockers")
+                            .font(Theme.ui(11.5, .semibold))
+                            .foregroundStyle(Theme.textSoft)
+                        ForEach(release.blockers) { blocker in
+                            releaseBlockerRow(blocker)
+                        }
+                    }
+                }
+                if !release.remediationActions.isEmpty {
+                    VStack(alignment: .leading, spacing: Theme.s8) {
+                        Text("Remediation actions")
+                            .font(Theme.ui(11.5, .semibold))
+                            .foregroundStyle(Theme.textSoft)
+                        ForEach(release.remediationActions) { action in
+                            releaseActionRow(action)
+                        }
+                    }
+                }
+            }
+        }
+        .accessibilityIdentifier("evidence.release.card")
+        .accessibilityElement(children: .contain)
+    }
+
+    private func releaseBlockerRow(_ blocker: ReleaseProofBlocker) -> some View {
+        HStack(alignment: .top, spacing: Theme.s10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.partial)
+                .frame(width: 16, height: 18)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(blocker.code)
+                    .font(Theme.mono(11.5, .medium))
+                    .foregroundStyle(Theme.text)
+                    .textSelection(.enabled)
+                Text(blocker.message)
+                    .font(Theme.ui(12))
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(blocker.code): \(blocker.message)")
+    }
+
+    private func releaseActionRow(_ action: ReleaseRemediationAction) -> some View {
+        HStack(alignment: .top, spacing: Theme.s10) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 16, height: 18)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: Theme.s8) {
+                    Text(action.blocker)
+                        .font(Theme.mono(11.5, .medium))
+                        .foregroundStyle(Theme.text)
+                        .textSelection(.enabled)
+                    Text(action.scope)
+                        .font(Theme.ui(10.5, .medium))
+                        .foregroundStyle(Theme.muted)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Theme.input))
+                }
+                Text(action.action)
+                    .font(Theme.ui(12))
+                    .foregroundStyle(Theme.textSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(action.blocker): \(action.action)")
     }
 
     // MARK: - Review posture

@@ -2656,6 +2656,55 @@ fn app_data_prefers_current_security_artifact_over_legacy_qa_copy() {
 }
 
 #[test]
+fn app_data_exposes_release_proof_remediation_actions() {
+    let root = temp_workspace("app-data-release-proof-actions");
+    let open = root.join(OPEN_SKSDIR);
+    fs::create_dir_all(open.join("release")).expect("release dir");
+    fs::write(
+        open.join("release/release-proof.json"),
+        r#"{
+          "schema": "opensks.release-proof.v1",
+          "status": "not_verified",
+          "blockers": [
+            {
+              "code": "signed_app_missing",
+              "message": "release proof requires production app signing evidence"
+            }
+          ],
+          "remediation_actions": [
+            {
+              "blocker": "signed_app_missing",
+              "action": "Build and sign the macOS app with a production Developer ID Application identity, then rerun release proof.",
+              "scope": "release_signing"
+            }
+          ]
+        }"#,
+    )
+    .expect("release proof");
+
+    let output = run_cli(
+        vec!["app-data".to_string(), root.display().to_string()],
+        &root,
+    )
+    .expect("app data");
+    let json: serde_json::Value =
+        serde_json::from_str(&output.stdout).expect("app-data json should parse");
+
+    assert_eq!(json["release"]["status"], "not_verified");
+    assert_eq!(json["release"]["blockers"][0]["code"], "signed_app_missing");
+    assert_eq!(
+        json["release"]["remediation_actions"][0]["scope"],
+        "release_signing"
+    );
+    assert!(
+        output
+            .stdout
+            .contains("production Developer ID Application identity"),
+        "app-data should carry the release remediation action"
+    );
+}
+
+#[test]
 fn worker_runtime_writes_lease_recovery_and_routing_artifacts() {
     let root = temp_workspace("worker-runtime");
     let output = run_cli(["worker", "runtime", "recover stale worker lease"], &root)
