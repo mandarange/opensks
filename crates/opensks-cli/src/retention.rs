@@ -31,6 +31,10 @@ pub(crate) const RELEASE_PROOF_REQUIRED_ARTIFACTS: &[(&str, &str)] = &[
         "engine_request_schema",
         "schemas/engine-request.schema.json",
     ),
+    (
+        "provider_adapter_check_schema",
+        "schemas/provider-adapter-check.schema.json",
+    ),
     ("release_proof_schema", "schemas/release-proof.schema.json"),
     ("cargo_lock", "Cargo.lock"),
 ];
