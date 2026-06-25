@@ -105,6 +105,7 @@ final class ProviderStore: ObservableObject {
     @discardableResult
     func connect(_ draft: ProviderDraft, credential: SecureCredential) async throws -> String {
         syncState = .saving
+        let draft = normalizedDraft(draft)
         guard endpointAllowed(draft.endpoint) else {
             syncState = .failed(ProviderStoreError.invalidEndpoint.localizedDescription)
             throw ProviderStoreError.invalidEndpoint
@@ -322,7 +323,7 @@ final class ProviderStore: ObservableObject {
 
     private func seededLocalModels(providerID: String, kind: ProviderKind) -> [ProviderModelViewModel] {
         switch kind {
-        case .openRouter, .openAI, .openAICompatible, .localOpenAICompatible:
+        case .openRouter, .openAI, .codexLB, .openAICompatible, .localOpenAICompatible:
             return [
                 ProviderModelViewModel(
                     id: "\(providerID)/auto-code",
@@ -421,6 +422,12 @@ final class ProviderStore: ObservableObject {
 
     private func currentTimeMillis() -> UInt64 {
         UInt64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    private func normalizedDraft(_ draft: ProviderDraft) -> ProviderDraft {
+        var normalized = draft
+        normalized.endpoint = draft.resolvedEndpoint
+        return normalized
     }
 }
 

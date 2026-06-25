@@ -506,6 +506,65 @@ mod tests {
     }
 
     #[test]
+    fn registry_upsert_accepts_codex_lb_connection() {
+        let root = temp_workspace("opensks-cli-provider-registry-codex-lb");
+        let workspace = root.to_string_lossy().into_owned();
+        let connection = serde_json::json!({
+            "schema": "opensks.provider-connection.v1",
+            "id": "provider-codex-lb",
+            "kind": "codex_lb",
+            "display_name": "codex-lb",
+            "enabled": true,
+            "endpoint": {
+                "base_url": "https://codex.hyper-lab.xyz/backend-api/codex",
+                "allow_insecure_http": false
+            },
+            "auth": {
+                "schema": "opensks.secret-ref.v1",
+                "store": "macos_keychain",
+                "service": "ai.opensks.provider.codex_lb",
+                "account": "provider-codex-lb",
+                "version": 7
+            },
+            "health": {"state": "unknown", "circuit_open": false, "reason_code": "not_probed"},
+            "concurrency": {"max_concurrent_requests": 16},
+            "created_at_ms": 10,
+            "updated_at_ms": 10,
+            "revision": 1
+        })
+        .to_string();
+
+        let saved = run_provider_registry_command(
+            &[
+                "registry-upsert".into(),
+                "--workspace".into(),
+                workspace.clone(),
+                "--connection".into(),
+                connection,
+            ],
+            &root,
+        )
+        .expect("save codex-lb provider");
+        let saved_json: serde_json::Value = serde_json::from_str(&saved.stdout).expect("json");
+        assert_eq!(saved_json["receipt"]["provider_id"], "provider-codex-lb");
+
+        let listed = run_provider_registry_command(
+            &["registry-list".into(), "--workspace".into(), workspace],
+            &root,
+        )
+        .expect("list");
+        let listed_json: serde_json::Value = serde_json::from_str(&listed.stdout).expect("json");
+        assert_eq!(listed_json["providers"][0]["kind"], "codex_lb");
+        assert_eq!(
+            listed_json["providers"][0]["auth"]["schema"],
+            "opensks.secret-ref.v1"
+        );
+        assert!(!listed.stdout.contains("sk-"));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     #[cfg(unix)]
     fn registry_probe_resolves_keychain_ref_and_syncs_models_secretlessly() {
         let root = temp_workspace("opensks-cli-provider-probe");

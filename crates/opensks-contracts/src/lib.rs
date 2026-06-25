@@ -804,6 +804,7 @@ impl SecretRef {
 pub enum ProviderKind {
     OpenRouter,
     OpenAi,
+    CodexLb,
     OpenAiCompatible,
     AnthropicCompatible,
     GoogleCompatible,
@@ -4160,6 +4161,13 @@ mod tests {
 
     #[test]
     fn provider_connection_and_receipts_are_secretless() {
+        let codex_lb_kind = serde_json::to_string(&ProviderKind::CodexLb)
+            .expect("serialize codex-lb provider kind");
+        assert_eq!(codex_lb_kind, "\"codex_lb\"");
+        let decoded_codex_lb: ProviderKind =
+            serde_json::from_str("\"codex_lb\"").expect("decode codex-lb provider kind");
+        assert_eq!(decoded_codex_lb, ProviderKind::CodexLb);
+
         let secret_ref =
             SecretRef::macos_keychain("ai.opensks.provider.openrouter", "provider-1", 3);
         let connection = ProviderConnection {

@@ -2,7 +2,7 @@ import SwiftUI
 
 struct SecureCredentialField: View {
     @Binding var credential: String
-    var title = "API key"
+    var title = "provider-api-key-example"
     var footer = "Stored in Keychain. The provider registry only keeps a secret reference."
 
     var body: some View {

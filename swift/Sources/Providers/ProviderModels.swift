@@ -3,6 +3,7 @@ import Foundation
 enum ProviderKind: String, CaseIterable, Codable, Identifiable, Sendable {
     case openRouter = "open_router"
     case openAI = "open_ai"
+    case codexLB = "codex_lb"
     case openAICompatible = "open_ai_compatible"
     case localOpenAICompatible = "local_open_ai_compatible"
     case anthropicCompatible = "anthropic_compatible"
@@ -15,6 +16,7 @@ enum ProviderKind: String, CaseIterable, Codable, Identifiable, Sendable {
         switch self {
         case .openRouter: return "OpenRouter"
         case .openAI: return "OpenAI"
+        case .codexLB: return "codex-lb"
         case .openAICompatible: return "OpenAI compatible"
         case .localOpenAICompatible: return "Local OpenAI compatible"
         case .anthropicCompatible: return "Anthropic compatible"
@@ -27,10 +29,27 @@ enum ProviderKind: String, CaseIterable, Codable, Identifiable, Sendable {
         switch self {
         case .openRouter: return "https://openrouter.ai/api/v1"
         case .openAI: return "https://api.openai.com/v1"
-        case .openAICompatible, .custom: return ""
+        case .codexLB, .openAICompatible, .custom: return ""
         case .localOpenAICompatible: return "http://127.0.0.1:11434/v1"
         case .anthropicCompatible, .googleCompatible: return ""
         }
+    }
+
+    func codexLBEndpoint(for domain: String) -> String {
+        let trimmed = domain.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let lowercased = trimmed.lowercased()
+        if lowercased.hasPrefix("http://") || lowercased.hasPrefix("https://") {
+            let base = trimmed.hasSuffix("/") ? String(trimmed.dropLast()) : trimmed
+            if base.lowercased().hasSuffix("/backend-api/codex") {
+                return base
+            }
+            return "\(base)/backend-api/codex"
+        }
+        let scheme = lowercased.hasPrefix("localhost") || lowercased.hasPrefix("127.0.0.1")
+            ? "http"
+            : "https"
+        return "\(scheme)://\(trimmed)/backend-api/codex"
     }
 }
 
@@ -74,10 +93,34 @@ enum ProviderModelCapability: String, CaseIterable, Identifiable, Sendable {
 }
 
 struct ProviderSecretRef: Codable, Equatable, Sendable {
+    var schema: String
     var store: String
     var service: String
     var account: String
     var version: UInt64
+
+    init(
+        schema: String = "opensks.secret-ref.v1",
+        store: String,
+        service: String,
+        account: String,
+        version: UInt64
+    ) {
+        self.schema = schema
+        self.store = store
+        self.service = service
+        self.account = account
+        self.version = version
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try container.decodeIfPresent(String.self, forKey: .schema) ?? "opensks.secret-ref.v1"
+        store = try container.decode(String.self, forKey: .store)
+        service = try container.decode(String.self, forKey: .service)
+        account = try container.decode(String.self, forKey: .account)
+        version = try container.decode(UInt64.self, forKey: .version)
+    }
 }
 
 struct ProviderConnectionViewModel: Identifiable, Equatable, Sendable {
@@ -155,10 +198,20 @@ struct ProviderDraft: Equatable, Sendable {
     var kind: ProviderKind = .openRouter
     var displayName = "OpenRouter"
     var endpoint = ProviderKind.openRouter.defaultEndpoint
+    var codexLbDomain = ""
     var organizationRef = ""
     var projectRef = ""
     var enabled = true
     var maxConcurrentRequests: Int = 2
+
+    var resolvedEndpoint: String {
+        switch kind {
+        case .codexLB:
+            return kind.codexLBEndpoint(for: codexLbDomain)
+        default:
+            return endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
 }
 
 struct SecureCredential: Equatable, Sendable {

@@ -44,7 +44,16 @@ struct ProviderConnectionWizard: View {
             }
             .onChange(of: draft.kind) { kind in
                 draft.displayName = kind.displayLabel
-                draft.endpoint = kind.defaultEndpoint
+                switch kind {
+                case .codexLB:
+                    draft.endpoint = kind.codexLBEndpoint(for: draft.codexLbDomain)
+                default:
+                    draft.endpoint = kind.defaultEndpoint
+                }
+            }
+            .onChange(of: draft.codexLbDomain) { _ in
+                guard draft.kind == .codexLB else { return }
+                draft.endpoint = draft.resolvedEndpoint
             }
             .accessibilityIdentifier("providers.wizard.kind")
 
@@ -52,17 +61,30 @@ struct ProviderConnectionWizard: View {
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("providers.wizard.name")
 
-            TextField("Endpoint", text: $draft.endpoint)
-                .textFieldStyle(.roundedBorder)
-                .accessibilityIdentifier("providers.wizard.endpoint")
+            if draft.kind == .codexLB {
+                TextField("codex-lb.example.com", text: $draft.codexLbDomain)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("providers.wizard.domain")
+
+                Text(draft.resolvedEndpoint.isEmpty ? "backend-api/codex" : draft.resolvedEndpoint)
+                    .font(Theme.ui(11))
+                    .foregroundStyle(Theme.muted)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .accessibilityIdentifier("providers.wizard.endpoint.preview")
+            } else {
+                TextField(endpointPlaceholder, text: $draft.endpoint)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("providers.wizard.endpoint")
+            }
 
             SecureCredentialField(credential: $credential)
 
             HStack {
-                TextField("Organization", text: $draft.organizationRef)
+                TextField("org_example", text: $draft.organizationRef)
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("providers.wizard.organization")
-                TextField("Project", text: $draft.projectRef)
+                TextField("proj_example", text: $draft.projectRef)
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("providers.wizard.project")
             }
@@ -121,14 +143,36 @@ struct ProviderConnectionWizard: View {
 
     private var canSave: Bool {
         !draft.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !draft.endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !draft.resolvedEndpoint.isEmpty
             && !credential.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var endpointPlaceholder: String {
+        switch draft.kind {
+        case .openAICompatible, .custom:
+            return "https://api.example.com/v1"
+        case .localOpenAICompatible:
+            return "http://127.0.0.1:11434/v1"
+        case .anthropicCompatible:
+            return "https://api.anthropic.com/v1"
+        case .googleCompatible:
+            return "https://generativelanguage.googleapis.com/v1beta"
+        default:
+            return "https://api.example.com/v1"
+        }
+    }
+
+    private func preparedDraft() -> ProviderDraft {
+        var draft = draft
+        draft.endpoint = draft.resolvedEndpoint
+        return draft
     }
 
     private func save() async {
         do {
             _ = try await flightGuard.run {
                 if savedProviderID == nil {
+                    let draft = preparedDraft()
                     savedProviderID = try await store.connect(
                         draft,
                         credential: SecureCredential(value: credential)
@@ -150,6 +194,7 @@ struct ProviderConnectionWizard: View {
                 if let savedProviderID {
                     providerID = savedProviderID
                 } else {
+                    let draft = preparedDraft()
                     providerID = try await store.connect(
                         draft,
                         credential: SecureCredential(value: credential)

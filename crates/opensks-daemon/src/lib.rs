@@ -7089,6 +7089,7 @@ fn supports_openai_compatible_dispatch(kind: opensks_contracts::ProviderKind) ->
         kind,
         opensks_contracts::ProviderKind::OpenRouter
             | opensks_contracts::ProviderKind::OpenAi
+            | opensks_contracts::ProviderKind::CodexLb
             | opensks_contracts::ProviderKind::OpenAiCompatible
             | opensks_contracts::ProviderKind::LocalOpenAiCompatible
     )

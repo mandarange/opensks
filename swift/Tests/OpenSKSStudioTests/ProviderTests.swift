@@ -266,8 +266,11 @@ final class ProviderTests: XCTestCase {
         )
 
         let saved = try XCTUnwrap(service.upsertedConnection)
+        XCTAssertEqual(saved.auth.schema, "opensks.secret-ref.v1")
         XCTAssertEqual(saved.auth.store, "macos_keychain")
         XCTAssertTrue(secrets.contains(service: saved.auth.service, account: saved.auth.account))
+        let encoded = String(decoding: try JSONEncoder.opensks.encode(saved), as: UTF8.self)
+        XCTAssertTrue(encoded.contains("\"schema\":\"opensks.secret-ref.v1\""))
         XCTAssertFalse(String(describing: saved).contains("sk-live-secret-never-persist"))
         XCTAssertEqual(service.syncedModels.count, 2)
         XCTAssertEqual(store.connections.count, 1)
@@ -302,6 +305,54 @@ final class ProviderTests: XCTestCase {
         XCTAssertFalse(String(describing: saved).contains("sk-live-secret-never-persist"))
         XCTAssertTrue(store.hasEligibleTextModel)
         XCTAssertTrue(store.hasEligibleImageModel)
+    }
+
+    func testProviderStoreResolvesCodexLbDomainToBackendApiCodexEndpoint() async throws {
+        let secrets = InMemoryProviderSecretStore()
+        let service = RecordingProviderRegistryService()
+        let store = ProviderStore(secretStore: secrets, service: service)
+
+        try await store.connect(
+            ProviderDraft(
+                kind: .codexLB,
+                displayName: "codex-lb",
+                codexLbDomain: "codex-lb.example.com",
+                enabled: true,
+                maxConcurrentRequests: 2
+            ),
+            credential: SecureCredential(value: "sk-live-secret-never-persist")
+        )
+
+        let provider = try XCTUnwrap(store.connections.first)
+        XCTAssertEqual(provider.kind, .codexLB)
+        XCTAssertEqual(provider.endpoint, "https://codex-lb.example.com/backend-api/codex")
+        let saved = try XCTUnwrap(service.upsertedConnection)
+        XCTAssertEqual(saved.kind, .codexLB)
+        XCTAssertEqual(saved.endpoint.baseUrl, "https://codex-lb.example.com/backend-api/codex")
+        XCTAssertEqual(saved.auth.schema, "opensks.secret-ref.v1")
+        let encoded = String(decoding: try JSONEncoder.opensks.encode(saved), as: UTF8.self)
+        XCTAssertTrue(encoded.contains("\"kind\":\"codex_lb\""))
+        XCTAssertTrue(encoded.contains("\"schema\":\"opensks.secret-ref.v1\""))
+        XCTAssertEqual(store.models(for: provider.id).count, 2)
+        XCTAssertTrue(store.models(for: provider.id).allSatisfy { $0.health == .needsProbe })
+        XCTAssertFalse(store.hasEligibleTextModel)
+        XCTAssertFalse(store.hasEligibleImageModel)
+    }
+
+    func testProviderSecretRefDefaultsSchemaWhenDecodingOlderRecords() throws {
+        let json = """
+        {
+          "store": "macos_keychain",
+          "service": "ai.opensks.provider.open_router",
+          "account": "provider-1",
+          "version": 1
+        }
+        """
+
+        let secretRef = try JSONDecoder.opensks.decode(ProviderSecretRef.self, from: Data(json.utf8))
+
+        XCTAssertEqual(secretRef.schema, "opensks.secret-ref.v1")
+        XCTAssertEqual(secretRef.store, "macos_keychain")
     }
 
     func testProviderStoreSavesCredentialAsSecretRefOnlyAndSeedsModelAwaitingProbe() async throws {
