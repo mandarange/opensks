@@ -74,10 +74,13 @@ pub fn run_release_command(args: &[String], cwd: &Path) -> Result<CliOutput, Cli
     blockers.extend(status_blockers);
     let artifact_digests = collect_release_artifact_digests(cwd, source_commit_sha.as_deref())?;
     let upgrade_checked = release_upgrade_checked(cwd);
+    let signing_evidence = release_signing_evidence(cwd);
+    let signed_app = signing_evidence.production_signed;
+    let notarized = signing_evidence.notarized;
     let proof = opensks_retention::release_proof_with_artifacts(
         "0.1.0",
-        false,
-        false,
+        signed_app,
+        notarized,
         true,
         true,
         upgrade_checked,
@@ -85,6 +88,7 @@ pub fn run_release_command(args: &[String], cwd: &Path) -> Result<CliOutput, Cli
         workspace_dirty,
         artifact_digests,
         blockers,
+        Some(signing_evidence),
     );
     let dir = cwd.join(".opensks").join("release");
     fs::create_dir_all(&dir)?;
@@ -231,6 +235,115 @@ fn release_blocker_stdout_lines(blockers: &[opensks_contracts::ReleaseProofBlock
         .iter()
         .map(|blocker| format!("blocker: {} - {}\n", blocker.code, blocker.message))
         .collect()
+}
+
+fn release_signing_evidence(cwd: &Path) -> opensks_contracts::ReleaseSigningEvidence {
+    let relative_app_path = ".opensks/macos/OpenSKS.app";
+    let app_path = cwd.join(relative_app_path);
+    if !app_path.exists() {
+        return opensks_contracts::ReleaseSigningEvidence {
+            checked: false,
+            app_bundle_path: relative_app_path.to_string(),
+            identifier: None,
+            signature: None,
+            team_identifier: None,
+            cd_hash: None,
+            production_signed: false,
+            notarized: false,
+            codesign_status: None,
+            notarization_status: None,
+            diagnostic: "app bundle candidate is missing".to_string(),
+        };
+    }
+
+    let codesign = run_release_probe(cwd, "codesign", &["-dv", "--verbose=4", relative_app_path]);
+    let notarization = run_release_probe(
+        cwd,
+        "spctl",
+        &["-a", "-vvv", "-t", "install", relative_app_path],
+    );
+    let signature = parse_release_probe_field(&codesign.output, "Signature");
+    let team_identifier = parse_release_probe_field(&codesign.output, "TeamIdentifier");
+    let identifier = parse_release_probe_field(&codesign.output, "Identifier");
+    let cd_hash = parse_release_probe_field(&codesign.output, "CDHash");
+    let production_signed = codesign.status == Some(0)
+        && signature.as_deref().is_some_and(|value| value != "adhoc")
+        && team_identifier
+            .as_deref()
+            .is_some_and(|value| value != "not set" && !value.is_empty());
+    let notarized = notarization.status == Some(0)
+        && (notarization.output.contains("accepted")
+            || notarization
+                .output
+                .contains("source=Notarized Developer ID"));
+    let diagnostic = format!(
+        "codesign_status={:?}; signature={}; team_identifier={}; notarization_status={:?}; notarization_summary={}",
+        codesign.status,
+        signature.as_deref().unwrap_or("unknown"),
+        team_identifier.as_deref().unwrap_or("unknown"),
+        notarization.status,
+        first_non_empty_line(&notarization.output).unwrap_or("no notarization output")
+    );
+
+    opensks_contracts::ReleaseSigningEvidence {
+        checked: true,
+        app_bundle_path: relative_app_path.to_string(),
+        identifier,
+        signature,
+        team_identifier,
+        cd_hash,
+        production_signed,
+        notarized,
+        codesign_status: codesign.status,
+        notarization_status: notarization.status,
+        diagnostic,
+    }
+}
+
+struct ReleaseProbeOutput {
+    status: Option<i32>,
+    output: String,
+}
+
+fn run_release_probe(cwd: &Path, command: &str, args: &[&str]) -> ReleaseProbeOutput {
+    match process::Command::new(command)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+    {
+        Ok(output) => {
+            let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            ReleaseProbeOutput {
+                status: output.status.code(),
+                output: text,
+            }
+        }
+        Err(error) => ReleaseProbeOutput {
+            status: None,
+            output: format!("failed to execute {command}: {error}"),
+        },
+    }
+}
+
+fn parse_release_probe_field(output: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix).map(str::trim))
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn first_non_empty_line(output: &str) -> Option<&str> {
+    output.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
 }
 
 fn release_upgrade_checked(cwd: &Path) -> bool {
@@ -442,6 +555,15 @@ mod tests {
         assert_eq!(release_proof["status"], "not_verified");
         assert_eq!(release_proof["artifact_digest_gate_passed"], true);
         assert_eq!(release_proof["same_sha_artifact_binding"], true);
+        assert_eq!(release_proof["signing_evidence"]["checked"], false);
+        assert_eq!(
+            release_proof["signing_evidence"]["app_bundle_path"],
+            ".opensks/macos/OpenSKS.app"
+        );
+        assert_eq!(
+            release_proof["signing_evidence"]["diagnostic"],
+            "app bundle candidate is missing"
+        );
         assert_eq!(
             release_proof["artifact_digests"]
                 .as_array()

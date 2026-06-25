@@ -61,6 +61,17 @@
     "signed_app": {
       "type": "boolean"
     },
+    "signing_evidence": {
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ReleaseSigningEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "source_commit_sha": {
       "default": null,
       "type": [
@@ -132,6 +143,77 @@
         },
         "message": {
           "type": "string"
+        }
+      }
+    },
+    "ReleaseSigningEvidence": {
+      "type": "object",
+      "required": [
+        "app_bundle_path",
+        "checked",
+        "notarized",
+        "production_signed"
+      ],
+      "properties": {
+        "app_bundle_path": {
+          "type": "string"
+        },
+        "cd_hash": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "checked": {
+          "type": "boolean"
+        },
+        "codesign_status": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "diagnostic": {
+          "default": "",
+          "type": "string"
+        },
+        "identifier": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notarization_status": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "notarized": {
+          "type": "boolean"
+        },
+        "production_signed": {
+          "type": "boolean"
+        },
+        "signature": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "team_identifier": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },

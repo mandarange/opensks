@@ -2819,6 +2819,28 @@ pub struct ReleaseProofBlocker {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReleaseSigningEvidence {
+    pub checked: bool,
+    pub app_bundle_path: String,
+    #[serde(default)]
+    pub identifier: Option<String>,
+    #[serde(default)]
+    pub signature: Option<String>,
+    #[serde(default)]
+    pub team_identifier: Option<String>,
+    #[serde(default)]
+    pub cd_hash: Option<String>,
+    pub production_signed: bool,
+    pub notarized: bool,
+    #[serde(default)]
+    pub codesign_status: Option<i32>,
+    #[serde(default)]
+    pub notarization_status: Option<i32>,
+    #[serde(default)]
+    pub diagnostic: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ReleaseProof {
     pub schema: String,
     pub version: String,
@@ -2836,6 +2858,8 @@ pub struct ReleaseProof {
     pub artifact_digest_gate_passed: bool,
     #[serde(default)]
     pub blockers: Vec<ReleaseProofBlocker>,
+    #[serde(default)]
+    pub signing_evidence: Option<ReleaseSigningEvidence>,
     pub signed_app: bool,
     pub notarized: bool,
     pub rollback_plan_ref: String,

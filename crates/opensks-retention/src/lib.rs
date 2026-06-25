@@ -1,6 +1,6 @@
 use opensks_contracts::{
     RELEASE_PROOF_SCHEMA, RETENTION_PLAN_SCHEMA, ReleaseArtifactDigest, ReleaseProof,
-    ReleaseProofBlocker, RetentionPlan, TrustStatus,
+    ReleaseProofBlocker, ReleaseSigningEvidence, RetentionPlan, TrustStatus,
 };
 
 pub fn plan_gc(paths: &[String], active_run_id: &str) -> RetentionPlan {
@@ -47,6 +47,7 @@ pub fn release_proof(
             code: "artifact_digest_gate_missing".to_string(),
             message: "release proof was created without artifact digest evidence".to_string(),
         }],
+        None,
     )
 }
 
@@ -62,6 +63,7 @@ pub fn release_proof_with_artifacts(
     workspace_dirty: bool,
     artifact_digests: Vec<ReleaseArtifactDigest>,
     mut blockers: Vec<ReleaseProofBlocker>,
+    signing_evidence: Option<ReleaseSigningEvidence>,
 ) -> ReleaseProof {
     let missing_artifacts: Vec<String> = artifact_digests
         .iter()
@@ -168,6 +170,7 @@ pub fn release_proof_with_artifacts(
         same_sha_artifact_binding,
         artifact_digest_gate_passed,
         blockers,
+        signing_evidence,
         signed_app,
         notarized,
         rollback_plan_ref: ".opensks/updater/rollback-plan.json".to_string(),
