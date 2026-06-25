@@ -1274,3 +1274,14 @@ Product language contract: user-facing UI, logs, reason codes, schemas, and iden
 - migration: additive report field only. Swift uses `decodeIfPresent` with an empty default, so older reports stay decodable.
 - removal/deletion: none.
 - final evidence: the remaining `mvp-004` partial is more actionable from the canonical backend artifact, but it still honestly requires real OpenRouter/OpenAI credentials plus `OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1` for a 2xx live `/models` probe.
+
+### Cross-cutting - Provider Adapter Check Schema
+
+- status: Verified
+- owner file/module: `crates/opensks-contracts/src/lib.rs`, `schemas/provider-adapter-check.schema.json`, `crates/opensks-cli/src/retention.rs`
+- current evidence: `provider-adapter-check.json` declared `schema: opensks.provider-adapter-check.v1`, and the product now emits `remediation_actions`, but there was no generated JSON Schema artifact for that report shape.
+- target change: add a typed `ProviderAdapterCheckReport` contract with timestamp, summary, blockers, remediation actions, adapter rows, secret-leak flags, and backward-compatible defaults; generate `schemas/provider-adapter-check.schema.json`; bind that schema into release proof required artifact digests.
+- tests: `cargo test -p opensks-contracts provider_adapter_check_report_decodes_remediation_actions --locked`, `cargo run -p xtask -- schemas`, `cargo test -p opensks-cli release_proof --locked`, `cargo clippy -p opensks-contracts --all-targets -- -D warnings`, `cargo clippy -p opensks-cli --all-targets -- -D warnings`, `cargo fmt --all --check`, `git diff --check`, `cargo run -- release proof`, `cargo run -- provider adapter-check`, and `cargo run -- acceptance audit` passed. On clean HEAD `04848e3`, release proof includes required artifact `provider_adapter_check_schema` with path `schemas/provider-adapter-check.schema.json`, a SHA-256 digest, and the current source commit SHA.
+- migration: additive generated schema and defaulted contract fields; existing reports without blockers/actions remain decodable by Swift and by the Rust contract defaults.
+- removal/deletion: none.
+- final evidence: provider adapter-check now has a generated schema and same-SHA release-proof binding. Live adapter reachability remains partial until real provider credentials and remote probe opt-in are present.
