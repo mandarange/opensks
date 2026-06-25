@@ -1230,3 +1230,14 @@ Product language contract: user-facing UI, logs, reason codes, schemas, and iden
 - migration: none.
 - removal/deletion: no source removal in this seal step. The existing untracked backup file was intentionally left untouched and is not part of the release-proof tracked dirty blocker.
 - final evidence: release proof no longer has a tracked dirty-workspace blocker, but full release completion is still not proven because `signed_app: false` keeps `status: NotVerified`, live remote provider smoke still requires real OpenRouter/OpenAI credentials plus `OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1`, and GitHub-hosted CI artifact upload plus production notarization remain unverified.
+
+### Cross-cutting - Release Verification Blocker Surfacing
+
+- status: Verified
+- owner file/module: `crates/opensks-retention/src/lib.rs`, `crates/opensks-cli/src/retention.rs`, `.opensks/release/release-proof.json`
+- current evidence: after SHA binding was sealed, `cargo run -- release proof` could report `blockers: 0` while the proof remained `status: NotVerified` because `signed_app`, `notarized`, and `upgrade_checked` were false. That made the remaining production release actions less actionable even though the raw boolean fields were present.
+- target change: preserve the artifact/SHA digest gate as an artifact-only proof (`artifact_digest_gate_passed: true` when required artifacts bind to a clean HEAD) while adding explicit release verification blockers for missing production app signing, macOS notarization, fresh install/clone, and upgrade receipts. This keeps NotVerified honest without erasing the SHA-binding progress.
+- tests: `cargo test -p opensks-retention release_proof --locked`, `cargo test -p opensks-cli release_proof --locked`, `cargo fmt --all --check`, `cargo clippy -p opensks-retention -p opensks-cli --all-targets -- -D warnings`, `git diff --check`, `cargo run -- release proof`, and `cargo run -- acceptance audit` passed. On clean HEAD `ec0dd93`, `cargo run -- release proof` now reports `artifact_digest_gate_passed: true`, `same_sha_artifact_binding: true`, and three explicit blockers: `signed_app_missing`, `notarization_missing`, and `upgrade_unverified`.
+- migration: no schema migration; the existing defaulted `blockers` array now carries release verification blockers in addition to artifact/workspace blockers.
+- removal/deletion: no product runtime removal. This is a reporting/evidence-contract hardening change.
+- final evidence: release proof now exposes the concrete remaining release blockers instead of showing zero blockers with a NotVerified status. Full work-order completion remains unproven until production signing, notarization, upgrade proof, live provider smoke credentials/opt-in, and hosted CI artifact evidence are available.
