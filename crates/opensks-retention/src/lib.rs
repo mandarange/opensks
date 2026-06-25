@@ -1,6 +1,7 @@
 use opensks_contracts::{
     RELEASE_PROOF_SCHEMA, RETENTION_PLAN_SCHEMA, ReleaseArtifactDigest, ReleaseProof,
-    ReleaseProofBlocker, ReleaseSigningEvidence, RetentionPlan, TrustStatus,
+    ReleaseProofBlocker, ReleaseRemediationAction, ReleaseSigningEvidence, RetentionPlan,
+    TrustStatus,
 };
 
 pub fn plan_gc(paths: &[String], active_run_id: &str) -> RetentionPlan {
@@ -160,6 +161,7 @@ pub fn release_proof_with_artifacts(
     } else {
         TrustStatus::NotVerified
     };
+    let remediation_actions = release_remediation_actions(&blockers);
     ReleaseProof {
         schema: RELEASE_PROOF_SCHEMA.to_string(),
         version: version.into(),
@@ -170,6 +172,7 @@ pub fn release_proof_with_artifacts(
         same_sha_artifact_binding,
         artifact_digest_gate_passed,
         blockers,
+        remediation_actions,
         signing_evidence,
         signed_app,
         notarized,
@@ -178,6 +181,75 @@ pub fn release_proof_with_artifacts(
         fresh_clone_checked,
         upgrade_checked,
         status,
+    }
+}
+
+fn release_remediation_actions(blockers: &[ReleaseProofBlocker]) -> Vec<ReleaseRemediationAction> {
+    blockers
+        .iter()
+        .map(|blocker| ReleaseRemediationAction {
+            blocker: blocker.code.clone(),
+            action: release_remediation_action(&blocker.code),
+            scope: release_remediation_scope(&blocker.code),
+        })
+        .collect()
+}
+
+fn release_remediation_action(code: &str) -> String {
+    match code {
+        "signed_app_missing" => {
+            "Build and sign the macOS app with a production Developer ID Application identity, then rerun release proof.".to_string()
+        }
+        "notarization_missing" => {
+            "Submit the signed macOS app for Apple notarization, staple or otherwise record the notarization evidence, then rerun release proof.".to_string()
+        }
+        "fresh_install_unverified" => {
+            "Install the release candidate into a clean app location and record the fresh-install verification receipt.".to_string()
+        }
+        "fresh_clone_unverified" => {
+            "Run the release candidate from a fresh clone and record the clone verification receipt.".to_string()
+        }
+        "upgrade_unverified" => {
+            "Run the upgrade-path verification plan and record the updater manifest, signature, rollback, and final-state receipts.".to_string()
+        }
+        "workspace_dirty" => {
+            "Commit or intentionally exclude tracked workspace changes before producing same-SHA release proof.".to_string()
+        }
+        "missing_required_artifact" => {
+            "Regenerate the missing required release artifact and rerun release proof from the same source commit.".to_string()
+        }
+        "artifact_digest_gate_missing" => {
+            "Run release proof with the required artifact digest set so SHA binding can be evaluated.".to_string()
+        }
+        "source_commit_unavailable" | "git_head_unavailable" | "git_head_malformed" => {
+            "Run release proof from a valid Git checkout with a readable 40-character HEAD commit SHA.".to_string()
+        }
+        "git_unavailable" | "git_status_unavailable" => {
+            "Make Git available for the release proof command and rerun the proof.".to_string()
+        }
+        "no_required_artifacts" => {
+            "Configure the release proof required artifact set before claiming release verification.".to_string()
+        }
+        _ => "Inspect the release proof blocker diagnostic and add the missing evidence before rerunning release proof.".to_string(),
+    }
+}
+
+fn release_remediation_scope(code: &str) -> String {
+    match code {
+        "signed_app_missing" | "notarization_missing" => "release_signing".to_string(),
+        "fresh_install_unverified" | "fresh_clone_unverified" | "upgrade_unverified" => {
+            "release_verification".to_string()
+        }
+        "workspace_dirty"
+        | "source_commit_unavailable"
+        | "git_head_unavailable"
+        | "git_head_malformed"
+        | "git_unavailable"
+        | "git_status_unavailable" => "source_control".to_string(),
+        "missing_required_artifact" | "artifact_digest_gate_missing" | "no_required_artifacts" => {
+            "release_artifact".to_string()
+        }
+        _ => "release_operator".to_string(),
     }
 }
 
@@ -222,6 +294,20 @@ mod tests {
                 .blockers
                 .iter()
                 .any(|blocker| blocker.code == "artifact_digest_gate_missing")
+        );
+        assert!(
+            proof
+                .remediation_actions
+                .iter()
+                .any(|action| action.blocker == "artifact_digest_gate_missing"
+                    && action.scope == "release_artifact")
+        );
+        assert!(
+            proof
+                .remediation_actions
+                .iter()
+                .any(|action| action.blocker == "signed_app_missing"
+                    && action.scope == "release_signing")
         );
     }
 }

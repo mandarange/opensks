@@ -1309,3 +1309,14 @@ Follow-up evidence: `cargo test provider_commands_write_zero_leak_registry_probe
 - migration: no runtime migration. The adapter responder and CLI probe fixture flags are compiled only for tests; production provider calls still use `reqwest` and the existing provider registry path.
 - removal/deletion: removed test-only TCP server helpers from adapter image tests and CLI registry probe tests. Daemon integration tests still exercise real localhost HTTP and were verified with bind permission.
 - final evidence: provider adapter/image/registry unit tests no longer depend on local socket permissions, while full daemon integration remains covered by the privileged full workspace test run.
+
+### Cross-cutting - Release Proof Remediation Actions
+
+- status: Verified locally; production signing/notarization remain NotVerified
+- owner file/module: `crates/opensks-contracts/src/lib.rs`, `crates/opensks-retention/src/lib.rs`, `crates/opensks-cli/src/retention.rs`, `schemas/release-proof.schema.json`
+- current evidence: release proof exposed explicit blockers for missing production signing and notarization, but the proof did not carry structured remediation actions. Operators had to infer the next action from blocker text.
+- target change: add defaulted `remediation_actions` to `opensks.release-proof.v1`. Each action maps a blocker code to a safe action string and a scope such as `release_signing`, `release_verification`, `source_control`, or `release_artifact`. The status remains `NotVerified`; the new field only makes the remaining evidence gap executable.
+- tests: `cargo test -p opensks-contracts release_proof_decodes_remediation_actions --locked`, `cargo test -p opensks-retention unsigned_release_proof_is_not_verified --locked`, `cargo test -p opensks-cli release_proof_binds_required_artifacts_to_clean_head --locked`, `cargo run -p xtask -- schemas`, `cargo clippy -p opensks-contracts -p opensks-retention -p opensks-cli --all-targets -- -D warnings`, `cargo fmt --all --check`, `git diff --check`, and `cargo run -- release proof` passed during implementation. The dirty-workspace proof showed actions for `workspace_dirty`, `signed_app_missing`, and `notarization_missing` before commit.
+- migration: additive/defaulted proof field; older release proof JSON without `remediation_actions` remains decodable.
+- removal/deletion: none.
+- final evidence: release proof now carries structured next actions for the remaining blockers. Full release completion still requires a production Developer ID signed app and Apple notarization evidence.

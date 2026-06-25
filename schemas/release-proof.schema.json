@@ -48,6 +48,13 @@
     "notarized": {
       "type": "boolean"
     },
+    "remediation_actions": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ReleaseRemediationAction"
+      }
+    },
     "rollback_plan_ref": {
       "type": "string"
     },
@@ -142,6 +149,25 @@
           "type": "string"
         },
         "message": {
+          "type": "string"
+        }
+      }
+    },
+    "ReleaseRemediationAction": {
+      "type": "object",
+      "required": [
+        "action",
+        "blocker",
+        "scope"
+      ],
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "blocker": {
+          "type": "string"
+        },
+        "scope": {
           "type": "string"
         }
       }

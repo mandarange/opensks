@@ -601,6 +601,26 @@ mod tests {
                 .iter()
                 .any(|blocker| blocker["code"] == "upgrade_unverified")
         );
+        let actions = release_proof["remediation_actions"]
+            .as_array()
+            .expect("release remediation actions");
+        assert_eq!(actions.len(), blockers.len());
+        assert!(actions.iter().any(|action| {
+            action["blocker"] == "signed_app_missing"
+                && action["scope"] == "release_signing"
+                && action["action"]
+                    .as_str()
+                    .expect("signed action")
+                    .contains("Developer ID Application")
+        }));
+        assert!(actions.iter().any(|action| {
+            action["blocker"] == "notarization_missing"
+                && action["scope"] == "release_signing"
+                && action["action"]
+                    .as_str()
+                    .expect("notarization action")
+                    .contains("Apple notarization")
+        }));
         let source_commit = release_proof["source_commit_sha"]
             .as_str()
             .expect("source commit");

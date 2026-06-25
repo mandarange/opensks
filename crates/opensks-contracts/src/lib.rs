@@ -2874,6 +2874,13 @@ pub struct ReleaseProofBlocker {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReleaseRemediationAction {
+    pub blocker: String,
+    pub action: String,
+    pub scope: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ReleaseSigningEvidence {
     pub checked: bool,
     pub app_bundle_path: String,
@@ -2913,6 +2920,8 @@ pub struct ReleaseProof {
     pub artifact_digest_gate_passed: bool,
     #[serde(default)]
     pub blockers: Vec<ReleaseProofBlocker>,
+    #[serde(default)]
+    pub remediation_actions: Vec<ReleaseRemediationAction>,
     #[serde(default)]
     pub signing_evidence: Option<ReleaseSigningEvidence>,
     pub signed_app: bool,
@@ -4510,6 +4519,49 @@ mod tests {
         let decoded_receipt: ProviderProbeReceipt =
             serde_json::from_str(&receipt_json).expect("decode probe receipt");
         assert_eq!(decoded_receipt.catalog_count, Some(42));
+    }
+
+    #[test]
+    fn release_proof_decodes_remediation_actions() {
+        let proof_json = serde_json::json!({
+            "schema": RELEASE_PROOF_SCHEMA,
+            "version": "0.1.0",
+            "blockers": [{
+                "code": "signed_app_missing",
+                "message": "release proof requires production app signing evidence"
+            }],
+            "remediation_actions": [{
+                "blocker": "signed_app_missing",
+                "action": "Build and sign the macOS app with a production Developer ID Application identity, then rerun release proof.",
+                "scope": "release_signing"
+            }],
+            "signed_app": false,
+            "notarized": false,
+            "rollback_plan_ref": ".opensks/updater/rollback-plan.json",
+            "fresh_install_checked": true,
+            "fresh_clone_checked": true,
+            "upgrade_checked": true,
+            "status": "not_verified"
+        });
+        let proof: ReleaseProof = serde_json::from_value(proof_json).expect("decode release proof");
+        assert_eq!(proof.remediation_actions.len(), 1);
+        assert_eq!(proof.remediation_actions[0].blocker, "signed_app_missing");
+        assert_eq!(proof.remediation_actions[0].scope, "release_signing");
+
+        let legacy_json = serde_json::json!({
+            "schema": RELEASE_PROOF_SCHEMA,
+            "version": "0.1.0",
+            "signed_app": false,
+            "notarized": false,
+            "rollback_plan_ref": ".opensks/updater/rollback-plan.json",
+            "fresh_install_checked": true,
+            "fresh_clone_checked": true,
+            "upgrade_checked": true,
+            "status": "not_verified"
+        });
+        let legacy: ReleaseProof =
+            serde_json::from_value(legacy_json).expect("decode legacy release proof");
+        assert!(legacy.remediation_actions.is_empty());
     }
 
     #[test]
