@@ -1263,3 +1263,14 @@ Product language contract: user-facing UI, logs, reason codes, schemas, and iden
 - migration: generated `schemas/release-proof.schema.json` now includes optional/defaulted `signing_evidence`, so older proof JSON without the field remains decodable.
 - removal/deletion: no runtime removal. This is an evidence-contract hardening change.
 - final evidence: release proof now explains the remaining signing/notarization blockers with local app-bundle probe evidence. Full work-order completion remains unproven until a production-signed and notarized app bundle is available, plus live provider smoke credentials/opt-in.
+
+### Cross-cutting - Provider Adapter Remediation Actions
+
+- status: Verified for local action evidence; live provider smoke remains partial
+- owner file/module: `src/lib.rs`, `src/tests.rs`, `swift/Sources/Providers/ProviderService.swift`, `swift/Tests/OpenSKSStudioTests/ProviderTests.swift`, `.opensks/providers/provider-adapter-check.json`
+- current evidence: provider adapter-check exposed non-secret blocker codes and Swift mapped those codes into user-facing text, but the canonical backend report did not carry structured remediation actions. Operators had to know or reimplement the code-to-action mapping outside the provider adapter-check artifact.
+- target change: add top-level `remediation_actions` to `opensks.provider-adapter-check.v1` reports while preserving the existing `blockers` codes for acceptance and automation. Each action records the blocker code, a safe action string, and a scope such as `operator_environment` or `provider_credential`; unknown blockers map to a redacted diagnostic action. Swift decodes the optional field while remaining backward compatible with older reports that lack `blockers` or actions.
+- tests: `cargo test provider_commands_write_zero_leak_registry_probe_and_usage --locked -- --test-threads=1`, `swift test --disable-sandbox --package-path swift --scratch-path /tmp/opensks-swift-build-provider-actions --filter OpenSKSStudioTests.ProviderTests`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all --check`, `git diff --check`, `cargo run -- provider adapter-check`, `cargo run -- release proof`, and `cargo run -- acceptance audit` passed. On clean HEAD `b902e2e`, `provider-adapter-check.json` includes action entries for `set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1`, `configure_OPENROUTER_API_KEY_credential`, and `configure_OPENAI_API_KEY_credential` without any secret value.
+- migration: additive report field only. Swift uses `decodeIfPresent` with an empty default, so older reports stay decodable.
+- removal/deletion: none.
+- final evidence: the remaining `mvp-004` partial is more actionable from the canonical backend artifact, but it still honestly requires real OpenRouter/OpenAI credentials plus `OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1` for a 2xx live `/models` probe.
