@@ -1241,3 +1241,14 @@ Product language contract: user-facing UI, logs, reason codes, schemas, and iden
 - migration: no schema migration; the existing defaulted `blockers` array now carries release verification blockers in addition to artifact/workspace blockers.
 - removal/deletion: no product runtime removal. This is a reporting/evidence-contract hardening change.
 - final evidence: release proof now exposes the concrete remaining release blockers instead of showing zero blockers with a NotVerified status. Full work-order completion remains unproven until production signing, notarization, upgrade proof, live provider smoke credentials/opt-in, and hosted CI artifact evidence are available.
+
+### Cross-cutting - Release Proof Updater Evidence Binding
+
+- status: Verified for local updater evidence; production signing/notarization remain NotVerified
+- owner file/module: `crates/opensks-cli/src/retention.rs`, `.opensks/updater/*`, `.opensks/release/release-proof.json`
+- current evidence: `updater plan` already produced a local signed-update manifest artifact set that passes production acceptance `prod-006`, but `cargo run -- release proof` still hardcoded `upgrade_checked: false` and kept `upgrade_unverified` even when the updater evidence was present and valid.
+- target change: make release proof validate the existing `.opensks/updater` artifact set before setting `upgrade_checked`. The validator checks manifest schema/version/channels/artifacts/signature/rollback/boundary/final-state fields, recomputes the local fnv1a64 manifest signature, requires rollback and operator approval, and requires `network_or_install_performed: false` so it does not pretend a live production upgrade happened.
+- tests: `cargo test -p opensks-cli release_proof --locked`, `cargo fmt --all --check`, `cargo clippy -p opensks-cli --all-targets -- -D warnings`, `git diff --check`, `cargo run -- updater plan`, `cargo run -- release proof`, `cargo run -- acceptance audit`, and `sks validate-artifacts latest` passed. On clean HEAD `57c4801`, `cargo run -- release proof` reports `upgrade_checked: true` in the JSON artifact, `artifact_digest_gate_passed: true`, `same_sha_artifact_binding: true`, and only two blockers: `signed_app_missing` and `notarization_missing`.
+- migration: no schema migration. Existing release proof consumers already decode `upgrade_checked` and `blockers`.
+- removal/deletion: removed no runtime path; this only connects release proof to the already-generated updater SSOT artifact set.
+- final evidence: local upgrade-path artifact evidence is now bound into release proof. The proof remains correctly `NotVerified` because the current app bundle is only ad-hoc signed and no macOS notarization receipt is present.
