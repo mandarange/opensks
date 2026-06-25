@@ -1219,3 +1219,14 @@ Product language contract: user-facing UI, logs, reason codes, schemas, and iden
 - migration: none.
 - removal/deletion: the previous "swift-format not installed in this shell" blocker is superseded for this environment by the Xcode toolchain path. The Swift warning backlog remains separate; no sweeping auto-format was applied because it would touch broad existing/user-edited Swift files.
 - final evidence: `.sneakoscope/evidence/swift-format-toolchain-lint-evidence.json` records the executable path, command, exit code, and log reference.
+
+### Cross-cutting - Release Proof SHA Binding Seal
+
+- status: Verified for SHA binding; release signing remains NotVerified
+- owner file/module: release hardening evidence, Git history, `.opensks/release/release-proof.json`
+- current evidence: the tracked implementation diff had previously kept `cargo run -- release proof` at `status: NotVerified` with an explicit `workspace_dirty` blocker, `artifact_digest_gate_passed: false`, and `same_sha_artifact_binding: false`.
+- target change: seal the verified tracked implementation diff into Git history so release proof artifacts can bind to a stable commit SHA without claiming production signing or notarization.
+- tests: before sealing, `cargo fmt --all --check`, `git diff --check`, `cargo test provider_commands_write_zero_leak_registry_probe_and_usage --locked -- --test-threads=1`, and `swift test --disable-sandbox --package-path swift --scratch-path /tmp/opensks-swift-build-provider-readiness --filter OpenSKSStudioTests.ProviderTests` passed. After commit `c0c9a98 Implement provider runtime release hardening`, `cargo run -- release proof` reported `blockers: 0`, `artifact_digest_gate_passed: true`, and `same_sha_artifact_binding: true`; `cargo run -- acceptance audit` remained 23 total, 22 passed, 1 partial, 0 failed; `sks validate-artifacts latest` passed.
+- migration: none.
+- removal/deletion: no source removal in this seal step. The existing untracked backup file was intentionally left untouched and is not part of the release-proof tracked dirty blocker.
+- final evidence: release proof no longer has a tracked dirty-workspace blocker, but full release completion is still not proven because `signed_app: false` keeps `status: NotVerified`, live remote provider smoke still requires real OpenRouter/OpenAI credentials plus `OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1`, and GitHub-hosted CI artifact upload plus production notarization remain unverified.
