@@ -73,13 +73,14 @@ pub fn run_release_command(args: &[String], cwd: &Path) -> Result<CliOutput, Cli
     let (workspace_dirty, status_blockers) = release_workspace_dirty(cwd);
     blockers.extend(status_blockers);
     let artifact_digests = collect_release_artifact_digests(cwd, source_commit_sha.as_deref())?;
+    let upgrade_checked = release_upgrade_checked(cwd);
     let proof = opensks_retention::release_proof_with_artifacts(
         "0.1.0",
         false,
         false,
         true,
         true,
-        false,
+        upgrade_checked,
         source_commit_sha,
         workspace_dirty,
         artifact_digests,
@@ -232,6 +233,141 @@ fn release_blocker_stdout_lines(blockers: &[opensks_contracts::ReleaseProofBlock
         .collect()
 }
 
+fn release_upgrade_checked(cwd: &Path) -> bool {
+    let updater_dir = cwd.join(".opensks").join("updater");
+    let Ok(manifest) = read_json_value(&updater_dir.join("update-manifest.json")) else {
+        return false;
+    };
+    let Ok(signature) = read_json_value(&updater_dir.join("update-signature.json")) else {
+        return false;
+    };
+    let Ok(channels) = read_json_value(&updater_dir.join("update-channels.json")) else {
+        return false;
+    };
+    let Ok(rollback) = read_json_value(&updater_dir.join("rollback-plan.json")) else {
+        return false;
+    };
+    let Ok(boundary) = read_json_value(&updater_dir.join("update-boundary.json")) else {
+        return false;
+    };
+    let Ok(final_state) = read_json_value(&updater_dir.join("updater-final-state.json")) else {
+        return false;
+    };
+    let Ok(manifest_text) = fs::read_to_string(updater_dir.join("update-manifest.json")) else {
+        return false;
+    };
+
+    let manifest_hash = local_stable_content_hash(&manifest_text);
+    let expected_signature = local_update_signature(&manifest_hash);
+    json_string(&manifest, "schema") == Some("opensks.update-manifest.v1")
+        && json_string(&manifest, "current_version") == Some(env!("CARGO_PKG_VERSION"))
+        && json_string(&manifest, "default_channel") == Some("stable")
+        && json_bool(&manifest, "requires_signature") == Some(true)
+        && json_bool(&manifest, "requires_rollback_plan") == Some(true)
+        && json_bool(&manifest, "network_install_enabled") == Some(false)
+        && json_array_contains(&manifest, "channels", &["stable", "latest"])
+        && json_array_contains(
+            &manifest,
+            "artifacts",
+            &["opensks-cli", "app-bundle-candidate", "manifest"],
+        )
+        && json_string(&signature, "schema") == Some("opensks.update-signature.v1")
+        && json_string(&signature, "manifest_hash") == Some(manifest_hash.as_str())
+        && json_string(&signature, "signature") == Some(expected_signature.as_str())
+        && json_string(&signature, "trusted_signer_fingerprint")
+            == Some("opensks-local-dev-trusted-signer-v1")
+        && json_string(&signature, "algorithm")
+            == Some("fnv1a64-local-dev-proof-not-production-crypto")
+        && json_bool(&signature, "production_crypto_live") == Some(false)
+        && json_string(&channels, "schema") == Some("opensks.update-channels.v1")
+        && channel_gate_passed(&channels, "stable")
+        && channel_gate_passed(&channels, "latest")
+        && json_string(&rollback, "schema") == Some("opensks.rollback-plan.v1")
+        && json_string(&rollback, "current_version") == Some(env!("CARGO_PKG_VERSION"))
+        && json_array_contains(
+            &rollback,
+            "rollback_slots",
+            &[
+                "previous-stable",
+                "previous-latest",
+                "manual-operator-restore",
+            ],
+        )
+        && json_string(&rollback, "restore_strategy")
+            == Some("preserve_previous_manifest_and_binary_before_apply")
+        && json_bool(&rollback, "apply_transaction_live") == Some(false)
+        && json_string(&boundary, "schema") == Some("opensks.update-boundary.v1")
+        && json_bool(&boundary, "auto_download") == Some(false)
+        && json_bool(&boundary, "auto_apply") == Some(false)
+        && json_bool(&boundary, "requires_operator_approval") == Some(true)
+        && json_bool(&boundary, "requires_verified_signature") == Some(true)
+        && json_bool(&boundary, "requires_rollback_plan") == Some(true)
+        && json_string(&boundary, "signed_updater_live")
+            == Some("local_manifest_signature_artifact_only")
+        && json_string(&final_state, "schema") == Some("opensks.updater-final-state.v1")
+        && json_string(&final_state, "status") == Some("verified_artifact_plan")
+        && json_string(&final_state, "manifest_hash") == Some(manifest_hash.as_str())
+        && json_bool(&final_state, "signature_verified") == Some(true)
+        && json_array_contains(&final_state, "channels_present", &["stable", "latest"])
+        && json_bool(&final_state, "rollback_plan_present") == Some(true)
+        && json_bool(&final_state, "network_or_install_performed") == Some(false)
+}
+
+fn read_json_value(path: &Path) -> Result<serde_json::Value, CliError> {
+    let text = fs::read_to_string(path)?;
+    serde_json::from_str(&text)
+        .map_err(|error| CliError::Invalid(format!("parse {}: {error}", path.display())))
+}
+
+fn json_string<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value.get(key)?.as_str()
+}
+
+fn json_bool(value: &serde_json::Value, key: &str) -> Option<bool> {
+    value.get(key)?.as_bool()
+}
+
+fn json_array_contains(value: &serde_json::Value, key: &str, expected: &[&str]) -> bool {
+    let Some(values) = value.get(key).and_then(|field| field.as_array()) else {
+        return false;
+    };
+    expected.iter().all(|expected_value| {
+        values
+            .iter()
+            .any(|value| value.as_str() == Some(*expected_value))
+    })
+}
+
+fn channel_gate_passed(channels: &serde_json::Value, name: &str) -> bool {
+    channels
+        .get("channels")
+        .and_then(|value| value.as_array())
+        .is_some_and(|channels| {
+            channels.iter().any(|channel| {
+                json_string(channel, "name") == Some(name)
+                    && json_bool(channel, "auto_apply") == Some(false)
+                    && json_bool(channel, "requires_signature") == Some(true)
+                    && json_bool(channel, "rollback_required") == Some(true)
+            })
+        })
+}
+
+fn local_update_signature(manifest_hash: &str) -> String {
+    local_stable_content_hash(&format!(
+        "{}:{}",
+        "opensks-local-dev-trusted-signer-v1", manifest_hash
+    ))
+}
+
+fn local_stable_content_hash(value: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
 fn collect_release_artifact_digests(
     cwd: &Path,
     source_commit_sha: Option<&str>,
@@ -289,10 +425,14 @@ mod tests {
         }
         run_repo_git(&root, &["add", "."]);
         run_repo_git(&root, &["commit", "-m", "release artifacts"]);
+        write_verified_updater_artifacts(&root);
 
         let release = run_release_command(&["proof".to_string()], &root).expect("release proof");
         assert!(release.stdout.contains("artifact_digest_gate_passed: true"));
         assert!(release.stdout.contains("same_sha_artifact_binding: true"));
+        assert!(release.stdout.contains("blocker: signed_app_missing - "));
+        assert!(release.stdout.contains("blocker: notarization_missing - "));
+        assert!(!release.stdout.contains("blocker: upgrade_unverified - "));
         let release_proof = read_json(
             &root
                 .join(".opensks")
@@ -318,7 +458,8 @@ mod tests {
         let blockers = release_proof["blockers"]
             .as_array()
             .expect("release blockers");
-        assert_eq!(blockers.len(), 3);
+        assert_eq!(release_proof["upgrade_checked"], true);
+        assert_eq!(blockers.len(), 2);
         assert!(
             blockers
                 .iter()
@@ -330,7 +471,7 @@ mod tests {
                 .any(|blocker| blocker["code"] == "notarization_missing")
         );
         assert!(
-            blockers
+            !blockers
                 .iter()
                 .any(|blocker| blocker["code"] == "upgrade_unverified")
         );
@@ -437,5 +578,101 @@ mod tests {
         let text = fs::read_to_string(path).expect("json artifact");
         assert!(text.ends_with('\n'));
         serde_json::from_str(&text).expect("valid json")
+    }
+
+    fn write_verified_updater_artifacts(root: &Path) {
+        let updater_dir = root.join(".opensks").join("updater");
+        fs::create_dir_all(&updater_dir).expect("updater dir");
+        let manifest = concat!(
+            "{\n",
+            "  \"schema\": \"opensks.update-manifest.v1\",\n",
+            "  \"current_version\": \"0.1.0\",\n",
+            "  \"channels\": [\"stable\",\"latest\"],\n",
+            "  \"default_channel\": \"stable\",\n",
+            "  \"artifacts\": [\"opensks-cli\",\"app-bundle-candidate\",\"manifest\"],\n",
+            "  \"requires_signature\": true,\n",
+            "  \"requires_rollback_plan\": true,\n",
+            "  \"network_install_enabled\": false\n",
+            "}\n"
+        );
+        let manifest_hash = local_stable_content_hash(manifest);
+        let signature = local_update_signature(&manifest_hash);
+        fs::write(updater_dir.join("update-manifest.json"), manifest).expect("manifest");
+        fs::write(
+            updater_dir.join("update-signature.json"),
+            format!(
+                concat!(
+                    "{{\n",
+                    "  \"schema\": \"opensks.update-signature.v1\",\n",
+                    "  \"manifest_hash\": \"{}\",\n",
+                    "  \"trusted_signer_fingerprint\": \"opensks-local-dev-trusted-signer-v1\",\n",
+                    "  \"signature\": \"{}\",\n",
+                    "  \"algorithm\": \"fnv1a64-local-dev-proof-not-production-crypto\",\n",
+                    "  \"production_crypto_live\": false\n",
+                    "}}\n"
+                ),
+                manifest_hash, signature
+            ),
+        )
+        .expect("signature");
+        fs::write(
+            updater_dir.join("update-channels.json"),
+            concat!(
+                "{\n",
+                "  \"schema\": \"opensks.update-channels.v1\",\n",
+                "  \"channels\": [\n",
+                "    {\"name\":\"stable\",\"auto_apply\":false,\"requires_signature\":true,\"rollback_required\":true},\n",
+                "    {\"name\":\"latest\",\"auto_apply\":false,\"requires_signature\":true,\"rollback_required\":true}\n",
+                "  ]\n",
+                "}\n"
+            ),
+        )
+        .expect("channels");
+        fs::write(
+            updater_dir.join("rollback-plan.json"),
+            concat!(
+                "{\n",
+                "  \"schema\": \"opensks.rollback-plan.v1\",\n",
+                "  \"current_version\": \"0.1.0\",\n",
+                "  \"rollback_slots\": [\"previous-stable\",\"previous-latest\",\"manual-operator-restore\"],\n",
+                "  \"restore_strategy\": \"preserve_previous_manifest_and_binary_before_apply\",\n",
+                "  \"apply_transaction_live\": false\n",
+                "}\n"
+            ),
+        )
+        .expect("rollback");
+        fs::write(
+            updater_dir.join("update-boundary.json"),
+            concat!(
+                "{\n",
+                "  \"schema\": \"opensks.update-boundary.v1\",\n",
+                "  \"auto_download\": false,\n",
+                "  \"auto_apply\": false,\n",
+                "  \"requires_operator_approval\": true,\n",
+                "  \"requires_verified_signature\": true,\n",
+                "  \"requires_rollback_plan\": true,\n",
+                "  \"signed_updater_live\": \"local_manifest_signature_artifact_only\"\n",
+                "}\n"
+            ),
+        )
+        .expect("boundary");
+        fs::write(
+            updater_dir.join("updater-final-state.json"),
+            format!(
+                concat!(
+                    "{{\n",
+                    "  \"schema\": \"opensks.updater-final-state.v1\",\n",
+                    "  \"status\": \"verified_artifact_plan\",\n",
+                    "  \"manifest_hash\": \"{}\",\n",
+                    "  \"signature_verified\": true,\n",
+                    "  \"channels_present\": [\"stable\",\"latest\"],\n",
+                    "  \"rollback_plan_present\": true,\n",
+                    "  \"network_or_install_performed\": false\n",
+                    "}}\n"
+                ),
+                manifest_hash
+            ),
+        )
+        .expect("final state");
     }
 }
