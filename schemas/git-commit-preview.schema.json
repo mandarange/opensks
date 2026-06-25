@@ -15,8 +15,44 @@
     "index_hash": {
       "type": "string"
     },
+    "integration_candidate_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "integration_final_diff_hash": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "integration_final_diff_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "integration_run_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "schema": {
       "type": "string"
+    },
+    "staged_diff_hash": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "staged_diff_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "staged_paths": {
       "default": [],

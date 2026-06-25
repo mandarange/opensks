@@ -4,20 +4,23 @@
 //! agent workers. It gives adapter/testkit callers a safer bridge while the full
 //! isolated-worktree PatchEngine matures: canonical workspace anchoring,
 //! symlink-aware containment, SHA-256 content identity, pre-image validation,
-//! same-directory temp writes with fsync, atomic rename, directory fsync, and
-//! typed rollback receipts.
+//! same-directory temp writes with fsync, stale temp scavenging, atomic rename,
+//! directory fsync, and typed rollback receipts.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use opensks_contracts::{FileOperation, PATCH_APPLY_RESULT_SCHEMA, PatchApplyResult};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const PATCH_TRANSACTION_JOURNAL_SCHEMA: &str = "opensks.patch-transaction-journal.v1";
+const STALE_PATCH_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Error)]
 pub enum PatchEngineError {
@@ -34,6 +37,18 @@ pub enum PatchEngineError {
         #[source]
         source: std::io::Error,
     },
+    #[error("read-back mismatch at `{path}`: expected {expected}, got {actual}")]
+    ReadBackMismatch {
+        path: String,
+        expected: String,
+        actual: String,
+    },
+    #[error("pre-apply revalidation failed at `{path}`: expected {expected}, got {actual}")]
+    PreApplyChanged {
+        path: String,
+        expected: String,
+        actual: String,
+    },
     #[error("failed to serialize patch transaction journal: {0}")]
     JournalSerialize(String),
 }
@@ -48,12 +63,58 @@ pub struct PlannedPatchWrite {
 }
 
 #[derive(Debug, Clone)]
+pub struct PatchApplyContext {
+    pub lease_id: String,
+    pub fence_token: String,
+    pub leased_paths: Vec<String>,
+}
+
+impl PatchApplyContext {
+    pub fn new(
+        lease_id: impl Into<String>,
+        fence_token: impl Into<String>,
+        leased_paths: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            lease_id: lease_id.into(),
+            fence_token: fence_token.into(),
+            leased_paths: leased_paths.into_iter().collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchRecoveryAttempt {
+    pub attempt_index: u64,
+    pub attempt_id: String,
+    pub state: String,
+    pub reason_code: String,
+    pub rolled_back: bool,
+    pub applied_files: Vec<String>,
+    pub conflict_paths: Vec<String>,
+    pub journal_events: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchRecoveryReport {
+    pub proposal_id: String,
+    pub journal_ref: String,
+    pub attempts: Vec<PatchRecoveryAttempt>,
+    pub latest_attempt: Option<PatchRecoveryAttempt>,
+    pub requires_operator_review: bool,
+    pub reason_code: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct PatchEngine {
     root: PathBuf,
+    #[cfg(test)]
+    temp_scavenge_now: Option<SystemTime>,
 }
 
 struct PatchJournalEvent<'a> {
     proposal_id: &'a str,
+    attempt_index: u64,
     sequence: u64,
     state: &'a str,
     writes: &'a [PlannedPatchWrite],
@@ -61,6 +122,7 @@ struct PatchJournalEvent<'a> {
     conflict_paths: &'a [String],
     rolled_back: bool,
     reason_code: &'a str,
+    context: Option<&'a PatchApplyContext>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +132,41 @@ struct PreparedPatchWrite {
     before: Option<String>,
     operation: FileOperation,
     rename_to: Option<(String, PathBuf)>,
+}
+
+#[cfg(test)]
+type PreApplyTestHook = Box<dyn Fn(&PlannedPatchWrite) + Send + Sync + 'static>;
+
+#[cfg(test)]
+static PRE_APPLY_TEST_HOOK: std::sync::Mutex<Option<PreApplyTestHook>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+type ApplyFaultTestHook =
+    Box<dyn Fn(&PlannedPatchWrite) -> Option<PatchEngineError> + Send + Sync + 'static>;
+
+#[cfg(test)]
+static APPLY_FAULT_TEST_HOOK: std::sync::Mutex<Option<ApplyFaultTestHook>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn run_pre_apply_test_hook(write: &PlannedPatchWrite) {
+    if let Some(hook) = PRE_APPLY_TEST_HOOK
+        .lock()
+        .expect("pre-apply hook lock")
+        .as_ref()
+    {
+        hook(write);
+    }
+}
+
+#[cfg(test)]
+fn run_apply_fault_test_hook(write: &PlannedPatchWrite) -> Option<PatchEngineError> {
+    APPLY_FAULT_TEST_HOOK
+        .lock()
+        .expect("apply fault hook lock")
+        .as_ref()
+        .and_then(|hook| hook(write))
 }
 
 impl PatchEngine {
@@ -83,7 +180,11 @@ impl PatchEngine {
                 raw.display().to_string(),
             ));
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            #[cfg(test)]
+            temp_scavenge_now: None,
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -108,26 +209,60 @@ impl PatchEngine {
         proposal_id: &str,
         writes: &[PlannedPatchWrite],
     ) -> Result<PatchApplyResult, PatchEngineError> {
+        self.apply_inner(proposal_id, writes, None)
+    }
+
+    pub fn apply_with_context(
+        &self,
+        proposal_id: &str,
+        writes: &[PlannedPatchWrite],
+        context: &PatchApplyContext,
+    ) -> Result<PatchApplyResult, PatchEngineError> {
+        self.apply_inner(proposal_id, writes, Some(context))
+    }
+
+    fn apply_inner(
+        &self,
+        proposal_id: &str,
+        writes: &[PlannedPatchWrite],
+        context: Option<&PatchApplyContext>,
+    ) -> Result<PatchApplyResult, PatchEngineError> {
+        let attempt_index = self.next_journal_attempt_index(proposal_id)?;
         let journal_ref = format!("patch-engine:journal:{proposal_id}");
         let result = |applied: bool,
                       applied_files: Vec<String>,
                       conflict_paths: Vec<String>,
                       rolled_back: bool,
-                      reason: &str| PatchApplyResult {
-            schema: PATCH_APPLY_RESULT_SCHEMA.to_string(),
-            proposal_id: proposal_id.to_string(),
-            applied,
-            applied_files,
-            conflict_paths,
-            rolled_back,
-            reason_code: reason.to_string(),
-            evidence_refs: vec!["patch-engine:atomic-apply".to_string(), journal_ref.clone()],
+                      reason: &str| {
+            let mut evidence_refs =
+                vec!["patch-engine:atomic-apply".to_string(), journal_ref.clone()];
+            if applied {
+                evidence_refs.push("patch-engine:pre-apply-revalidated".to_string());
+                if context.is_some() {
+                    evidence_refs.push("patch-engine:path-lease-bound".to_string());
+                    evidence_refs.push("patch-engine:fence-token-bound".to_string());
+                }
+                evidence_refs.push("patch-engine:read-back-verified".to_string());
+            }
+            if rolled_back {
+                evidence_refs.push("patch-engine:rollback-attempted".to_string());
+            }
+            PatchApplyResult {
+                schema: PATCH_APPLY_RESULT_SCHEMA.to_string(),
+                proposal_id: proposal_id.to_string(),
+                applied,
+                applied_files,
+                conflict_paths,
+                rolled_back,
+                reason_code: reason.to_string(),
+                evidence_refs,
+            }
         };
 
         let mut targets = Vec::with_capacity(writes.len());
         let mut conflicts = Vec::new();
         let mut operation_conflicts = Vec::new();
-        let mut touched_paths = std::collections::BTreeSet::new();
+        let mut touched_paths = BTreeSet::new();
         for write in writes {
             let target = self.resolve(&write.path)?;
             if !touched_paths.insert(write.path.clone()) {
@@ -149,7 +284,7 @@ impl PatchEngine {
                 },
                 _ => None,
             };
-            let current = fs::read_to_string(&target).ok();
+            let current = self.read_target_text(&write.path, &target, "preflight_read")?;
             match (write.operation, current.is_some()) {
                 (FileOperation::Create, true) => operation_conflicts.push(write.path.clone()),
                 (FileOperation::Modify, false) => operation_conflicts.push(write.path.clone()),
@@ -177,9 +312,27 @@ impl PatchEngine {
                 rename_to,
             });
         }
+        if let Some(context) = context
+            && let Some(missing) = missing_leased_paths(context, &touched_paths)
+        {
+            self.append_journal_event(PatchJournalEvent {
+                proposal_id,
+                attempt_index,
+                sequence: 0,
+                state: "rejected",
+                writes,
+                applied_files: &[],
+                conflict_paths: &missing,
+                rolled_back: false,
+                reason_code: "path_lease_missing",
+                context: Some(context),
+            })?;
+            return Ok(result(false, vec![], missing, false, "path_lease_missing"));
+        }
         if !operation_conflicts.is_empty() {
             self.append_journal_event(PatchJournalEvent {
                 proposal_id,
+                attempt_index,
                 sequence: 0,
                 state: "rejected",
                 writes,
@@ -187,6 +340,7 @@ impl PatchEngine {
                 conflict_paths: &operation_conflicts,
                 rolled_back: false,
                 reason_code: "operation_precondition",
+                context,
             })?;
             return Ok(result(
                 false,
@@ -199,6 +353,7 @@ impl PatchEngine {
         if !conflicts.is_empty() {
             self.append_journal_event(PatchJournalEvent {
                 proposal_id,
+                attempt_index,
                 sequence: 0,
                 state: "rejected",
                 writes,
@@ -206,6 +361,7 @@ impl PatchEngine {
                 conflict_paths: &conflicts,
                 rolled_back: false,
                 reason_code: "stale_precondition",
+                context,
             })?;
             return Ok(result(
                 false,
@@ -218,6 +374,7 @@ impl PatchEngine {
 
         self.append_journal_event(PatchJournalEvent {
             proposal_id,
+            attempt_index,
             sequence: 0,
             state: "planned",
             writes,
@@ -225,28 +382,70 @@ impl PatchEngine {
             conflict_paths: &[],
             rolled_back: false,
             reason_code: "preflight_ok",
+            context,
         })?;
         let mut applied_files = Vec::new();
         for (idx, write) in writes.iter().enumerate() {
             let prepared = &targets[idx];
-            let apply_result = match write.operation {
-                FileOperation::Create | FileOperation::Modify => self.atomic_replace(
-                    &write.path,
-                    &prepared.target,
-                    write.after_content.as_bytes(),
-                ),
-                FileOperation::Delete => self.atomic_remove(&write.path, &prepared.target),
-                FileOperation::Rename => {
-                    let Some((dest, dest_target)) = &prepared.rename_to else {
-                        unreachable!("rename preflight requires destination");
-                    };
-                    self.atomic_rename(&write.path, &prepared.target, dest, dest_target)
-                }
-            };
+            #[cfg(test)]
+            run_pre_apply_test_hook(write);
+            if let Err(error) = self.revalidate_before_apply(write, prepared) {
+                let conflict_paths = error_paths(&error);
+                let reason_code = pre_apply_reason_code(&error);
+                let had_applied = idx > 0;
+                let rolled_back = had_applied && self.rollback(&targets[..idx]).is_ok();
+                self.append_journal_event(PatchJournalEvent {
+                    proposal_id,
+                    attempt_index,
+                    sequence: 1,
+                    state: if had_applied {
+                        if rolled_back {
+                            "rolled_back"
+                        } else {
+                            "rollback_failed_critical"
+                        }
+                    } else {
+                        "rejected"
+                    },
+                    writes,
+                    applied_files: &applied_files,
+                    conflict_paths: &conflict_paths,
+                    rolled_back,
+                    reason_code: if had_applied && !rolled_back {
+                        "rollback_failed_critical"
+                    } else {
+                        reason_code
+                    },
+                    context,
+                })?;
+                return if had_applied && !rolled_back {
+                    Ok(result(
+                        false,
+                        vec![],
+                        conflict_paths,
+                        true,
+                        "rollback_failed_critical",
+                    ))
+                } else {
+                    Ok(result(
+                        false,
+                        vec![],
+                        conflict_paths,
+                        rolled_back,
+                        reason_code,
+                    ))
+                };
+            }
+            #[cfg(test)]
+            let apply_result = run_apply_fault_test_hook(write)
+                .map_or_else(|| self.apply_prepared_write(write, prepared), Err);
+            #[cfg(not(test))]
+            let apply_result = self.apply_prepared_write(write, prepared);
             if apply_result.is_err() {
                 let rolled_back = self.rollback(&targets[..idx]).is_ok();
                 self.append_journal_event(PatchJournalEvent {
                     proposal_id,
+                    attempt_index,
                     sequence: 1,
                     state: if rolled_back {
                         "rolled_back"
@@ -262,6 +461,7 @@ impl PatchEngine {
                     } else {
                         "rollback_failed_critical"
                     },
+                    context,
                 })?;
                 return if rolled_back {
                     Ok(result(false, vec![], vec![], true, "io_rolled_back"))
@@ -275,11 +475,51 @@ impl PatchEngine {
                     ))
                 };
             }
+            if let Err(error) = self.verify_applied_write(write, prepared) {
+                let applied_paths = applied_paths(prepared);
+                let reason_code = match error {
+                    PatchEngineError::ReadBackMismatch { .. } => "read_back_mismatch",
+                    _ => "read_back_error",
+                };
+                let rolled_back = self.rollback(&targets[..=idx]).is_ok();
+                self.append_journal_event(PatchJournalEvent {
+                    proposal_id,
+                    attempt_index,
+                    sequence: 1,
+                    state: if rolled_back {
+                        "rolled_back"
+                    } else {
+                        "rollback_failed_critical"
+                    },
+                    writes,
+                    applied_files: &applied_paths,
+                    conflict_paths: &applied_paths,
+                    rolled_back,
+                    reason_code: if rolled_back {
+                        reason_code
+                    } else {
+                        "rollback_failed_critical"
+                    },
+                    context,
+                })?;
+                return if rolled_back {
+                    Ok(result(false, vec![], applied_paths, true, reason_code))
+                } else {
+                    Ok(result(
+                        false,
+                        vec![],
+                        applied_paths,
+                        true,
+                        "rollback_failed_critical",
+                    ))
+                };
+            }
             applied_files.extend(applied_paths(prepared));
         }
 
         self.append_journal_event(PatchJournalEvent {
             proposal_id,
+            attempt_index,
             sequence: 1,
             state: "applied",
             writes,
@@ -287,8 +527,129 @@ impl PatchEngine {
             conflict_paths: &[],
             rolled_back: false,
             reason_code: "applied",
+            context,
         })?;
         Ok(result(true, applied_files, vec![], false, "applied"))
+    }
+
+    pub fn recovery_report(
+        &self,
+        proposal_id: &str,
+    ) -> Result<PatchRecoveryReport, PatchEngineError> {
+        let journal_ref = format!("patch-engine:journal:{proposal_id}");
+        let relative = journal_relative_path(proposal_id);
+        let path = self.root.join(&relative);
+        self.guard_no_symlink(&relative, &path)?;
+        self.verify_containment(&relative, &path)?;
+
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(PatchRecoveryReport {
+                    proposal_id: proposal_id.to_string(),
+                    journal_ref,
+                    attempts: Vec::new(),
+                    latest_attempt: None,
+                    requires_operator_review: false,
+                    reason_code: "journal_missing".to_string(),
+                });
+            }
+            Err(source) => {
+                return Err(PatchEngineError::Io {
+                    path: relative,
+                    stage: "recovery_read_journal",
+                    source,
+                });
+            }
+        };
+
+        let mut attempts = BTreeMap::<u64, PatchRecoveryAttempt>::new();
+        let mut requires_operator_review = false;
+        let mut inferred_attempt_index = 0;
+
+        for line in content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let Ok(event) = serde_json::from_str::<Value>(line) else {
+                requires_operator_review = true;
+                continue;
+            };
+            let state = json_string(&event, "state").unwrap_or_else(|| {
+                requires_operator_review = true;
+                "unknown".to_string()
+            });
+            if event.get("attempt_index").and_then(Value::as_u64).is_none()
+                && (state == "planned" || inferred_attempt_index == 0)
+            {
+                inferred_attempt_index += 1;
+            }
+            let attempt_index = event
+                .get("attempt_index")
+                .and_then(Value::as_u64)
+                .unwrap_or(inferred_attempt_index.max(1));
+            let attempt_id = json_string(&event, "attempt_id")
+                .unwrap_or_else(|| journal_attempt_id(attempt_index));
+            let reason_code = json_string(&event, "reason_code").unwrap_or_else(|| {
+                requires_operator_review = true;
+                "missing_reason_code".to_string()
+            });
+            let rolled_back = event
+                .get("rolled_back")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let applied_files = json_string_array(&event, "applied_files");
+            let conflict_paths = json_string_array(&event, "conflict_paths");
+
+            let attempt = attempts
+                .entry(attempt_index)
+                .or_insert_with(|| PatchRecoveryAttempt {
+                    attempt_index,
+                    attempt_id: attempt_id.clone(),
+                    state: "unknown".to_string(),
+                    reason_code: "missing_reason_code".to_string(),
+                    rolled_back: false,
+                    applied_files: Vec::new(),
+                    conflict_paths: Vec::new(),
+                    journal_events: 0,
+                });
+            attempt.attempt_id = attempt_id;
+            attempt.state = state;
+            attempt.reason_code = reason_code;
+            attempt.rolled_back = rolled_back;
+            attempt.applied_files = applied_files;
+            attempt.conflict_paths = conflict_paths;
+            attempt.journal_events += 1;
+        }
+
+        let attempts = attempts.into_values().collect::<Vec<_>>();
+        let latest_attempt = attempts.last().cloned();
+        if let Some(latest) = &latest_attempt
+            && matches!(
+                latest.state.as_str(),
+                "planned" | "rollback_failed_critical" | "unknown"
+            )
+        {
+            requires_operator_review = true;
+        }
+        let reason_code = if requires_operator_review {
+            "operator_review_required".to_string()
+        } else {
+            latest_attempt
+                .as_ref()
+                .map(|attempt| attempt.reason_code.clone())
+                .unwrap_or_else(|| "journal_missing".to_string())
+        };
+
+        Ok(PatchRecoveryReport {
+            proposal_id: proposal_id.to_string(),
+            journal_ref,
+            attempts,
+            latest_attempt,
+            requires_operator_review,
+            reason_code,
+        })
     }
 
     pub fn resolve(&self, relative: &str) -> Result<PathBuf, PatchEngineError> {
@@ -370,6 +731,7 @@ impl PatchEngine {
             .ok()
             .map(|metadata| metadata.permissions().mode())
             .unwrap_or(0o644);
+        self.scavenge_stale_temp_siblings(relative, target)?;
         let temp = temp_sibling(target);
         let mut file = OpenOptions::new()
             .write(true)
@@ -471,6 +833,235 @@ impl PatchEngine {
         Ok(())
     }
 
+    fn scavenge_stale_temp_siblings(
+        &self,
+        relative: &str,
+        target: &Path,
+    ) -> Result<(), PatchEngineError> {
+        let parent = target
+            .parent()
+            .ok_or_else(|| PatchEngineError::PathEscape(relative.to_string()))?;
+        let Some(file_name) = target
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+        else {
+            return Ok(());
+        };
+        let now = self.temp_scavenge_now();
+        let mut removed_any = false;
+        let entries = fs::read_dir(parent).map_err(|source| PatchEngineError::Io {
+            path: relative.to_string(),
+            stage: "scavenge_temp_dir",
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| PatchEngineError::Io {
+                path: relative.to_string(),
+                stage: "scavenge_temp_entry",
+                source,
+            })?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !is_patch_temp_sibling_name(&name, &file_name) {
+                continue;
+            }
+            let file_type = entry.file_type().map_err(|source| PatchEngineError::Io {
+                path: relative.to_string(),
+                stage: "scavenge_temp_type",
+                source,
+            })?;
+            if !file_type.is_file() && !file_type.is_symlink() {
+                continue;
+            }
+            let metadata =
+                fs::symlink_metadata(entry.path()).map_err(|source| PatchEngineError::Io {
+                    path: relative.to_string(),
+                    stage: "scavenge_temp_metadata",
+                    source,
+                })?;
+            let Ok(modified) = metadata.modified() else {
+                continue;
+            };
+            let Ok(age) = now.duration_since(modified) else {
+                continue;
+            };
+            if age < STALE_PATCH_TEMP_MAX_AGE {
+                continue;
+            }
+            fs::remove_file(entry.path()).map_err(|source| PatchEngineError::Io {
+                path: relative.to_string(),
+                stage: "scavenge_temp_remove",
+                source,
+            })?;
+            removed_any = true;
+        }
+        if removed_any && let Ok(dir) = File::open(parent) {
+            let _ = dir.sync_all();
+        }
+        Ok(())
+    }
+
+    fn temp_scavenge_now(&self) -> SystemTime {
+        #[cfg(test)]
+        if let Some(now) = self.temp_scavenge_now {
+            return now;
+        }
+        SystemTime::now()
+    }
+
+    fn read_target_text(
+        &self,
+        relative: &str,
+        target: &Path,
+        stage: &'static str,
+    ) -> Result<Option<String>, PatchEngineError> {
+        match fs::read_to_string(target) {
+            Ok(content) => Ok(Some(content)),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(PatchEngineError::Io {
+                path: relative.to_string(),
+                stage,
+                source,
+            }),
+        }
+    }
+
+    fn verify_applied_write(
+        &self,
+        write: &PlannedPatchWrite,
+        prepared: &PreparedPatchWrite,
+    ) -> Result<(), PatchEngineError> {
+        match write.operation {
+            FileOperation::Create | FileOperation::Modify => {
+                let actual = self
+                    .read_target_text(&write.path, &prepared.target, "read_back")?
+                    .map(|content| content_hash(&content))
+                    .unwrap_or_else(|| "missing".to_string());
+                let expected = content_hash(&write.after_content);
+                if actual != expected {
+                    return Err(PatchEngineError::ReadBackMismatch {
+                        path: write.path.clone(),
+                        expected,
+                        actual,
+                    });
+                }
+            }
+            FileOperation::Delete => {
+                if prepared.target.exists() {
+                    return Err(PatchEngineError::ReadBackMismatch {
+                        path: write.path.clone(),
+                        expected: "missing".to_string(),
+                        actual: "present".to_string(),
+                    });
+                }
+            }
+            FileOperation::Rename => {
+                if prepared.target.exists() {
+                    return Err(PatchEngineError::ReadBackMismatch {
+                        path: write.path.clone(),
+                        expected: "missing".to_string(),
+                        actual: "present".to_string(),
+                    });
+                }
+                let Some((dest_relative, dest_target)) = &prepared.rename_to else {
+                    return Err(PatchEngineError::ReadBackMismatch {
+                        path: write.path.clone(),
+                        expected: "rename_destination".to_string(),
+                        actual: "missing_rename_destination".to_string(),
+                    });
+                };
+                let actual = self
+                    .read_target_text(dest_relative, dest_target, "read_back")?
+                    .map(|content| content_hash(&content))
+                    .unwrap_or_else(|| "missing".to_string());
+                if actual != write.expected_before_hash {
+                    return Err(PatchEngineError::ReadBackMismatch {
+                        path: dest_relative.clone(),
+                        expected: write.expected_before_hash.clone(),
+                        actual,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn revalidate_before_apply(
+        &self,
+        write: &PlannedPatchWrite,
+        prepared: &PreparedPatchWrite,
+    ) -> Result<(), PatchEngineError> {
+        self.guard_no_symlink(&write.path, &prepared.target)?;
+        self.verify_containment(&write.path, &prepared.target)?;
+
+        let current = self.read_target_text(&write.path, &prepared.target, "pre_apply_read")?;
+        let current_hash = current.as_deref().map(content_hash);
+        match write.operation {
+            FileOperation::Create => {
+                if let Some(actual) = current_hash {
+                    return Err(PatchEngineError::PreApplyChanged {
+                        path: write.path.clone(),
+                        expected: "missing".to_string(),
+                        actual,
+                    });
+                }
+            }
+            FileOperation::Modify | FileOperation::Delete | FileOperation::Rename => {
+                let actual = current_hash.unwrap_or_else(|| "missing".to_string());
+                if actual != write.expected_before_hash {
+                    return Err(PatchEngineError::PreApplyChanged {
+                        path: write.path.clone(),
+                        expected: write.expected_before_hash.clone(),
+                        actual,
+                    });
+                }
+            }
+        }
+
+        if write.operation == FileOperation::Rename {
+            let Some((dest_relative, dest_target)) = &prepared.rename_to else {
+                return Err(PatchEngineError::PreApplyChanged {
+                    path: write.path.clone(),
+                    expected: "rename_destination".to_string(),
+                    actual: "missing_rename_destination".to_string(),
+                });
+            };
+            self.guard_no_symlink(dest_relative, dest_target)?;
+            self.verify_containment(dest_relative, dest_target)?;
+            let dest_current =
+                self.read_target_text(dest_relative, dest_target, "pre_apply_read")?;
+            if let Some(content) = dest_current {
+                return Err(PatchEngineError::PreApplyChanged {
+                    path: dest_relative.clone(),
+                    expected: "missing".to_string(),
+                    actual: content_hash(&content),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn apply_prepared_write(
+        &self,
+        write: &PlannedPatchWrite,
+        prepared: &PreparedPatchWrite,
+    ) -> Result<(), PatchEngineError> {
+        match write.operation {
+            FileOperation::Create | FileOperation::Modify => self.atomic_replace(
+                &write.path,
+                &prepared.target,
+                write.after_content.as_bytes(),
+            ),
+            FileOperation::Delete => self.atomic_remove(&write.path, &prepared.target),
+            FileOperation::Rename => {
+                let Some((dest, dest_target)) = &prepared.rename_to else {
+                    unreachable!("rename preflight requires destination");
+                };
+                self.atomic_rename(&write.path, &prepared.target, dest, dest_target)
+            }
+        }
+    }
+
     fn rollback(&self, targets: &[PreparedPatchWrite]) -> Result<(), PatchEngineError> {
         for target in targets.iter().rev() {
             match target.operation {
@@ -530,9 +1121,19 @@ impl PatchEngine {
                 })
             })
             .collect::<Vec<_>>();
+        let context = event.context.map(|context| {
+            json!({
+                "lease_id_hash": content_hash(&context.lease_id),
+                "fence_token_hash": content_hash(&context.fence_token),
+                "leased_path_count": context.leased_paths.len(),
+                "raw_tokens_redacted": true,
+            })
+        });
         let event = json!({
             "schema": PATCH_TRANSACTION_JOURNAL_SCHEMA,
             "proposal_id": event.proposal_id,
+            "attempt_index": event.attempt_index,
+            "attempt_id": journal_attempt_id(event.attempt_index),
             "sequence": event.sequence,
             "state": event.state,
             "reason_code": event.reason_code,
@@ -541,6 +1142,7 @@ impl PatchEngine {
             "applied_files": event.applied_files,
             "conflict_paths": event.conflict_paths,
             "content_redacted": true,
+            "context": context,
         });
         let line = serde_json::to_string(&event)
             .map_err(|error| PatchEngineError::JournalSerialize(error.to_string()))?;
@@ -572,6 +1174,110 @@ impl PatchEngine {
         }
         Ok(())
     }
+
+    fn next_journal_attempt_index(&self, proposal_id: &str) -> Result<u64, PatchEngineError> {
+        let relative = journal_relative_path(proposal_id);
+        let path = self.root.join(&relative);
+        self.guard_no_symlink(&relative, &path)?;
+        self.verify_containment(&relative, &path)?;
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(1),
+            Err(source) => {
+                return Err(PatchEngineError::Io {
+                    path: relative,
+                    stage: "read_journal_attempts",
+                    source,
+                });
+            }
+        };
+        let mut max_attempt = 0;
+        let mut legacy_attempts = 0;
+        for line in content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let Ok(event) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if let Some(attempt_index) = event.get("attempt_index").and_then(Value::as_u64) {
+                max_attempt = max_attempt.max(attempt_index);
+            } else if event.get("state").and_then(Value::as_str) == Some("planned")
+                || legacy_attempts == 0
+            {
+                legacy_attempts += 1;
+            }
+        }
+        Ok(if max_attempt > 0 {
+            max_attempt + 1
+        } else {
+            legacy_attempts + 1
+        })
+    }
+}
+
+fn error_paths(error: &PatchEngineError) -> Vec<String> {
+    match error {
+        PatchEngineError::Io { path, .. }
+        | PatchEngineError::ReadBackMismatch { path, .. }
+        | PatchEngineError::PreApplyChanged { path, .. } => vec![path.clone()],
+        PatchEngineError::InvalidWorkspace(_)
+        | PatchEngineError::PathEscape(_)
+        | PatchEngineError::SymlinkRejected(_)
+        | PatchEngineError::JournalSerialize(_) => Vec::new(),
+    }
+}
+
+fn pre_apply_reason_code(error: &PatchEngineError) -> &'static str {
+    match error {
+        PatchEngineError::PreApplyChanged { .. } => "toctou_precondition",
+        PatchEngineError::Io { stage, .. } if *stage == "pre_apply_read" => "pre_apply_read_error",
+        _ => "pre_apply_revalidation_error",
+    }
+}
+
+fn missing_leased_paths(
+    context: &PatchApplyContext,
+    touched_paths: &BTreeSet<String>,
+) -> Option<Vec<String>> {
+    if context.lease_id.trim().is_empty() || context.fence_token.trim().is_empty() {
+        return Some(touched_paths.iter().cloned().collect());
+    }
+    let leased = context
+        .leased_paths
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let missing = touched_paths
+        .iter()
+        .filter(|path| !leased.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        None
+    } else {
+        Some(missing)
+    }
+}
+
+fn journal_attempt_id(attempt_index: u64) -> String {
+    format!("attempt-{attempt_index}")
+}
+
+fn json_string(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn json_string_array(value: &Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
 }
 
 pub fn content_hash(content: &str) -> String {
@@ -640,6 +1346,28 @@ fn temp_sibling(target: &Path) -> PathBuf {
         .join(format!(".{file_name}.{}.{stamp}.tmp", std::process::id()))
 }
 
+fn is_patch_temp_sibling_name(name: &str, target_file_name: &str) -> bool {
+    let prefix = format!(".{target_file_name}.");
+    let Some(suffix) = name.strip_prefix(&prefix) else {
+        return false;
+    };
+    let Some(stem) = suffix.strip_suffix(".tmp") else {
+        return false;
+    };
+    let mut parts = stem.split('.');
+    let Some(pid) = parts.next() else {
+        return false;
+    };
+    let Some(stamp) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && !pid.is_empty()
+        && !stamp.is_empty()
+        && pid.bytes().all(|byte| byte.is_ascii_digit())
+        && stamp.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 fn applied_paths(target: &PreparedPatchWrite) -> Vec<String> {
     match &target.rename_to {
         Some((dest, _)) => vec![target.path.clone(), dest.clone()],
@@ -680,6 +1408,36 @@ mod tests {
         root.canonicalize().unwrap()
     }
 
+    struct PreApplyHookGuard;
+
+    impl PreApplyHookGuard {
+        fn install(hook: PreApplyTestHook) -> Self {
+            *PRE_APPLY_TEST_HOOK.lock().expect("pre-apply hook lock") = Some(hook);
+            Self
+        }
+    }
+
+    impl Drop for PreApplyHookGuard {
+        fn drop(&mut self) {
+            *PRE_APPLY_TEST_HOOK.lock().expect("pre-apply hook lock") = None;
+        }
+    }
+
+    struct ApplyFaultHookGuard;
+
+    impl ApplyFaultHookGuard {
+        fn install(hook: ApplyFaultTestHook) -> Self {
+            *APPLY_FAULT_TEST_HOOK.lock().expect("apply fault hook lock") = Some(hook);
+            Self
+        }
+    }
+
+    impl Drop for ApplyFaultHookGuard {
+        fn drop(&mut self) {
+            *APPLY_FAULT_TEST_HOOK.lock().expect("apply fault hook lock") = None;
+        }
+    }
+
     #[test]
     fn digest_is_canonical_sha256_v1() {
         assert_eq!(
@@ -707,6 +1465,11 @@ mod tests {
             )
             .unwrap();
         assert!(result.applied);
+        assert!(
+            result
+                .evidence_refs
+                .contains(&"patch-engine:read-back-verified".to_string())
+        );
         assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "two\n");
         assert_eq!(
             fs::symlink_metadata(root.join("a.txt"))
@@ -716,6 +1479,142 @@ mod tests {
                 & 0o777,
             0o755
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn atomic_replace_scavenges_only_stale_matching_temp_siblings() {
+        let root = workspace("temp-scavenger");
+        let mut engine = PatchEngine::open(&root).unwrap();
+        engine.temp_scavenge_now =
+            Some(SystemTime::now() + STALE_PATCH_TEMP_MAX_AGE + Duration::from_secs(1));
+        fs::write(root.join("a.txt"), "one\n").unwrap();
+        fs::write(root.join(".a.txt.7.8.tmp"), "stale patch temp\n").unwrap();
+        fs::write(root.join(".b.txt.7.8.tmp"), "other target\n").unwrap();
+        fs::write(root.join(".a.txt.bad.8.tmp"), "malformed\n").unwrap();
+
+        let result = engine
+            .apply(
+                "pp-temp-scavenge",
+                &[PlannedPatchWrite {
+                    path: "a.txt".to_string(),
+                    expected_before_hash: content_hash("one\n"),
+                    after_content: "two\n".to_string(),
+                    operation: FileOperation::Modify,
+                    rename_to: None,
+                }],
+            )
+            .unwrap();
+
+        assert!(result.applied);
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "two\n");
+        assert!(!root.join(".a.txt.7.8.tmp").exists());
+        assert!(root.join(".b.txt.7.8.tmp").exists());
+        assert!(root.join(".a.txt.bad.8.tmp").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn atomic_replace_preserves_fresh_matching_temp_siblings() {
+        let root = workspace("fresh-temp-preserved");
+        let engine = PatchEngine::open(&root).unwrap();
+        fs::write(root.join("a.txt"), "one\n").unwrap();
+        fs::write(root.join(".a.txt.7.8.tmp"), "fresh patch temp\n").unwrap();
+
+        let result = engine
+            .apply(
+                "pp-fresh-temp",
+                &[PlannedPatchWrite {
+                    path: "a.txt".to_string(),
+                    expected_before_hash: content_hash("one\n"),
+                    after_content: "two\n".to_string(),
+                    operation: FileOperation::Modify,
+                    rename_to: None,
+                }],
+            )
+            .unwrap();
+
+        assert!(result.applied);
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "two\n");
+        assert!(root.join(".a.txt.7.8.tmp").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn context_bound_apply_records_path_lease_and_redacted_fence() {
+        let root = workspace("path-lease-bound");
+        let engine = PatchEngine::open(&root).unwrap();
+        fs::write(root.join("a.txt"), "one\n").unwrap();
+        let context =
+            PatchApplyContext::new("lease-run-1", "secret-fence-token", ["a.txt".to_string()]);
+
+        let result = engine
+            .apply_with_context(
+                "pp-path-lease",
+                &[PlannedPatchWrite {
+                    path: "a.txt".to_string(),
+                    expected_before_hash: content_hash("one\n"),
+                    after_content: "two\n".to_string(),
+                    operation: FileOperation::Modify,
+                    rename_to: None,
+                }],
+                &context,
+            )
+            .unwrap();
+
+        assert!(result.applied);
+        assert!(
+            result
+                .evidence_refs
+                .contains(&"patch-engine:path-lease-bound".to_string())
+        );
+        assert!(
+            result
+                .evidence_refs
+                .contains(&"patch-engine:fence-token-bound".to_string())
+        );
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "two\n");
+        let journal =
+            fs::read_to_string(root.join(journal_relative_path("pp-path-lease"))).expect("journal");
+        assert!(journal.contains("\"raw_tokens_redacted\":true"));
+        assert!(journal.contains("sha256:v1:"));
+        assert!(!journal.contains("secret-fence-token"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn context_bound_apply_rejects_unleased_paths_without_writing() {
+        let root = workspace("path-lease-missing");
+        let engine = PatchEngine::open(&root).unwrap();
+        fs::write(root.join("a.txt"), "one\n").unwrap();
+        let context =
+            PatchApplyContext::new("lease-run-2", "fence-token-2", ["other.txt".to_string()]);
+
+        let result = engine
+            .apply_with_context(
+                "pp-path-lease-missing",
+                &[PlannedPatchWrite {
+                    path: "a.txt".to_string(),
+                    expected_before_hash: content_hash("one\n"),
+                    after_content: "two\n".to_string(),
+                    operation: FileOperation::Modify,
+                    rename_to: None,
+                }],
+                &context,
+            )
+            .unwrap();
+
+        assert!(!result.applied);
+        assert_eq!(result.reason_code, "path_lease_missing");
+        assert_eq!(result.conflict_paths, vec!["a.txt".to_string()]);
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "one\n");
+        let journal = fs::read_to_string(root.join(journal_relative_path("pp-path-lease-missing")))
+            .expect("journal");
+        let rejected: serde_json::Value = serde_json::from_str(journal.trim()).unwrap();
+        assert_eq!(rejected["state"], "rejected");
+        assert_eq!(rejected["reason_code"], "path_lease_missing");
+        assert_eq!(rejected["conflict_paths"][0], "a.txt");
+        assert_eq!(rejected["context"]["leased_path_count"], 1);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -778,6 +1677,203 @@ mod tests {
         assert!(!result.applied);
         assert_eq!(result.reason_code, "stale_precondition");
         assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "new\n");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pre_apply_revalidation_blocks_toctou_and_rolls_back_prior_writes() {
+        let root = workspace("toctou-revalidation");
+        let engine = PatchEngine::open(&root).unwrap();
+        fs::write(root.join("first.txt"), "first before\n").unwrap();
+        fs::write(root.join("race.txt"), "race before\n").unwrap();
+
+        let race_target = root.join("race.txt");
+        let _hook = PreApplyHookGuard::install(Box::new(move |write| {
+            if write.path == "race.txt" {
+                fs::write(&race_target, "intruder\n").unwrap();
+            }
+        }));
+
+        let result = engine
+            .apply(
+                "pp-toctou-revalidate",
+                &[
+                    PlannedPatchWrite {
+                        path: "first.txt".to_string(),
+                        expected_before_hash: content_hash("first before\n"),
+                        after_content: "first after\n".to_string(),
+                        operation: FileOperation::Modify,
+                        rename_to: None,
+                    },
+                    PlannedPatchWrite {
+                        path: "race.txt".to_string(),
+                        expected_before_hash: content_hash("race before\n"),
+                        after_content: "race after\n".to_string(),
+                        operation: FileOperation::Modify,
+                        rename_to: None,
+                    },
+                ],
+            )
+            .unwrap();
+
+        assert!(!result.applied);
+        assert_eq!(result.reason_code, "toctou_precondition");
+        assert_eq!(result.conflict_paths, vec!["race.txt".to_string()]);
+        assert!(result.rolled_back);
+        assert_eq!(
+            fs::read_to_string(root.join("first.txt")).unwrap(),
+            "first before\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("race.txt")).unwrap(),
+            "intruder\n"
+        );
+
+        let journal =
+            fs::read_to_string(root.join(journal_relative_path("pp-toctou-revalidate"))).unwrap();
+        let lines = journal.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        let rolled_back: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(rolled_back["state"], "rolled_back");
+        assert_eq!(rolled_back["reason_code"], "toctou_precondition");
+        assert_eq!(rolled_back["conflict_paths"][0], "race.txt");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn injected_apply_io_fault_rolls_back_prior_write_and_journals() {
+        let root = workspace("apply-fault-rollback");
+        let engine = PatchEngine::open(&root).unwrap();
+        fs::write(root.join("first.txt"), "first before\n").unwrap();
+        fs::write(root.join("second.txt"), "second before\n").unwrap();
+
+        let _hook = ApplyFaultHookGuard::install(Box::new(|write| {
+            if write.path == "second.txt" {
+                Some(PatchEngineError::Io {
+                    path: write.path.clone(),
+                    stage: "test_apply_fault",
+                    source: std::io::Error::other("injected apply fault"),
+                })
+            } else {
+                None
+            }
+        }));
+
+        let result = engine
+            .apply(
+                "pp-apply-fault-rollback",
+                &[
+                    PlannedPatchWrite {
+                        path: "first.txt".to_string(),
+                        expected_before_hash: content_hash("first before\n"),
+                        after_content: "first after\n".to_string(),
+                        operation: FileOperation::Modify,
+                        rename_to: None,
+                    },
+                    PlannedPatchWrite {
+                        path: "second.txt".to_string(),
+                        expected_before_hash: content_hash("second before\n"),
+                        after_content: "second after\n".to_string(),
+                        operation: FileOperation::Modify,
+                        rename_to: None,
+                    },
+                ],
+            )
+            .unwrap();
+
+        assert!(!result.applied);
+        assert!(result.rolled_back);
+        assert_eq!(result.reason_code, "io_rolled_back");
+        assert!(
+            result
+                .evidence_refs
+                .contains(&"patch-engine:rollback-attempted".to_string())
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("first.txt")).unwrap(),
+            "first before\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("second.txt")).unwrap(),
+            "second before\n"
+        );
+
+        let journal =
+            fs::read_to_string(root.join(journal_relative_path("pp-apply-fault-rollback")))
+                .expect("journal");
+        let lines = journal.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        let rolled_back: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(rolled_back["state"], "rolled_back");
+        assert_eq!(rolled_back["reason_code"], "io_rolled_back");
+        assert_eq!(rolled_back["rolled_back"], true);
+        assert_eq!(rolled_back["applied_files"][0], "first.txt");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recovery_report_tracks_repeated_attempts_and_latest_terminal_state() {
+        let root = workspace("attempt-recovery");
+        let engine = PatchEngine::open(&root).unwrap();
+        fs::write(root.join("a.txt"), "current\n").unwrap();
+
+        let rejected = engine
+            .apply(
+                "pp-attempt-recovery",
+                &[PlannedPatchWrite {
+                    path: "a.txt".to_string(),
+                    expected_before_hash: content_hash("old\n"),
+                    after_content: "ignored\n".to_string(),
+                    operation: FileOperation::Modify,
+                    rename_to: None,
+                }],
+            )
+            .unwrap();
+        assert!(!rejected.applied);
+        assert_eq!(rejected.reason_code, "stale_precondition");
+
+        let applied = engine
+            .apply(
+                "pp-attempt-recovery",
+                &[PlannedPatchWrite {
+                    path: "a.txt".to_string(),
+                    expected_before_hash: content_hash("current\n"),
+                    after_content: "after\n".to_string(),
+                    operation: FileOperation::Modify,
+                    rename_to: None,
+                }],
+            )
+            .unwrap();
+        assert!(applied.applied);
+
+        let report = engine.recovery_report("pp-attempt-recovery").unwrap();
+        assert_eq!(report.reason_code, "applied");
+        assert!(!report.requires_operator_review);
+        assert_eq!(report.attempts.len(), 2);
+        assert_eq!(report.attempts[0].attempt_index, 1);
+        assert_eq!(report.attempts[0].attempt_id, "attempt-1");
+        assert_eq!(report.attempts[0].state, "rejected");
+        assert_eq!(report.attempts[0].reason_code, "stale_precondition");
+        assert_eq!(report.attempts[0].journal_events, 1);
+        assert_eq!(report.attempts[1].attempt_index, 2);
+        assert_eq!(report.attempts[1].attempt_id, "attempt-2");
+        assert_eq!(report.attempts[1].state, "applied");
+        assert_eq!(report.attempts[1].reason_code, "applied");
+        assert_eq!(report.attempts[1].applied_files, vec!["a.txt".to_string()]);
+        assert_eq!(report.attempts[1].journal_events, 2);
+        assert_eq!(
+            report
+                .latest_attempt
+                .as_ref()
+                .map(|attempt| attempt.attempt_index),
+            Some(2)
+        );
+
+        let journal =
+            fs::read_to_string(root.join(journal_relative_path("pp-attempt-recovery"))).unwrap();
+        assert!(journal.contains("\"attempt_index\":1"));
+        assert!(journal.contains("\"attempt_id\":\"attempt-2\""));
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "after\n");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -929,6 +2025,39 @@ mod tests {
             fs::read_to_string(root.join("new.txt")).unwrap(),
             "already\n"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn non_utf8_preflight_is_typed_error_and_never_overwritten_as_missing() {
+        let root = workspace("non-utf8-preflight");
+        fs::write(root.join("binary.bin"), [0xff, 0xfe, 0xfd]).unwrap();
+        let engine = PatchEngine::open(&root).unwrap();
+        let error = engine
+            .apply(
+                "pp-non-utf8",
+                &[PlannedPatchWrite {
+                    path: "binary.bin".to_string(),
+                    expected_before_hash: content_hash(""),
+                    after_content: "replacement\n".to_string(),
+                    operation: FileOperation::Create,
+                    rename_to: None,
+                }],
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            PatchEngineError::Io {
+                path,
+                stage: "preflight_read",
+                source: _
+            } if path == "binary.bin"
+        ));
+        assert_eq!(
+            fs::read(root.join("binary.bin")).unwrap(),
+            [0xff, 0xfe, 0xfd]
+        );
+        assert!(!root.join(journal_relative_path("pp-non-utf8")).exists());
         let _ = fs::remove_dir_all(root);
     }
 

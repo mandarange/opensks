@@ -1,0 +1,181 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ObjectivePlanReceipt",
+  "type": "object",
+  "required": [
+    "graph_hash",
+    "graph_id",
+    "max_parallelism",
+    "objective_hash",
+    "plan_hash",
+    "repair_action_count",
+    "role_count",
+    "schema",
+    "source",
+    "work_template_count"
+  ],
+  "properties": {
+    "compiled_plan_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "graph_hash": {
+      "type": "string"
+    },
+    "graph_id": {
+      "type": "string"
+    },
+    "graph_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "max_parallelism": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "objective_hash": {
+      "type": "string"
+    },
+    "plan_hash": {
+      "type": "string"
+    },
+    "planner_model_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "planner_provider_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "planner_response_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "planner_response_hash": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "repair_action_count": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "role_count": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "schema": {
+      "type": "string"
+    },
+    "shard_policy": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/PlannerShardPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "shard_policy_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source": {
+      "type": "string"
+    },
+    "work_template_count": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "PlannerShardPolicy": {
+      "type": "object",
+      "required": [
+        "candidate_selection_policy",
+        "id",
+        "implementation_shard_count",
+        "max_parallelism",
+        "role_count",
+        "schema",
+        "source",
+        "verifier_shard_count"
+      ],
+      "properties": {
+        "candidate_selection_policy": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "implementation_shard_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "max_parallelism": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "required_gates": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "role_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "schema": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "verifier_shard_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

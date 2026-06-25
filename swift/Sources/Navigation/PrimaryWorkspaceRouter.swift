@@ -24,6 +24,7 @@ struct PrimaryWorkspaceRouter: View {
                 ChatWorkspaceView(
                     conversations: coordinator.conversations,
                     git: coordinator.git,
+                    providers: coordinator.providers,
                     pipelines: coordinator.pipelines,
                     onOpenGraph: { coordinator.openGraph(runId: $0) }
                 )
@@ -99,6 +100,7 @@ struct PrimaryWorkspaceRouter: View {
 /// fixed-center RootView so the center is now route-driven).
 struct CodeWorkspaceView: View {
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var coordinator: AppCoordinator
     @State private var editorFraction: CGFloat = 0.62
 
     var body: some View {
@@ -106,7 +108,11 @@ struct CodeWorkspaceView: View {
             let h = geo.size.height
             let editorH = max(160, h * editorFraction)
             VStack(spacing: 0) {
-                EditorWorkspaceView(store: state.editorStore)
+                EditorWorkspaceView(
+                    store: state.editorStore,
+                    onAttachContext: attachContextToChat,
+                    onDocumentTextChanged: refreshChatContext
+                )
                     .frame(maxWidth: .infinity)
                     .frame(height: state.terminalCollapsed ? h - 30 : editorH)
                 if !state.terminalCollapsed {
@@ -137,6 +143,24 @@ struct CodeWorkspaceView: View {
         .opacity(0)
         .frame(width: 0, height: 0)
         .accessibilityHidden(true)
+    }
+
+    private func attachContextToChat(_ ref: EditorContextRef, currentText: String) {
+        let conversations = coordinator.conversations
+        guard let conversationID = conversations.selectedConversationID ?? conversations.summaries.first?.id else {
+            return
+        }
+        conversations.attachEditorContext(ref, to: conversationID, currentText: currentText)
+        conversations.selectedConversationID = conversationID
+        Task { await conversations.setActive(conversationID) }
+        coordinator.navigation.route = .chat
+    }
+
+    private func refreshChatContext(workspaceRelativePath: String, fullText: String) {
+        coordinator.conversations.refreshEditorContexts(
+            workspaceRelativePath: workspaceRelativePath,
+            fullText: fullText
+        )
     }
 
     /// Invoke the standard find bar on the first-responder text view by sending

@@ -9,15 +9,38 @@ pub const ENGINE_EVENT_SCHEMA: &str = "opensks.engine-event.v1";
 pub const EXECUTION_EVENT_SCHEMA: &str = "opensks.execution-event.v1";
 pub const EXECUTION_EVENT_ENVELOPE_SCHEMA: &str = "opensks.execution-event-envelope.v1";
 pub const WORK_ITEM_SCHEMA: &str = "opensks.work-item.v1";
+pub const PROVIDER_CONNECTION_SCHEMA: &str = "opensks.provider-connection.v1";
+pub const PROVIDER_MUTATION_SCHEMA: &str = "opensks.provider-mutation.v1";
+pub const SECRET_REF_SCHEMA: &str = "opensks.secret-ref.v1";
+pub const MODEL_CATALOG_ENTRY_SCHEMA: &str = "opensks.model-catalog-entry.v1";
+pub const PROVIDER_PROBE_RECEIPT_SCHEMA: &str = "opensks.provider-probe-receipt.v1";
 pub const MODEL_PROFILE_SCHEMA: &str = "opensks.model-profile.v1";
 pub const PROVIDER_DESCRIPTOR_SCHEMA: &str = "opensks.provider-descriptor.v1";
 pub const ROUTING_DECISION_SCHEMA: &str = "opensks.routing-decision.v1";
 pub const SCHEDULER_WORK_ITEM_SCHEMA: &str = "opensks.scheduler-work-item.v1";
 pub const CONCURRENCY_DECISION_SCHEMA: &str = "opensks.concurrency-decision.v1";
 pub const PIPELINE_GRAPH_SCHEMA: &str = "opensks.pipeline-graph.v1";
+pub const OBJECTIVE_PLAN_REQUEST_SCHEMA: &str = "opensks.objective-plan-request.v1";
+pub const OBJECTIVE_PLAN_RECEIPT_SCHEMA: &str = "opensks.objective-plan-receipt.v1";
+pub const PLANNER_SHARD_POLICY_SCHEMA: &str = "opensks.planner-shard-policy.v1";
 pub const COMPILED_PLAN_SCHEMA: &str = "opensks.compiled-plan.v1";
 pub const GIT_ISOLATION_SCHEMA: &str = "opensks.git-isolation.v1";
+pub const WORKTREE_ISOLATION_INVENTORY_RECEIPT_SCHEMA: &str =
+    "opensks.worktree-isolation-inventory-receipt.v1";
+pub const WORKTREE_ISOLATION_RECOVERY_RECEIPT_SCHEMA: &str =
+    "opensks.worktree-isolation-recovery-receipt.v1";
 pub const PATCH_ENVELOPE_SCHEMA: &str = "opensks.patch-envelope.v1";
+pub const ROLE_SUBCONTRACT_CANDIDATE_RECEIPT_SCHEMA: &str = "opensks.role-subcontract-candidate.v1";
+pub const SEMANTIC_VERIFIER_JUDGMENT_SCHEMA: &str = "opensks.semantic-verifier-judgment.v1";
+pub const INTEGRATION_CANDIDATE_RECEIPT_SCHEMA: &str = "opensks.integration-candidate.v1";
+pub const INTEGRATION_CANDIDATE_SELECTION_RECEIPT_SCHEMA: &str =
+    "opensks.integration-candidate-selection-receipt.v1";
+pub const INTEGRATION_VERIFICATION_RECEIPT_SCHEMA: &str =
+    "opensks.integration-verification-receipt.v1";
+pub const INTEGRATION_APPLY_RECEIPT_SCHEMA: &str = "opensks.integration-apply-receipt.v1";
+pub const INTEGRATION_REPAIR_ITEM_SCHEMA: &str = "opensks.integration-repair-item.v1";
+pub const INTEGRATION_FINAL_SEAL_SCHEMA: &str = "opensks.integration-final-seal.v1";
+pub const INTEGRATION_CLEANUP_RECEIPT_SCHEMA: &str = "opensks.integration-cleanup-receipt.v1";
 pub const COMPLETION_PROOF_SCHEMA: &str = "opensks.completion-proof.v1";
 pub const HOOK_SPEC_SCHEMA: &str = "opensks.hook-spec.v1";
 pub const HOOK_DECISION_SCHEMA: &str = "opensks.hook-decision.v1";
@@ -27,6 +50,7 @@ pub const TRIWIKI_RECORD_SCHEMA: &str = "opensks.triwiki-record.v1";
 pub const CONTEXT_PACK_SCHEMA: &str = "opensks.context-pack.v1";
 pub const IMAGE_ASSET_SCHEMA: &str = "opensks.image-asset.v1";
 pub const IMAGE_LEDGER_SCHEMA: &str = "opensks.image-ledger.v1";
+pub const IMAGE_PROVENANCE_RECEIPT_SCHEMA: &str = "opensks.image-provenance-receipt.v1";
 pub const REASONING_REPORT_SCHEMA: &str = "opensks.reasoning-report.v1";
 pub const OUTBOX_ITEM_SCHEMA: &str = "opensks.outbox-item.v1";
 pub const OUTBOX_DISPATCH_REPORT_SCHEMA: &str = "opensks.outbox-dispatch-report.v1";
@@ -43,6 +67,9 @@ pub enum EngineRequestKind {
     SubscribeEvents,
     ConversationTurnStart,
     ConversationSupervisorTick,
+    IntegrationCandidateApply,
+    WorktreeInventory,
+    WorktreeRecover,
     RunStart,
     RunPause,
     RunResume,
@@ -138,6 +165,7 @@ pub enum EventKind {
     RunPaused,
     RunResumed,
     RunCancelled,
+    RunCompleted,
     SteeringRequested,
     ApprovalRequested,
     ApprovalApproved,
@@ -150,6 +178,10 @@ pub enum EventKind {
     LeaseExpired,
     VerificationPassed,
     VerificationFailed,
+    GitCommitReceipt,
+    GitPushReceipt,
+    GitPushFailed,
+    ImageArtifactCreated,
     SnapshotWritten,
     Unknown,
 }
@@ -161,6 +193,7 @@ impl EventKind {
             Self::RunPaused => "run_paused",
             Self::RunResumed => "run_resumed",
             Self::RunCancelled => "run_cancelled",
+            Self::RunCompleted => "run_completed",
             Self::SteeringRequested => "steering_requested",
             Self::ApprovalRequested => "approval_requested",
             Self::ApprovalApproved => "approval_approved",
@@ -173,6 +206,10 @@ impl EventKind {
             Self::LeaseExpired => "lease_expired",
             Self::VerificationPassed => "verification_passed",
             Self::VerificationFailed => "verification_failed",
+            Self::GitCommitReceipt => "git_commit_receipt",
+            Self::GitPushReceipt => "git_push_receipt",
+            Self::GitPushFailed => "git_push_failed",
+            Self::ImageArtifactCreated => "image_artifact_created",
             Self::SnapshotWritten => "snapshot_written",
             Self::Unknown => "unknown",
         }
@@ -184,6 +221,7 @@ impl EventKind {
             "run_paused" => Self::RunPaused,
             "run_resumed" => Self::RunResumed,
             "run_cancelled" => Self::RunCancelled,
+            "run_completed" => Self::RunCompleted,
             "steering_requested" => Self::SteeringRequested,
             "approval_requested" => Self::ApprovalRequested,
             "approval_approved" => Self::ApprovalApproved,
@@ -196,6 +234,10 @@ impl EventKind {
             "lease_expired" => Self::LeaseExpired,
             "verification_passed" => Self::VerificationPassed,
             "verification_failed" => Self::VerificationFailed,
+            "git_commit_receipt" => Self::GitCommitReceipt,
+            "git_push_receipt" => Self::GitPushReceipt,
+            "git_push_failed" => Self::GitPushFailed,
+            "image_artifact_created" => Self::ImageArtifactCreated,
             "snapshot_written" => Self::SnapshotWritten,
             _ => Self::Unknown,
         }
@@ -315,6 +357,56 @@ impl EngineRequest {
                 supervisor_id: Some(supervisor_id.into()),
                 lease_ttl_ms: Some(lease_ttl_ms),
                 reason_code: Some("conversation_supervisor_tick_requested".to_string()),
+                ..EngineRequestParams::default()
+            },
+        }
+    }
+
+    pub fn integration_candidate_apply(
+        id: impl Into<String>,
+        run_id: impl Into<String>,
+        approval_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema: ENGINE_REQUEST_SCHEMA.to_string(),
+            id: id.into(),
+            kind: EngineRequestKind::IntegrationCandidateApply,
+            protocol_version: CONTRACT_VERSION.to_string(),
+            params: EngineRequestParams {
+                run_id: Some(run_id.into()),
+                approval_id: Some(approval_id.into()),
+                scope: Some("integration_apply".to_string()),
+                reason_code: Some("integration_apply_requested".to_string()),
+                ..EngineRequestParams::default()
+            },
+        }
+    }
+
+    pub fn worktree_inventory(id: impl Into<String>, run_id: impl Into<String>) -> Self {
+        Self {
+            schema: ENGINE_REQUEST_SCHEMA.to_string(),
+            id: id.into(),
+            kind: EngineRequestKind::WorktreeInventory,
+            protocol_version: CONTRACT_VERSION.to_string(),
+            params: EngineRequestParams {
+                run_id: Some(run_id.into()),
+                scope: Some("worktree_inventory".to_string()),
+                reason_code: Some("worktree_inventory_requested".to_string()),
+                ..EngineRequestParams::default()
+            },
+        }
+    }
+
+    pub fn worktree_recover(id: impl Into<String>, run_id: impl Into<String>) -> Self {
+        Self {
+            schema: ENGINE_REQUEST_SCHEMA.to_string(),
+            id: id.into(),
+            kind: EngineRequestKind::WorktreeRecover,
+            protocol_version: CONTRACT_VERSION.to_string(),
+            params: EngineRequestParams {
+                run_id: Some(run_id.into()),
+                scope: Some("worktree_recover".to_string()),
+                reason_code: Some("worktree_recover_requested".to_string()),
                 ..EngineRequestParams::default()
             },
         }
@@ -673,6 +765,204 @@ pub struct SecretlessConfigRef {
     pub reference: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretStoreKind {
+    MacosKeychain,
+    ExternalBroker,
+    LocalDevelopment,
+    TestMemory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SecretRef {
+    pub schema: String,
+    pub store: SecretStoreKind,
+    pub service: String,
+    pub account: String,
+    pub version: u64,
+}
+
+impl SecretRef {
+    pub fn macos_keychain(
+        service: impl Into<String>,
+        account: impl Into<String>,
+        version: u64,
+    ) -> Self {
+        Self {
+            schema: SECRET_REF_SCHEMA.to_string(),
+            store: SecretStoreKind::MacosKeychain,
+            service: service.into(),
+            account: account.into(),
+            version,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    OpenRouter,
+    OpenAi,
+    OpenAiCompatible,
+    AnthropicCompatible,
+    GoogleCompatible,
+    LocalOpenAiCompatible,
+    Custom,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderEndpoint {
+    pub base_url: String,
+    #[serde(default)]
+    pub allow_insecure_http: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderHealthSnapshot {
+    pub state: HealthState,
+    pub circuit_open: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at_ms: Option<u64>,
+    pub reason_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_ref: Option<String>,
+}
+
+impl ProviderHealthSnapshot {
+    pub fn unknown() -> Self {
+        Self {
+            state: HealthState::Unknown,
+            circuit_open: false,
+            checked_at_ms: None,
+            reason_code: "not_probed".to_string(),
+            diagnostic_ref: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderConcurrencyPolicy {
+    pub max_concurrent_requests: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests_per_minute: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_per_minute: Option<u64>,
+}
+
+impl Default for ProviderConcurrencyPolicy {
+    fn default() -> Self {
+        Self {
+            max_concurrent_requests: 1,
+            requests_per_minute: None,
+            tokens_per_minute: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderConnection {
+    pub schema: String,
+    pub id: String,
+    pub kind: ProviderKind,
+    pub display_name: String,
+    pub enabled: bool,
+    pub endpoint: ProviderEndpoint,
+    pub auth: SecretRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_ref: Option<String>,
+    pub health: ProviderHealthSnapshot,
+    pub concurrency: ProviderConcurrencyPolicy,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelCatalogEntry {
+    pub schema: String,
+    pub id: String,
+    pub provider_id: String,
+    pub remote_model_id: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub capabilities: ModelCapabilities,
+    pub limits: ModelLimits,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<PricingInfo>,
+    pub health: HealthState,
+    #[serde(default)]
+    pub role_scores: BTreeMap<ModelRole, RoleScore>,
+    pub catalog_revision: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderProbeHttpCategory {
+    NotSent,
+    Success,
+    AuthRejected,
+    RateLimited,
+    ClientError,
+    ServerError,
+    NetworkError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LatencyBucket {
+    NotMeasured,
+    Under250Ms,
+    Under1S,
+    Under5S,
+    Over5S,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderProbeReceipt {
+    pub schema: String,
+    pub provider_id: String,
+    pub endpoint_host_redacted: String,
+    pub http_category: ProviderProbeHttpCategory,
+    pub latency_bucket: LatencyBucket,
+    pub auth_accepted: bool,
+    pub model_list_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_count: Option<u32>,
+    pub occurred_at_ms: u64,
+    pub reason_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderMutationKind {
+    Created,
+    Updated,
+    CredentialReplaced,
+    CredentialDeleted,
+    Enabled,
+    Disabled,
+    Deleted,
+    ModelsSynced,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderMutationReceipt {
+    pub schema: String,
+    pub provider_id: String,
+    pub mutation: ProviderMutationKind,
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_ref: Option<SecretRef>,
+    pub secret_value_exposed: bool,
+    pub occurred_at_ms: u64,
+    pub reason_code: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RoleScore {
     pub score: f64,
@@ -714,11 +1004,32 @@ pub struct ProviderDescriptor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RoutingStatus {
+    /// A user/thread setting requested a model or auto route, but no registry
+    /// snapshot has validated provider/model/capability/health yet.
+    Requested,
+    /// A registry snapshot found an enabled compatible provider/model.
+    Resolved,
+    /// Secret resolution, policy, health/circuit, and concurrency admission are
+    /// all satisfied; the request can be dispatched.
+    DispatchReady,
+    /// A provider request was actually sent.
+    Dispatched,
+    /// Legacy compatibility label. New product paths should prefer the staged
+    /// statuses above and only use this for old receipts already persisted.
     Routed,
     BlockedMissingCapability,
     BlockedDisabled,
     BlockedPolicy,
     BlockedProviderHealth,
+}
+
+impl RoutingStatus {
+    pub fn has_resolved_model(&self) -> bool {
+        matches!(
+            self,
+            Self::Resolved | Self::DispatchReady | Self::Dispatched | Self::Routed
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -882,7 +1193,21 @@ pub struct SchedulerWorkItem {
     pub dependencies: Vec<String>,
     pub capability_requirements: CapabilityRequirements,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_pack_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_context_pack_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_selection_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_required_source_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_required_verifier_count: Option<usize>,
     pub path_scope: PathScope,
     pub budget: WorkBudget,
     pub retry: RetryPolicy,
@@ -1188,6 +1513,102 @@ pub struct GraphMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ObjectivePlanRequest {
+    pub schema: String,
+    pub objective: String,
+    #[serde(default = "default_objective_plan_max_parallelism")]
+    pub max_parallelism: u32,
+    #[serde(default = "default_objective_plan_role_count")]
+    pub role_count: u32,
+    #[serde(default = "default_true")]
+    pub require_git_worktree: bool,
+    #[serde(default = "default_true")]
+    pub require_integration_approval: bool,
+    #[serde(default)]
+    pub include_image_lane: bool,
+    #[serde(default)]
+    pub include_research_lane: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+impl ObjectivePlanRequest {
+    pub fn new(objective: impl Into<String>) -> Self {
+        Self {
+            schema: OBJECTIVE_PLAN_REQUEST_SCHEMA.to_string(),
+            objective: objective.into(),
+            max_parallelism: default_objective_plan_max_parallelism(),
+            role_count: default_objective_plan_role_count(),
+            require_git_worktree: true,
+            require_integration_approval: true,
+            include_image_lane: false,
+            include_research_lane: false,
+            evidence_refs: Vec::new(),
+        }
+    }
+}
+
+fn default_objective_plan_max_parallelism() -> u32 {
+    8
+}
+
+fn default_objective_plan_role_count() -> u32 {
+    4
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ObjectivePlanReceipt {
+    pub schema: String,
+    pub objective_hash: String,
+    pub graph_id: String,
+    pub graph_hash: String,
+    pub plan_hash: String,
+    pub source: String,
+    pub max_parallelism: u32,
+    pub role_count: u32,
+    pub work_template_count: u32,
+    pub repair_action_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy: Option<PlannerShardPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiled_plan_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_response_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_response_bytes: Option<usize>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PlannerShardPolicy {
+    pub schema: String,
+    pub id: String,
+    pub source: String,
+    pub role_count: u32,
+    pub max_parallelism: u32,
+    pub implementation_shard_count: u32,
+    pub verifier_shard_count: u32,
+    pub candidate_selection_policy: String,
+    #[serde(default)]
+    pub required_gates: Vec<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Expression {
     pub language: String,
     pub source: String,
@@ -1204,11 +1625,15 @@ pub struct CompiledPlan {
     pub work_templates: Vec<WorkTemplate>,
     pub dependency_index: DependencyIndex,
     pub resource_plan: ResourcePlan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy: Option<PlannerShardPolicy>,
     #[serde(default)]
     pub approval_points: Vec<ApprovalPoint>,
     pub proof_contract: CompletionContract,
     #[serde(default)]
     pub diagnostics: Vec<CompileDiagnostic>,
+    #[serde(default)]
+    pub repair_plan: CompileRepairPlan,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1221,6 +1646,14 @@ pub struct WorkTemplate {
     pub capability_requirements: CapabilityRequirements,
     #[serde(default)]
     pub requirement_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_selection_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_required_source_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_required_verifier_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1249,8 +1682,21 @@ pub struct CompletionContract {
     #[serde(default)]
     pub required_requirement_ids: Vec<String>,
     #[serde(default)]
+    pub requirements: Vec<ProofRequirement>,
+    #[serde(default)]
     pub final_seal_node_ids: Vec<String>,
     pub evidence_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProofRequirement {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_node_id: Option<String>,
+    pub description: String,
+    pub evidence_required: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1270,6 +1716,57 @@ pub struct CompileDiagnostic {
     pub edge_id: Option<String>,
     pub reason_code: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CompileRepairPlan {
+    pub bounded: bool,
+    pub max_iterations: u32,
+    pub reason_code: String,
+    #[serde(default)]
+    pub actions: Vec<CompileRepairAction>,
+    #[serde(default)]
+    pub groups: Vec<CompileRepairGroup>,
+}
+
+impl Default for CompileRepairPlan {
+    fn default() -> Self {
+        Self {
+            bounded: true,
+            max_iterations: 0,
+            reason_code: "no_repairs_required".to_string(),
+            actions: Vec::new(),
+            groups: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CompileRepairAction {
+    pub id: String,
+    pub diagnostic_reason_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_edge_id: Option<String>,
+    pub action: String,
+    pub description: String,
+    pub evidence_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CompileRepairGroup {
+    pub id: String,
+    pub group_kind: String,
+    pub description: String,
+    #[serde(default)]
+    pub action_ids: Vec<String>,
+    #[serde(default)]
+    pub diagnostic_reason_codes: Vec<String>,
+    #[serde(default)]
+    pub node_ids: Vec<String>,
+    #[serde(default)]
+    pub edge_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1293,6 +1790,73 @@ pub struct GitIsolationReport {
     pub reason_code: String,
     pub submodule_detected: bool,
     pub lfs_detected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorktreeIsolationInventoryEntry {
+    pub isolation_id: String,
+    pub run_id: String,
+    pub worker_id: String,
+    pub mode: IsolationMode,
+    pub artifact_ref: String,
+    pub exists: bool,
+    pub has_git_metadata: bool,
+    pub path_redacted: bool,
+    pub content_redacted: bool,
+    pub reason_code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorktreeIsolationInventoryReceipt {
+    pub schema: String,
+    pub id: String,
+    pub run_id: String,
+    pub state: String,
+    pub reason_code: String,
+    pub inventory_ref: String,
+    #[serde(default)]
+    pub isolations: Vec<WorktreeIsolationInventoryEntry>,
+    pub isolation_count: usize,
+    pub git_available: bool,
+    pub path_redacted: bool,
+    pub content_redacted: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub generated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorktreeIsolationRecoveryTarget {
+    pub isolation_id: String,
+    pub run_id: String,
+    pub worker_id: String,
+    pub mode: IsolationMode,
+    pub artifact_ref: String,
+    pub existed: bool,
+    pub removed: bool,
+    pub reason_code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorktreeIsolationRecoveryReceipt {
+    pub schema: String,
+    pub id: String,
+    pub run_id: String,
+    pub state: String,
+    pub reason_code: String,
+    pub inventory_ref: String,
+    pub recovery_ref: String,
+    #[serde(default)]
+    pub targets: Vec<WorktreeIsolationRecoveryTarget>,
+    pub target_count: usize,
+    pub recovered_count: usize,
+    pub prune_attempted: bool,
+    pub prune_succeeded: bool,
+    pub path_redacted: bool,
+    pub content_redacted: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub generated_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1339,6 +1903,390 @@ pub struct PatchEnvelope {
     pub requirement_ids: Vec<String>,
     pub producer: ProducerRef,
     pub secret_scan: GateResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RoleSubcontractCandidateReceipt {
+    pub schema: String,
+    pub id: String,
+    pub run_id: String,
+    pub work_item_id: String,
+    pub role: String,
+    pub worker_id: String,
+    pub state: String,
+    pub reason_code: String,
+    pub source_isolation_id: String,
+    pub source_isolation_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_base_commit: Option<String>,
+    pub source_git_available: bool,
+    #[serde(default)]
+    pub target_paths: Vec<String>,
+    pub patch_count: usize,
+    pub apply_result_count: usize,
+    #[serde(default)]
+    pub applied_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_selection_policy: Option<String>,
+    #[serde(default)]
+    pub planner_required_source_candidate_count: usize,
+    #[serde(default)]
+    pub planner_required_verifier_count: usize,
+    pub receipt_ref: String,
+    pub patch_ref: String,
+    pub main_workspace_modified: bool,
+    pub integration_required: bool,
+    pub approval_required: bool,
+    pub path_redacted: bool,
+    pub content_redacted: bool,
+    pub generated_at_ms: u64,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SemanticVerifierJudgmentReceipt {
+    pub schema: String,
+    pub id: String,
+    pub run_id: String,
+    pub work_item_id: String,
+    pub role: String,
+    pub worker_id: String,
+    pub state: String,
+    pub reason_code: String,
+    pub verifier_kind: String,
+    #[serde(default)]
+    pub verdict: String,
+    #[serde(default)]
+    pub passed_gates: Vec<String>,
+    #[serde(default)]
+    pub failed_gates: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    pub response_hash: String,
+    pub response_bytes: usize,
+    pub judgment_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_pack_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_context_pack_ref: Option<String>,
+    pub path_redacted: bool,
+    pub content_redacted: bool,
+    pub generated_at_ms: u64,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IntegrationSourceCandidateRef {
+    pub source: String,
+    pub id: String,
+    pub receipt_ref: String,
+    pub patch_ref: String,
+    pub worker_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_isolation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_isolation_mode: Option<String>,
+    #[serde(default)]
+    pub target_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_selection_policy: Option<String>,
+    #[serde(default)]
+    pub planner_required_source_candidate_count: usize,
+    #[serde(default)]
+    pub planner_required_verifier_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IntegrationCandidateReceipt {
+    pub schema: String,
+    pub id: String,
+    pub run_id: String,
+    pub turn_id: String,
+    pub conversation_id: String,
+    pub project_id: String,
+    pub worker_id: String,
+    pub state: String,
+    pub reason_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_isolation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_isolation_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_base_commit: Option<String>,
+    pub source_git_available: bool,
+    #[serde(default)]
+    pub source_candidates: Vec<IntegrationSourceCandidateRef>,
+    #[serde(default)]
+    pub aggregate_candidate_count: usize,
+    #[serde(default)]
+    pub aggregate_target_count: usize,
+    #[serde(default)]
+    pub planned_verifier_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_selection_policy: Option<String>,
+    #[serde(default)]
+    pub planner_required_source_candidate_count: usize,
+    #[serde(default)]
+    pub planner_selected_source_candidate_count: usize,
+    #[serde(default)]
+    pub planner_required_verifier_count: usize,
+    #[serde(default)]
+    pub target_paths: Vec<String>,
+    pub patch_count: usize,
+    pub apply_result_count: usize,
+    #[serde(default)]
+    pub applied_files: Vec<String>,
+    pub receipt_ref: String,
+    pub patch_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_ref: Option<String>,
+    pub main_workspace_modified: bool,
+    pub integration_required: bool,
+    pub approval_required: bool,
+    pub path_redacted: bool,
+    pub content_redacted: bool,
+    pub generated_at_ms: u64,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IntegrationCandidateSelectionReceipt {
+    pub schema: String,
+    pub id: String,
+    pub run_id: String,
+    pub selected_candidate_id: String,
+    pub selection_ref: String,
+    pub selected_candidate_ref: String,
+    pub selected_patch_ref: String,
+    #[serde(default)]
+    pub candidate_pool: Vec<IntegrationSourceCandidateRef>,
+    #[serde(default)]
+    pub selected_source_candidate_ids: Vec<String>,
+    pub selection_policy: String,
+    pub reason_code: String,
+    #[serde(default)]
+    pub required_verification_gates: Vec<String>,
+    #[serde(default)]
+    pub aggregate_candidate_count: usize,
+    #[serde(default)]
+    pub aggregate_target_count: usize,
+    #[serde(default)]
+    pub planned_verifier_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_policy_selection_policy: Option<String>,
+    #[serde(default)]
+    pub planner_required_source_candidate_count: usize,
+    #[serde(default)]
+    pub planner_selected_source_candidate_count: usize,
+    #[serde(default)]
+    pub planner_required_verifier_count: usize,
+    #[serde(default)]
+    pub target_paths: Vec<String>,
+    pub path_redacted: bool,
+    pub content_redacted: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub generated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IntegrationVerifierLaneReceipt {
+    pub id: String,
+    pub lane_index: usize,
+    pub worker_id: String,
+    pub verifier_kind: String,
+    pub state: String,
+    pub reason_code: String,
+    #[serde(default)]
+    pub passed_gates: Vec<String>,
+    #[serde(default)]
+    pub failed_gates: Vec<String>,
+    pub path_redacted: bool,
+    pub content_redacted: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub generated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IntegrationVerificationReceipt {
+    pub schema: String,
+    pub id: String,
+    pub run_id: String,
+    pub candidate_id: String,
+    pub state: String,
+    pub reason_code: String,
+    #[serde(default)]
+    pub target_paths: Vec<String>,
+    #[serde(default)]
+    pub passed_gates: Vec<String>,
+    #[serde(default)]
+    pub failed_gates: Vec<String>,
+    #[serde(default)]
+    pub planned_verifier_count: usize,
+    #[serde(default)]
+    pub passed_verifier_count: usize,
+    #[serde(default)]
+    pub failed_verifier_count: usize,
+    #[serde(default)]
+    pub verifier_lanes: Vec<IntegrationVerifierLaneReceipt>,
+    pub candidate_ref: String,
+    pub patch_ref: String,
+    pub verification_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_ref: Option<String>,
+    pub path_redacted: bool,
+    pub content_redacted: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub generated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IntegrationApplyReceipt {
+    pub schema: String,
+    pub id: String,
+    pub run_id: String,
+    pub candidate_id: String,
+    pub state: String,
+    pub reason_code: String,
+    #[serde(default)]
+    pub target_paths: Vec<String>,
+    pub approval_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
+    pub candidate_ref: String,
+    pub patch_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_ref: Option<String>,
+    pub receipt_ref: String,
+    pub integration_ref: String,
+    pub final_diff_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seal_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_ref: Option<String>,
+    pub main_workspace_modified: bool,
+    pub verifier_passed: bool,
+    pub path_redacted: bool,
+    pub content_redacted: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub generated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IntegrationRepairItem {
+    pub schema: String,
+    pub id: String,
+    pub run_id: String,
+    pub candidate_id: String,
+    pub state: String,
+    pub reason_code: String,
+    #[serde(default)]
+    pub target_paths: Vec<String>,
+    #[serde(default)]
+    pub conflict_paths: Vec<String>,
+    pub candidate_ref: String,
+    pub patch_ref: String,
+    pub integration_ref: String,
+    pub repair_ref: String,
+    #[serde(default)]
+    pub suggested_actions: Vec<String>,
+    pub path_redacted: bool,
+    pub content_redacted: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub generated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IntegrationFinalSeal {
+    pub schema: String,
+    pub id: String,
+    pub run_id: String,
+    pub candidate_id: String,
+    pub state: String,
+    pub reason_code: String,
+    #[serde(default)]
+    pub target_paths: Vec<String>,
+    #[serde(default)]
+    pub passed_gates: Vec<String>,
+    #[serde(default)]
+    pub failed_gates: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
+    pub candidate_ref: String,
+    pub patch_ref: String,
+    pub verification_ref: String,
+    pub integration_ref: String,
+    pub final_diff_ref: String,
+    pub seal_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_ref: Option<String>,
+    pub path_redacted: bool,
+    pub content_redacted: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub generated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IntegrationCleanupTarget {
+    pub source_isolation_id: String,
+    pub source_isolation_mode: String,
+    pub worker_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_id: Option<String>,
+    pub existed: bool,
+    pub removed: bool,
+    pub reason_code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IntegrationCleanupReceipt {
+    pub schema: String,
+    pub id: String,
+    pub run_id: String,
+    pub candidate_id: String,
+    pub state: String,
+    pub reason_code: String,
+    pub integration_ref: String,
+    pub seal_ref: String,
+    pub cleanup_ref: String,
+    #[serde(default)]
+    pub source_isolations: Vec<IntegrationCleanupTarget>,
+    pub cleanup_target_count: usize,
+    pub cleaned_count: usize,
+    pub retained_candidate_ref: String,
+    pub retained_patch_ref: String,
+    pub retained_final_diff_ref: String,
+    pub path_redacted: bool,
+    pub content_redacted: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub generated_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1512,6 +2460,63 @@ pub struct TriWikiRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TurnContextItem {
+    pub ref_id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_hash: Option<String>,
+    pub resolved: bool,
+    pub stale: bool,
+    pub redacted: bool,
+    pub reason_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContextPackConversationSummary {
+    pub conversation_id: String,
+    pub summary_redacted: String,
+    pub source_message_sequence: i64,
+    pub generated_at_ms: u64,
+    pub redacted: bool,
+    pub reason_code: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContextPackBranchFreshness {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_base: Option<String>,
+    #[serde(default)]
+    pub changed_paths_since_base: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behind_count: Option<u32>,
+    pub reason_code: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ContextPack {
     pub schema: String,
     pub id: String,
@@ -1519,6 +2524,22 @@ pub struct ContextPack {
     pub estimated_tokens: u32,
     #[serde(default)]
     pub record_ids: Vec<String>,
+    #[serde(default)]
+    pub codegraph_record_ids: Vec<String>,
+    #[serde(default)]
+    pub changed_paths: Vec<String>,
+    #[serde(default)]
+    pub selected_test_targets: Vec<String>,
+    #[serde(default)]
+    pub turn_context_refs: Vec<String>,
+    #[serde(default)]
+    pub turn_context_items: Vec<TurnContextItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_summary: Option<ContextPackConversationSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_freshness: Option<ContextPackBranchFreshness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<intel::FreshnessStamp>,
     pub body: String,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
@@ -1530,6 +2551,30 @@ pub struct VisualAnchor {
     pub y: u32,
     pub width: u32,
     pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageOperation {
+    Generate,
+    Inspect,
+    Edit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ImageProvenanceReceipt {
+    pub schema: String,
+    pub asset_id: String,
+    pub operation: ImageOperation,
+    pub provider_id: String,
+    pub model_id: String,
+    pub content_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_hash: Option<String>,
+    pub provenance_hash: String,
+    pub route_receipt: ModelRouteReceipt,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1547,6 +2592,10 @@ pub struct ImageAsset {
     #[serde(default)]
     pub anchors: Vec<VisualAnchor>,
     pub temporary: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_receipt: Option<ModelRouteReceipt>,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
 }
@@ -1556,6 +2605,8 @@ pub struct ImageLedger {
     pub schema: String,
     #[serde(default)]
     pub assets: Vec<ImageAsset>,
+    #[serde(default)]
+    pub provenance_receipts: Vec<ImageProvenanceReceipt>,
     #[serde(default)]
     pub gc_candidate_ids: Vec<String>,
 }
@@ -1758,8 +2809,9 @@ pub mod vault;
 pub use agent::{
     AGENT_ADAPTER_DESCRIPTOR_SCHEMA, AGENT_EVENT_ENVELOPE_SCHEMA, AgentAdapterDescriptor,
     AgentAdapterKind, AgentEventEnvelope, AgentEventKind, OutputContractKind,
-    SUBCONTRACT_PACKET_SCHEMA, SubcontractPacket, TOOL_POLICY_SCHEMA, ToolPermission, ToolPolicy,
-    ToolPolicyEntry, WORKER_ROLE_SCHEMA, WorkerRole,
+    SUBCONTRACT_PACKET_SCHEMA, SubcontractPacket, TOOL_DESCRIPTOR_SCHEMA, TOOL_POLICY_SCHEMA,
+    TOOL_REGISTRY_SCHEMA, ToolAvailability, ToolDescriptor, ToolPermission, ToolPolicy,
+    ToolPolicyEntry, ToolRegistry, WORKER_ROLE_SCHEMA, WorkerRole, default_tool_registry,
 };
 pub use capability::{
     CapabilityMaturity, RUNTIME_CAPABILITY_REPORT_SCHEMA, RUNTIME_CAPABILITY_SCHEMA,
@@ -1786,8 +2838,9 @@ pub use file::{
     WORKSPACE_ENTRY_SCHEMA, WorkspaceEntry,
 };
 pub use git::{
-    GIT_BRANCHES_SCHEMA, GIT_DIFF_SCHEMA, GIT_STATUS_SCHEMA, GitBranchInfo, GitBranches, GitDiff,
-    GitDiffFile, GitDiffHunk, GitStatus, GitStatusEntry, GitStatusKind,
+    GIT_BRANCHES_SCHEMA, GIT_DIFF_SCHEMA, GIT_LOG_SCHEMA, GIT_STATUS_SCHEMA, GitBranchInfo,
+    GitBranches, GitDiff, GitDiffFile, GitDiffHunk, GitLog, GitLogEntry, GitStatus, GitStatusEntry,
+    GitStatusKind,
 };
 pub use git_mutation::{
     GIT_COMMIT_PREVIEW_SCHEMA, GIT_COMMIT_SCHEMA, GIT_CREATE_BRANCH_SCHEMA, GIT_ERROR_SCHEMA,
@@ -1797,9 +2850,9 @@ pub use git_mutation::{
     GitSwitchBlocker, GitSwitchBlockerKind, GitSwitchPreflight, GitUnstageResult,
 };
 pub use git_push::{
-    PUSH_APPROVAL_SCHEMA, PUSH_ERROR_SCHEMA, PUSH_INTENT_SCHEMA, PUSH_RECEIPT_SCHEMA,
-    PUSH_STATUS_SCHEMA, PushApproval, PushError, PushErrorBody, PushErrorCode, PushIntent,
-    PushReceipt, PushStatus,
+    PUSH_APPROVAL_SCHEMA, PUSH_ERROR_SCHEMA, PUSH_FAILURE_DIAGNOSTIC_SCHEMA, PUSH_INTENT_SCHEMA,
+    PUSH_RECEIPT_SCHEMA, PUSH_STATUS_SCHEMA, PushApproval, PushError, PushErrorBody, PushErrorCode,
+    PushFailureDiagnostic, PushIntent, PushReceipt, PushStatus,
 };
 pub use intel::{
     Architecture, ArchitectureRecord, CodegraphQuery, CodegraphRecordView, FreshnessCheck,
@@ -1892,6 +2945,14 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "tool-policy.schema.json",
             serde_json::to_string_pretty(&schema_for!(ToolPolicy))?,
+        ),
+        (
+            "tool-descriptor.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ToolDescriptor))?,
+        ),
+        (
+            "tool-registry.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ToolRegistry))?,
         ),
         (
             "patch-proposal.schema.json",
@@ -2002,6 +3063,26 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
             serde_json::to_string_pretty(&schema_for!(WorkItem))?,
         ),
         (
+            "provider-connection.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ProviderConnection))?,
+        ),
+        (
+            "secret-ref.schema.json",
+            serde_json::to_string_pretty(&schema_for!(SecretRef))?,
+        ),
+        (
+            "model-catalog-entry.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ModelCatalogEntry))?,
+        ),
+        (
+            "provider-probe-receipt.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ProviderProbeReceipt))?,
+        ),
+        (
+            "provider-mutation.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ProviderMutationReceipt))?,
+        ),
+        (
             "model-profile.schema.json",
             serde_json::to_string_pretty(&schema_for!(ModelProfile))?,
         ),
@@ -2026,6 +3107,18 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
             serde_json::to_string_pretty(&schema_for!(PipelineGraph))?,
         ),
         (
+            "objective-plan-request.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ObjectivePlanRequest))?,
+        ),
+        (
+            "objective-plan-receipt.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ObjectivePlanReceipt))?,
+        ),
+        (
+            "planner-shard-policy.schema.json",
+            serde_json::to_string_pretty(&schema_for!(PlannerShardPolicy))?,
+        ),
+        (
             "compiled-plan.schema.json",
             serde_json::to_string_pretty(&schema_for!(CompiledPlan))?,
         ),
@@ -2034,8 +3127,52 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
             serde_json::to_string_pretty(&schema_for!(GitIsolationReport))?,
         ),
         (
+            "worktree-isolation-inventory-receipt.schema.json",
+            serde_json::to_string_pretty(&schema_for!(WorktreeIsolationInventoryReceipt))?,
+        ),
+        (
+            "worktree-isolation-recovery-receipt.schema.json",
+            serde_json::to_string_pretty(&schema_for!(WorktreeIsolationRecoveryReceipt))?,
+        ),
+        (
             "patch-envelope.schema.json",
             serde_json::to_string_pretty(&schema_for!(PatchEnvelope))?,
+        ),
+        (
+            "role-subcontract-candidate-receipt.schema.json",
+            serde_json::to_string_pretty(&schema_for!(RoleSubcontractCandidateReceipt))?,
+        ),
+        (
+            "semantic-verifier-judgment.schema.json",
+            serde_json::to_string_pretty(&schema_for!(SemanticVerifierJudgmentReceipt))?,
+        ),
+        (
+            "integration-candidate-receipt.schema.json",
+            serde_json::to_string_pretty(&schema_for!(IntegrationCandidateReceipt))?,
+        ),
+        (
+            "integration-candidate-selection-receipt.schema.json",
+            serde_json::to_string_pretty(&schema_for!(IntegrationCandidateSelectionReceipt))?,
+        ),
+        (
+            "integration-verification-receipt.schema.json",
+            serde_json::to_string_pretty(&schema_for!(IntegrationVerificationReceipt))?,
+        ),
+        (
+            "integration-apply-receipt.schema.json",
+            serde_json::to_string_pretty(&schema_for!(IntegrationApplyReceipt))?,
+        ),
+        (
+            "integration-repair-item.schema.json",
+            serde_json::to_string_pretty(&schema_for!(IntegrationRepairItem))?,
+        ),
+        (
+            "integration-final-seal.schema.json",
+            serde_json::to_string_pretty(&schema_for!(IntegrationFinalSeal))?,
+        ),
+        (
+            "integration-cleanup-receipt.schema.json",
+            serde_json::to_string_pretty(&schema_for!(IntegrationCleanupReceipt))?,
         ),
         (
             "completion-proof.schema.json",
@@ -2072,6 +3209,10 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "image-ledger.schema.json",
             serde_json::to_string_pretty(&schema_for!(ImageLedger))?,
+        ),
+        (
+            "image-provenance-receipt.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ImageProvenanceReceipt))?,
         ),
         (
             "reasoning-report.schema.json",
@@ -2118,6 +3259,10 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
             serde_json::to_string_pretty(&schema_for!(GitDiff))?,
         ),
         (
+            "git-log.schema.json",
+            serde_json::to_string_pretty(&schema_for!(GitLog))?,
+        ),
+        (
             "git-switch-preflight.schema.json",
             serde_json::to_string_pretty(&schema_for!(GitSwitchPreflight))?,
         ),
@@ -2160,6 +3305,10 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
         (
             "push-receipt.schema.json",
             serde_json::to_string_pretty(&schema_for!(PushReceipt))?,
+        ),
+        (
+            "push-failure-diagnostic.schema.json",
+            serde_json::to_string_pretty(&schema_for!(PushFailureDiagnostic))?,
         ),
         (
             "push-status.schema.json",
@@ -2263,6 +3412,80 @@ mod tests {
     }
 
     #[test]
+    fn objective_plan_request_and_receipt_roundtrip() {
+        let mut request = ObjectivePlanRequest::new("Build provider UI and verify final diff");
+        request.include_image_lane = true;
+        request.evidence_refs = vec!["test:objective-planner".to_string()];
+        let json = serde_json::to_string(&request).expect("serialize objective plan request");
+        assert!(json.contains("\"schema\":\"opensks.objective-plan-request.v1\""));
+        assert!(json.contains("\"include_image_lane\":true"));
+        let decoded: ObjectivePlanRequest =
+            serde_json::from_str(&json).expect("decode objective plan request");
+        assert_eq!(decoded.max_parallelism, 8);
+        assert_eq!(decoded.role_count, 4);
+        assert!(decoded.require_git_worktree);
+        assert!(decoded.require_integration_approval);
+
+        let receipt = ObjectivePlanReceipt {
+            schema: OBJECTIVE_PLAN_RECEIPT_SCHEMA.to_string(),
+            objective_hash: "fnv1a64:1111111111111111".to_string(),
+            graph_id: "objective-plan-11111111".to_string(),
+            graph_hash: "fnv1a64:2222222222222222".to_string(),
+            plan_hash: "fnv1a64:3333333333333333".to_string(),
+            source: "objective_planner".to_string(),
+            max_parallelism: 8,
+            role_count: 4,
+            work_template_count: 8,
+            repair_action_count: 0,
+            shard_policy_id: Some("planner-shard-policy-22222222".to_string()),
+            shard_policy: Some(PlannerShardPolicy {
+                schema: PLANNER_SHARD_POLICY_SCHEMA.to_string(),
+                id: "planner-shard-policy-22222222".to_string(),
+                source: "objective_planner".to_string(),
+                role_count: 4,
+                max_parallelism: 8,
+                implementation_shard_count: 4,
+                verifier_shard_count: 4,
+                candidate_selection_policy: "planner_required_shards_before_approval_apply"
+                    .to_string(),
+                required_gates: vec![
+                    "candidate_receipt_valid".to_string(),
+                    "target_policy_check".to_string(),
+                    "patch_apply_check".to_string(),
+                    "read_only_verifier_lanes".to_string(),
+                    "approval_event".to_string(),
+                    "final_seal".to_string(),
+                ],
+                evidence_refs: vec!["planner:shard-policy".to_string()],
+            }),
+            graph_ref: Some(".opensks/pipelines/objective/objective.graph.json".to_string()),
+            compiled_plan_ref: Some(".opensks/pipelines/compiled/objective.plan.json".to_string()),
+            planner_provider_id: None,
+            planner_model_id: None,
+            planner_response_hash: None,
+            planner_response_bytes: None,
+            evidence_refs: vec!["graph:objective-planner".to_string()],
+        };
+        let json = serde_json::to_string(&receipt).expect("serialize objective plan receipt");
+        let decoded: ObjectivePlanReceipt =
+            serde_json::from_str(&json).expect("decode objective plan receipt");
+        assert_eq!(decoded.source, "objective_planner");
+        assert_eq!(decoded.repair_action_count, 0);
+        let shard_policy = decoded.shard_policy.expect("shard policy");
+        assert_eq!(
+            decoded.shard_policy_id.as_deref(),
+            Some(shard_policy.id.as_str())
+        );
+        assert_eq!(shard_policy.schema, PLANNER_SHARD_POLICY_SCHEMA);
+        assert_eq!(shard_policy.implementation_shard_count, 4);
+        assert!(
+            shard_policy
+                .required_gates
+                .contains(&"approval_event".to_string())
+        );
+    }
+
+    #[test]
     fn run_control_requests_roundtrip_with_typed_params() {
         let cancel = EngineRequest::run_cancel("req-cancel", "run-1");
         let json = serde_json::to_string(&cancel).expect("cancel json");
@@ -2287,6 +3510,28 @@ mod tests {
             EventKind::parse_label("steering_requested"),
             EventKind::SteeringRequested
         );
+        assert_eq!(EventKind::RunCompleted.as_str(), "run_completed");
+        assert_eq!(
+            EventKind::parse_label("run_completed"),
+            EventKind::RunCompleted
+        );
+        assert_eq!(EventKind::GitCommitReceipt.as_str(), "git_commit_receipt");
+        assert_eq!(
+            EventKind::parse_label("git_push_receipt"),
+            EventKind::GitPushReceipt
+        );
+        assert_eq!(
+            EventKind::parse_label("git_push_failed"),
+            EventKind::GitPushFailed
+        );
+        assert_eq!(
+            EventKind::ImageArtifactCreated.as_str(),
+            "image_artifact_created"
+        );
+        assert_eq!(
+            EventKind::parse_label("image_artifact_created"),
+            EventKind::ImageArtifactCreated
+        );
     }
 
     #[test]
@@ -2301,6 +3546,7 @@ mod tests {
                 text: "make the daemon accept this turn".to_string(),
                 attachment_refs: vec![],
             },
+            thread_settings_updated_at_ms: Some(0),
             settings: ConversationTurnSettings {
                 model: ModelSelection {
                     mode: ModelSelectionMode::Auto,
@@ -2351,6 +3597,444 @@ mod tests {
             Some("daemon-supervisor")
         );
         assert_eq!(decoded.params.lease_ttl_ms, Some(750));
+    }
+
+    #[test]
+    fn integration_candidate_apply_request_roundtrips() {
+        let request = EngineRequest::integration_candidate_apply(
+            "req-apply",
+            "run-1",
+            "approval-integration-run-1",
+        );
+        let json = serde_json::to_string(&request).expect("integration apply request json");
+        assert!(json.contains("\"kind\":\"integration_candidate_apply\""));
+        assert!(json.contains("\"run_id\":\"run-1\""));
+        assert!(json.contains("\"scope\":\"integration_apply\""));
+        let decoded: EngineRequest =
+            serde_json::from_str(&json).expect("decode integration apply request");
+        assert_eq!(decoded.kind, EngineRequestKind::IntegrationCandidateApply);
+        assert_eq!(decoded.params.run_id.as_deref(), Some("run-1"));
+        assert_eq!(
+            decoded.params.approval_id.as_deref(),
+            Some("approval-integration-run-1")
+        );
+    }
+
+    #[test]
+    fn semantic_verifier_judgment_receipt_roundtrips() {
+        let receipt = SemanticVerifierJudgmentReceipt {
+            schema: SEMANTIC_VERIFIER_JUDGMENT_SCHEMA.to_string(),
+            id: "semantic-verifier-run-1-turn-role-verification".to_string(),
+            run_id: "run-1".to_string(),
+            work_item_id: "turn-role-turn-1-2-verification".to_string(),
+            role: "verification".to_string(),
+            worker_id: "role-worker-verification".to_string(),
+            state: "judgment_ready".to_string(),
+            reason_code: "model_semantic_verifier_judgment_recorded".to_string(),
+            verifier_kind: "model_semantic_judgment".to_string(),
+            verdict: "pass".to_string(),
+            passed_gates: vec!["semantic_verifier_verdict_passed".to_string()],
+            failed_gates: Vec::new(),
+            provider_id: Some("provider-1".to_string()),
+            model_id: Some("provider-1/code-model".to_string()),
+            response_hash: "fnv64:1111111111111111".to_string(),
+            response_bytes: 42,
+            judgment_ref:
+                "artifact://.opensks/runtime/semantic-verifiers/run-1/turn-role-verification/judgment.json"
+                    .to_string(),
+            context_pack_ref: Some(
+                "artifact://.opensks/wiki/context-packs/generated/turn-context-turn-1.json"
+                    .to_string(),
+            ),
+            worker_context_pack_ref: Some(
+                "artifact://.opensks/wiki/context-packs/generated/turn-context-turn-1--worker-turn-role-verification.json#work_item_id=turn-role-turn-1-2-verification"
+                    .to_string(),
+            ),
+            path_redacted: true,
+            content_redacted: true,
+            generated_at_ms: 1_000,
+            evidence_refs: vec!["daemon:semantic-verifier-judgment".to_string()],
+        };
+        let json = serde_json::to_string(&receipt).expect("semantic verifier receipt json");
+        assert!(json.contains("\"schema\":\"opensks.semantic-verifier-judgment.v1\""));
+        assert!(json.contains("\"content_redacted\":true"));
+        let decoded: SemanticVerifierJudgmentReceipt =
+            serde_json::from_str(&json).expect("decode semantic verifier receipt");
+        assert_eq!(decoded.schema, SEMANTIC_VERIFIER_JUDGMENT_SCHEMA);
+        assert_eq!(decoded.role, "verification");
+        assert_eq!(decoded.verifier_kind, "model_semantic_judgment");
+        assert_eq!(decoded.verdict, "pass");
+        assert_eq!(
+            decoded.passed_gates,
+            vec!["semantic_verifier_verdict_passed".to_string()]
+        );
+        assert!(decoded.failed_gates.is_empty());
+        assert_eq!(decoded.provider_id.as_deref(), Some("provider-1"));
+        assert_eq!(decoded.model_id.as_deref(), Some("provider-1/code-model"));
+        assert_eq!(decoded.response_hash, "fnv64:1111111111111111");
+        assert!(decoded.path_redacted);
+        assert!(decoded.content_redacted);
+    }
+
+    #[test]
+    fn integration_candidate_receipt_roundtrips_with_source_candidates() {
+        let receipt = IntegrationCandidateReceipt {
+            schema: INTEGRATION_CANDIDATE_RECEIPT_SCHEMA.to_string(),
+            id: "integration-candidate-run-1".to_string(),
+            run_id: "run-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            project_id: "project-1".to_string(),
+            worker_id: "integration-coordinator".to_string(),
+            state: "candidate_ready".to_string(),
+            reason_code: "aggregate_isolated_patch_candidate_ready".to_string(),
+            source_isolation_id: Some("isolation-run-1-turn-supervisor".to_string()),
+            source_isolation_mode: Some("git_worktree".to_string()),
+            source_base_commit: Some("abc123".to_string()),
+            source_git_available: true,
+            source_candidates: vec![IntegrationSourceCandidateRef {
+                source: "role_subcontract".to_string(),
+                id: "role-candidate-run-1-code".to_string(),
+                receipt_ref:
+                    "artifact://.opensks/runtime/role-candidates/run-1/code/candidate.json"
+                        .to_string(),
+                patch_ref: "artifact://.opensks/runtime/role-candidates/run-1/code/candidate.patch"
+                    .to_string(),
+                worker_id: "role-subcontract-code".to_string(),
+                work_item_id: Some("turn-role-code".to_string()),
+                role: Some("code".to_string()),
+                source_isolation_id: Some("isolation-run-1-role-subcontract-code".to_string()),
+                source_isolation_mode: Some("git_worktree".to_string()),
+                target_paths: vec!["ROLE_CODE_NOTE.md".to_string()],
+                shard_policy_id: Some("planner-shard-policy-11111111".to_string()),
+                shard_policy_selection_policy: Some(
+                    "planner_required_shards_before_approval_apply".to_string(),
+                ),
+                planner_required_source_candidate_count: 2,
+                planner_required_verifier_count: 3,
+            }],
+            aggregate_candidate_count: 1,
+            aggregate_target_count: 1,
+            planned_verifier_count: 2,
+            shard_policy_id: Some("planner-shard-policy-11111111".to_string()),
+            shard_policy_selection_policy: Some(
+                "planner_required_shards_before_approval_apply".to_string(),
+            ),
+            planner_required_source_candidate_count: 2,
+            planner_selected_source_candidate_count: 1,
+            planner_required_verifier_count: 3,
+            target_paths: vec!["ROLE_CODE_NOTE.md".to_string()],
+            patch_count: 1,
+            apply_result_count: 1,
+            applied_files: vec!["ROLE_CODE_NOTE.md".to_string()],
+            receipt_ref: "artifact://.opensks/runtime/integration-candidates/run-1/candidate.json"
+                .to_string(),
+            patch_ref: "artifact://.opensks/runtime/integration-candidates/run-1/candidate.patch"
+                .to_string(),
+            selection_ref: Some(
+                "artifact://.opensks/runtime/integration-candidates/run-1/selection.json"
+                    .to_string(),
+            ),
+            main_workspace_modified: false,
+            integration_required: true,
+            approval_required: true,
+            path_redacted: true,
+            content_redacted: true,
+            generated_at_ms: 1_000,
+            evidence_refs: vec!["integration:aggregate-candidate-ready".to_string()],
+        };
+        let json = serde_json::to_string(&receipt).expect("candidate receipt json");
+        assert!(json.contains("\"schema\":\"opensks.integration-candidate.v1\""));
+        assert!(json.contains("\"source_candidates\""));
+        let decoded: IntegrationCandidateReceipt =
+            serde_json::from_str(&json).expect("decode candidate receipt");
+        assert_eq!(decoded.schema, INTEGRATION_CANDIDATE_RECEIPT_SCHEMA);
+        assert_eq!(decoded.source_candidates.len(), 1);
+        assert_eq!(
+            decoded.source_candidates[0].source_isolation_id.as_deref(),
+            Some("isolation-run-1-role-subcontract-code")
+        );
+        assert_eq!(decoded.aggregate_candidate_count, 1);
+        assert_eq!(decoded.planned_verifier_count, 2);
+        assert_eq!(
+            decoded.shard_policy_id.as_deref(),
+            Some("planner-shard-policy-11111111")
+        );
+        assert_eq!(decoded.planner_required_source_candidate_count, 2);
+        assert_eq!(decoded.planner_selected_source_candidate_count, 1);
+        assert_eq!(decoded.planner_required_verifier_count, 3);
+        assert_eq!(
+            decoded.source_candidates[0].shard_policy_id.as_deref(),
+            Some("planner-shard-policy-11111111")
+        );
+        assert_eq!(decoded.target_paths, vec!["ROLE_CODE_NOTE.md".to_string()]);
+        assert_eq!(
+            decoded.selection_ref.as_deref(),
+            Some("artifact://.opensks/runtime/integration-candidates/run-1/selection.json")
+        );
+    }
+
+    #[test]
+    fn integration_candidate_selection_receipt_roundtrips() {
+        let receipt = IntegrationCandidateSelectionReceipt {
+            schema: INTEGRATION_CANDIDATE_SELECTION_RECEIPT_SCHEMA.to_string(),
+            id: "integration-candidate-selection-run-1".to_string(),
+            run_id: "run-1".to_string(),
+            selected_candidate_id: "integration-candidate-run-1".to_string(),
+            selection_ref:
+                "artifact://.opensks/runtime/integration-candidates/run-1/selection.json"
+                    .to_string(),
+            selected_candidate_ref:
+                "artifact://.opensks/runtime/integration-candidates/run-1/candidate.json"
+                    .to_string(),
+            selected_patch_ref:
+                "artifact://.opensks/runtime/integration-candidates/run-1/candidate.patch"
+                    .to_string(),
+            candidate_pool: vec![IntegrationSourceCandidateRef {
+                source: "role_subcontract".to_string(),
+                id: "role-candidate-run-1-code".to_string(),
+                receipt_ref:
+                    "artifact://.opensks/runtime/role-candidates/run-1/code/candidate.json"
+                        .to_string(),
+                patch_ref: "artifact://.opensks/runtime/role-candidates/run-1/code/candidate.patch"
+                    .to_string(),
+                worker_id: "role-subcontract-code".to_string(),
+                work_item_id: Some("turn-role-code".to_string()),
+                role: Some("code".to_string()),
+                source_isolation_id: Some("isolation-run-1-role-subcontract-code".to_string()),
+                source_isolation_mode: Some("git_worktree".to_string()),
+                target_paths: vec!["ROLE_CODE_NOTE.md".to_string()],
+                shard_policy_id: Some("planner-shard-policy-11111111".to_string()),
+                shard_policy_selection_policy: Some(
+                    "planner_required_shards_before_approval_apply".to_string(),
+                ),
+                planner_required_source_candidate_count: 2,
+                planner_required_verifier_count: 3,
+            }],
+            selected_source_candidate_ids: vec!["role-candidate-run-1-code".to_string()],
+            selection_policy: "planner_required_shards_before_approval_apply".to_string(),
+            reason_code: "planner_required_shards_selected".to_string(),
+            required_verification_gates: vec![
+                "candidate_receipt_valid".to_string(),
+                "target_policy_check".to_string(),
+                "patch_apply_check".to_string(),
+                "approval_event".to_string(),
+            ],
+            aggregate_candidate_count: 1,
+            aggregate_target_count: 1,
+            planned_verifier_count: 2,
+            shard_policy_id: Some("planner-shard-policy-11111111".to_string()),
+            shard_policy_selection_policy: Some(
+                "planner_required_shards_before_approval_apply".to_string(),
+            ),
+            planner_required_source_candidate_count: 2,
+            planner_selected_source_candidate_count: 1,
+            planner_required_verifier_count: 3,
+            target_paths: vec!["ROLE_CODE_NOTE.md".to_string()],
+            path_redacted: true,
+            content_redacted: true,
+            evidence_refs: vec!["integration:candidate-selection-receipt".to_string()],
+            generated_at_ms: 1_000,
+        };
+        let json = serde_json::to_string(&receipt).expect("selection receipt json");
+        assert!(json.contains("opensks.integration-candidate-selection-receipt.v1"));
+        assert!(json.contains("\"selected_source_candidate_ids\""));
+        let decoded: IntegrationCandidateSelectionReceipt =
+            serde_json::from_str(&json).expect("decode selection receipt");
+        assert_eq!(
+            decoded.schema,
+            INTEGRATION_CANDIDATE_SELECTION_RECEIPT_SCHEMA
+        );
+        assert_eq!(decoded.candidate_pool.len(), 1);
+        assert_eq!(decoded.planned_verifier_count, 2);
+        assert_eq!(
+            decoded.shard_policy_id.as_deref(),
+            Some("planner-shard-policy-11111111")
+        );
+        assert_eq!(decoded.planner_required_source_candidate_count, 2);
+        assert_eq!(decoded.planner_selected_source_candidate_count, 1);
+        assert_eq!(decoded.planner_required_verifier_count, 3);
+        assert_eq!(
+            decoded.selected_candidate_ref,
+            "artifact://.opensks/runtime/integration-candidates/run-1/candidate.json"
+        );
+        assert_eq!(
+            decoded.required_verification_gates,
+            vec![
+                "candidate_receipt_valid".to_string(),
+                "target_policy_check".to_string(),
+                "patch_apply_check".to_string(),
+                "approval_event".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn integration_cleanup_receipt_roundtrips() {
+        let cleanup_ref =
+            "artifact://.opensks/runtime/integration-candidates/run-1/cleanup.json".to_string();
+        let receipt = IntegrationCleanupReceipt {
+            schema: INTEGRATION_CLEANUP_RECEIPT_SCHEMA.to_string(),
+            id: "integration-cleanup-run-1".to_string(),
+            run_id: "run-1".to_string(),
+            candidate_id: "integration-candidate-run-1".to_string(),
+            state: "cleaned".to_string(),
+            reason_code: "source_isolations_removed".to_string(),
+            integration_ref:
+                "artifact://.opensks/runtime/integration-candidates/run-1/integration.json"
+                    .to_string(),
+            seal_ref: "artifact://.opensks/runtime/integration-candidates/run-1/seal.json"
+                .to_string(),
+            cleanup_ref: cleanup_ref.clone(),
+            source_isolations: vec![IntegrationCleanupTarget {
+                source_isolation_id: "isolation-run-1-turn-supervisor".to_string(),
+                source_isolation_mode: "git_worktree".to_string(),
+                worker_id: "turn-supervisor".to_string(),
+                work_item_id: None,
+                existed: true,
+                removed: true,
+                reason_code: "source_isolation_removed".to_string(),
+            }],
+            cleanup_target_count: 1,
+            cleaned_count: 1,
+            retained_candidate_ref:
+                "artifact://.opensks/runtime/integration-candidates/run-1/candidate.json"
+                    .to_string(),
+            retained_patch_ref:
+                "artifact://.opensks/runtime/integration-candidates/run-1/candidate.patch"
+                    .to_string(),
+            retained_final_diff_ref:
+                "artifact://.opensks/runtime/integration-candidates/run-1/final.diff".to_string(),
+            path_redacted: true,
+            content_redacted: true,
+            evidence_refs: vec!["integration:cleanup-receipt".to_string()],
+            generated_at_ms: 1_000,
+        };
+        let json = serde_json::to_string(&receipt).expect("cleanup receipt json");
+        assert!(json.contains("opensks.integration-cleanup-receipt.v1"));
+        assert!(json.contains("\"cleanup_ref\""));
+        let decoded: IntegrationCleanupReceipt =
+            serde_json::from_str(&json).expect("decode cleanup receipt");
+        assert_eq!(decoded.schema, INTEGRATION_CLEANUP_RECEIPT_SCHEMA);
+        assert_eq!(decoded.cleanup_ref, cleanup_ref);
+        assert_eq!(decoded.cleanup_target_count, 1);
+        assert_eq!(decoded.cleaned_count, 1);
+        assert!(decoded.path_redacted);
+        assert!(decoded.content_redacted);
+    }
+
+    #[test]
+    fn worktree_isolation_inventory_receipt_roundtrips() {
+        let inventory_ref =
+            "artifact://.opensks/runtime/worktrees/run-1/inventory.json".to_string();
+        let receipt = WorktreeIsolationInventoryReceipt {
+            schema: WORKTREE_ISOLATION_INVENTORY_RECEIPT_SCHEMA.to_string(),
+            id: "worktree-inventory-run-1".to_string(),
+            run_id: "run-1".to_string(),
+            state: "present".to_string(),
+            reason_code: "runtime_isolations_discovered".to_string(),
+            inventory_ref: inventory_ref.clone(),
+            isolations: vec![WorktreeIsolationInventoryEntry {
+                isolation_id: "isolation-run-1-turn-supervisor".to_string(),
+                run_id: "run-1".to_string(),
+                worker_id: "turn-supervisor".to_string(),
+                mode: IsolationMode::GitWorktree,
+                artifact_ref: "artifact://.opensks/runtime/worktrees/run-1/turn-supervisor"
+                    .to_string(),
+                exists: true,
+                has_git_metadata: true,
+                path_redacted: true,
+                content_redacted: true,
+                reason_code: "runtime_isolation_present".to_string(),
+            }],
+            isolation_count: 1,
+            git_available: true,
+            path_redacted: true,
+            content_redacted: true,
+            evidence_refs: vec!["git:worktree-inventory".to_string()],
+            generated_at_ms: 1_000,
+        };
+        let json = serde_json::to_string(&receipt).expect("inventory receipt json");
+        assert!(json.contains("opensks.worktree-isolation-inventory-receipt.v1"));
+        assert!(json.contains("\"inventory_ref\""));
+        let decoded: WorktreeIsolationInventoryReceipt =
+            serde_json::from_str(&json).expect("decode inventory receipt");
+        assert_eq!(decoded.schema, WORKTREE_ISOLATION_INVENTORY_RECEIPT_SCHEMA);
+        assert_eq!(decoded.inventory_ref, inventory_ref);
+        assert_eq!(decoded.isolation_count, 1);
+        assert!(decoded.path_redacted);
+        assert_eq!(decoded.isolations[0].mode, IsolationMode::GitWorktree);
+    }
+
+    #[test]
+    fn worktree_isolation_recovery_receipt_roundtrips() {
+        let recovery_ref = "artifact://.opensks/runtime/worktrees/run-1/recovery.json".to_string();
+        let receipt = WorktreeIsolationRecoveryReceipt {
+            schema: WORKTREE_ISOLATION_RECOVERY_RECEIPT_SCHEMA.to_string(),
+            id: "worktree-recovery-run-1".to_string(),
+            run_id: "run-1".to_string(),
+            state: "recovered".to_string(),
+            reason_code: "runtime_isolations_recovered".to_string(),
+            inventory_ref: "artifact://.opensks/runtime/worktrees/run-1/inventory.json".to_string(),
+            recovery_ref: recovery_ref.clone(),
+            targets: vec![WorktreeIsolationRecoveryTarget {
+                isolation_id: "isolation-run-1-turn-supervisor".to_string(),
+                run_id: "run-1".to_string(),
+                worker_id: "turn-supervisor".to_string(),
+                mode: IsolationMode::Snapshot,
+                artifact_ref: "artifact://.opensks/runtime/worktrees/run-1/turn-supervisor"
+                    .to_string(),
+                existed: true,
+                removed: true,
+                reason_code: "source_isolation_removed".to_string(),
+            }],
+            target_count: 1,
+            recovered_count: 1,
+            prune_attempted: true,
+            prune_succeeded: true,
+            path_redacted: true,
+            content_redacted: true,
+            evidence_refs: vec!["git:worktree-recovery".to_string()],
+            generated_at_ms: 1_000,
+        };
+        let json = serde_json::to_string(&receipt).expect("recovery receipt json");
+        assert!(json.contains("opensks.worktree-isolation-recovery-receipt.v1"));
+        assert!(json.contains("\"recovery_ref\""));
+        let decoded: WorktreeIsolationRecoveryReceipt =
+            serde_json::from_str(&json).expect("decode recovery receipt");
+        assert_eq!(decoded.schema, WORKTREE_ISOLATION_RECOVERY_RECEIPT_SCHEMA);
+        assert_eq!(decoded.recovery_ref, recovery_ref);
+        assert_eq!(decoded.target_count, 1);
+        assert_eq!(decoded.recovered_count, 1);
+        assert!(decoded.prune_attempted);
+        assert!(decoded.path_redacted);
+    }
+
+    #[test]
+    fn worktree_isolation_requests_roundtrip_with_run_id_scope() {
+        let inventory = EngineRequest::worktree_inventory("req-worktree-inventory", "run-1");
+        let inventory_json =
+            serde_json::to_string(&inventory).expect("worktree inventory request json");
+        assert!(inventory_json.contains("\"kind\":\"worktree_inventory\""));
+        assert!(inventory_json.contains("\"run_id\":\"run-1\""));
+        assert!(inventory_json.contains("\"scope\":\"worktree_inventory\""));
+        let decoded_inventory: EngineRequest =
+            serde_json::from_str(&inventory_json).expect("decode inventory request");
+        assert_eq!(decoded_inventory.kind, EngineRequestKind::WorktreeInventory);
+        assert_eq!(decoded_inventory.params.run_id.as_deref(), Some("run-1"));
+
+        let recovery = EngineRequest::worktree_recover("req-worktree-recover", "run-1");
+        let recovery_json =
+            serde_json::to_string(&recovery).expect("worktree recover request json");
+        assert!(recovery_json.contains("\"kind\":\"worktree_recover\""));
+        assert!(recovery_json.contains("\"scope\":\"worktree_recover\""));
+        let decoded_recovery: EngineRequest =
+            serde_json::from_str(&recovery_json).expect("decode recover request");
+        assert_eq!(decoded_recovery.kind, EngineRequestKind::WorktreeRecover);
+        assert_eq!(
+            decoded_recovery.params.reason_code.as_deref(),
+            Some("worktree_recover_requested")
+        );
     }
 
     #[test]
@@ -2475,6 +4159,115 @@ mod tests {
     }
 
     #[test]
+    fn provider_connection_and_receipts_are_secretless() {
+        let secret_ref =
+            SecretRef::macos_keychain("ai.opensks.provider.openrouter", "provider-1", 3);
+        let connection = ProviderConnection {
+            schema: PROVIDER_CONNECTION_SCHEMA.to_string(),
+            id: "provider-1".to_string(),
+            kind: ProviderKind::OpenRouter,
+            display_name: "OpenRouter".to_string(),
+            enabled: true,
+            endpoint: ProviderEndpoint {
+                base_url: "https://openrouter.ai/api/v1".to_string(),
+                allow_insecure_http: false,
+            },
+            auth: secret_ref.clone(),
+            organization_ref: None,
+            project_ref: None,
+            health: ProviderHealthSnapshot::unknown(),
+            concurrency: ProviderConcurrencyPolicy {
+                max_concurrent_requests: 4,
+                requests_per_minute: Some(60),
+                tokens_per_minute: None,
+            },
+            created_at_ms: 10,
+            updated_at_ms: 20,
+            revision: 1,
+        };
+        let json = serde_json::to_string(&connection).expect("provider connection json");
+        assert!(json.contains("\"store\":\"macos_keychain\""));
+        assert!(json.contains("\"service\":\"ai.opensks.provider.openrouter\""));
+        assert!(!json.contains("sk-"));
+        assert!(!json.contains("api_key"));
+        let decoded: ProviderConnection =
+            serde_json::from_str(&json).expect("decode provider connection");
+        assert_eq!(decoded.auth.version, 3);
+        assert_eq!(decoded.health.reason_code, "not_probed");
+
+        let receipt = ProviderMutationReceipt {
+            schema: PROVIDER_MUTATION_SCHEMA.to_string(),
+            provider_id: "provider-1".to_string(),
+            mutation: ProviderMutationKind::CredentialReplaced,
+            revision: 2,
+            secret_ref: Some(secret_ref),
+            secret_value_exposed: false,
+            occurred_at_ms: 30,
+            reason_code: "keychain_secret_ref_replaced".to_string(),
+        };
+        let receipt_json = serde_json::to_string(&receipt).expect("provider mutation receipt");
+        assert!(receipt_json.contains("\"secret_value_exposed\":false"));
+        assert!(!receipt_json.contains("plaintext"));
+    }
+
+    #[test]
+    fn provider_probe_and_catalog_roundtrip_without_raw_response() {
+        let mut role_scores = BTreeMap::new();
+        role_scores.insert(
+            ModelRole::Code,
+            RoleScore {
+                score: 0.91,
+                evidence_refs: vec!["catalog-sync:model-card".to_string()],
+            },
+        );
+        let entry = ModelCatalogEntry {
+            schema: MODEL_CATALOG_ENTRY_SCHEMA.to_string(),
+            id: "provider-1/openai-compatible-code".to_string(),
+            provider_id: "provider-1".to_string(),
+            remote_model_id: "openai-compatible-code".to_string(),
+            display_name: "OpenAI Compatible Code".to_string(),
+            enabled: true,
+            capabilities: ModelCapabilities::text_code(),
+            limits: ModelLimits {
+                max_input_tokens: Some(128_000),
+                max_output_tokens: Some(16_000),
+                requests_per_minute: Some(120),
+                tokens_per_minute: None,
+                max_concurrency: Some(4),
+            },
+            pricing: None,
+            health: HealthState::Healthy,
+            role_scores,
+            catalog_revision: "catalog-rev-1".to_string(),
+        };
+        let entry_json = serde_json::to_string(&entry).expect("catalog entry");
+        let decoded_entry: ModelCatalogEntry =
+            serde_json::from_str(&entry_json).expect("decode catalog entry");
+        assert_eq!(decoded_entry.provider_id, "provider-1");
+        assert!(decoded_entry.capabilities.code);
+
+        let receipt = ProviderProbeReceipt {
+            schema: PROVIDER_PROBE_RECEIPT_SCHEMA.to_string(),
+            provider_id: "provider-1".to_string(),
+            endpoint_host_redacted: "openrouter.ai".to_string(),
+            http_category: ProviderProbeHttpCategory::Success,
+            latency_bucket: LatencyBucket::Under1S,
+            auth_accepted: true,
+            model_list_available: true,
+            catalog_count: Some(42),
+            occurred_at_ms: 40,
+            reason_code: "probe_ok".to_string(),
+            diagnostic_ref: Some("provider-diagnostic/provider-1/40".to_string()),
+        };
+        let receipt_json = serde_json::to_string(&receipt).expect("probe receipt");
+        assert!(receipt_json.contains("\"http_category\":\"success\""));
+        assert!(!receipt_json.contains("raw_response"));
+        let decoded_receipt: ProviderProbeReceipt =
+            serde_json::from_str(&receipt_json).expect("decode probe receipt");
+        assert_eq!(decoded_receipt.catalog_count, Some(42));
+    }
+
+    #[test]
     fn execution_event_schema_is_generated() {
         let schemas = schema_jsons().expect("schemas");
         let execution = schemas
@@ -2495,12 +4288,40 @@ mod tests {
         assert!(graph.1.contains("final_seal_required"));
         assert!(graph.1.contains("entry_nodes"));
 
+        let objective_request = schemas
+            .iter()
+            .find(|(name, _)| *name == "objective-plan-request.schema.json")
+            .expect("objective plan request schema");
+        assert!(objective_request.1.contains("max_parallelism"));
+        assert!(objective_request.1.contains("require_git_worktree"));
+
+        let objective_receipt = schemas
+            .iter()
+            .find(|(name, _)| *name == "objective-plan-receipt.schema.json")
+            .expect("objective plan receipt schema");
+        assert!(objective_receipt.1.contains("graph_hash"));
+        assert!(objective_receipt.1.contains("compiled_plan_ref"));
+
         let model = schemas
             .iter()
             .find(|(name, _)| *name == "model-profile.schema.json")
             .expect("model schema");
         assert!(model.1.contains("structured_output"));
         assert!(model.1.contains("config_ref"));
+
+        let provider_connection = schemas
+            .iter()
+            .find(|(name, _)| *name == "provider-connection.schema.json")
+            .expect("provider connection schema");
+        assert!(provider_connection.1.contains("SecretRef"));
+        assert!(provider_connection.1.contains("revision"));
+
+        let probe = schemas
+            .iter()
+            .find(|(name, _)| *name == "provider-probe-receipt.schema.json")
+            .expect("provider probe schema");
+        assert!(probe.1.contains("endpoint_host_redacted"));
+        assert!(probe.1.contains("latency_bucket"));
 
         let data_plane = schemas
             .iter()

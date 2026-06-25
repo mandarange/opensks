@@ -69,6 +69,7 @@
         "run_paused",
         "run_resumed",
         "run_cancelled",
+        "run_completed",
         "steering_requested",
         "approval_requested",
         "approval_approved",
@@ -81,6 +82,10 @@
         "lease_expired",
         "verification_passed",
         "verification_failed",
+        "git_commit_receipt",
+        "git_push_receipt",
+        "git_push_failed",
+        "image_artifact_created",
         "snapshot_written",
         "unknown"
       ]

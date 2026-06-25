@@ -9,10 +9,15 @@ license.workspace = true
 opensks-adapter = { path = "../opensks-adapter" }
 opensks-contracts = { path = "../opensks-contracts" }
 opensks-conversation = { path = "../opensks-conversation" }
+opensks-context = { path = "../opensks-context" }
 opensks-engine = { path = "../opensks-engine" }
 opensks-event-store = { path = "../opensks-event-store" }
 opensks-git = { path = "../opensks-git" }
+opensks-graph = { path = "../opensks-graph" }
+opensks-image = { path = "../opensks-image" }
 opensks-provider = { path = "../opensks-provider" }
+opensks-scheduler = { path = "../opensks-scheduler" }
+opensks-stream = { path = "../opensks-stream" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
@@ -22,7 +27,6 @@ simulation = ["opensks-adapter/simulation"]
 
 [dev-dependencies]
 opensks-adapter = { path = "../opensks-adapter", features = ["simulation"] }
-opensks-graph = { path = "../opensks-graph" }
 
 [lints]
 workspace = true

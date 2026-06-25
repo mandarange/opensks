@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProviderProbeReceipt",
+  "type": "object",
+  "required": [
+    "auth_accepted",
+    "endpoint_host_redacted",
+    "http_category",
+    "latency_bucket",
+    "model_list_available",
+    "occurred_at_ms",
+    "provider_id",
+    "reason_code",
+    "schema"
+  ],
+  "properties": {
+    "auth_accepted": {
+      "type": "boolean"
+    },
+    "catalog_count": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "diagnostic_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "endpoint_host_redacted": {
+      "type": "string"
+    },
+    "http_category": {
+      "$ref": "#/definitions/ProviderProbeHttpCategory"
+    },
+    "latency_bucket": {
+      "$ref": "#/definitions/LatencyBucket"
+    },
+    "model_list_available": {
+      "type": "boolean"
+    },
+    "occurred_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "provider_id": {
+      "type": "string"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "LatencyBucket": {
+      "type": "string",
+      "enum": [
+        "not_measured",
+        "under250_ms",
+        "under1_s",
+        "under5_s",
+        "over5_s"
+      ]
+    },
+    "ProviderProbeHttpCategory": {
+      "type": "string",
+      "enum": [
+        "not_sent",
+        "success",
+        "auth_rejected",
+        "rate_limited",
+        "client_error",
+        "server_error",
+        "network_error"
+      ]
+    }
+  }
+}

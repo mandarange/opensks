@@ -1,0 +1,122 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SemanticVerifierJudgmentReceipt",
+  "type": "object",
+  "required": [
+    "content_redacted",
+    "generated_at_ms",
+    "id",
+    "judgment_ref",
+    "path_redacted",
+    "reason_code",
+    "response_bytes",
+    "response_hash",
+    "role",
+    "run_id",
+    "schema",
+    "state",
+    "verifier_kind",
+    "work_item_id",
+    "worker_id"
+  ],
+  "properties": {
+    "content_redacted": {
+      "type": "boolean"
+    },
+    "context_pack_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "failed_gates": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "generated_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "id": {
+      "type": "string"
+    },
+    "judgment_ref": {
+      "type": "string"
+    },
+    "model_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "passed_gates": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "path_redacted": {
+      "type": "boolean"
+    },
+    "provider_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "response_bytes": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "response_hash": {
+      "type": "string"
+    },
+    "role": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "state": {
+      "type": "string"
+    },
+    "verdict": {
+      "default": "",
+      "type": "string"
+    },
+    "verifier_kind": {
+      "type": "string"
+    },
+    "work_item_id": {
+      "type": "string"
+    },
+    "worker_context_pack_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "worker_id": {
+      "type": "string"
+    }
+  }
+}

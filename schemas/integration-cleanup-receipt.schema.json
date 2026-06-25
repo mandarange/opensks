@@ -1,0 +1,136 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IntegrationCleanupReceipt",
+  "type": "object",
+  "required": [
+    "candidate_id",
+    "cleaned_count",
+    "cleanup_ref",
+    "cleanup_target_count",
+    "content_redacted",
+    "generated_at_ms",
+    "id",
+    "integration_ref",
+    "path_redacted",
+    "reason_code",
+    "retained_candidate_ref",
+    "retained_final_diff_ref",
+    "retained_patch_ref",
+    "run_id",
+    "schema",
+    "seal_ref",
+    "state"
+  ],
+  "properties": {
+    "candidate_id": {
+      "type": "string"
+    },
+    "cleaned_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "cleanup_ref": {
+      "type": "string"
+    },
+    "cleanup_target_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "content_redacted": {
+      "type": "boolean"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "generated_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "id": {
+      "type": "string"
+    },
+    "integration_ref": {
+      "type": "string"
+    },
+    "path_redacted": {
+      "type": "boolean"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "retained_candidate_ref": {
+      "type": "string"
+    },
+    "retained_final_diff_ref": {
+      "type": "string"
+    },
+    "retained_patch_ref": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "seal_ref": {
+      "type": "string"
+    },
+    "source_isolations": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/IntegrationCleanupTarget"
+      }
+    },
+    "state": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "IntegrationCleanupTarget": {
+      "type": "object",
+      "required": [
+        "existed",
+        "reason_code",
+        "removed",
+        "source_isolation_id",
+        "source_isolation_mode",
+        "worker_id"
+      ],
+      "properties": {
+        "existed": {
+          "type": "boolean"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "removed": {
+          "type": "boolean"
+        },
+        "source_isolation_id": {
+          "type": "string"
+        },
+        "source_isolation_mode": {
+          "type": "string"
+        },
+        "work_item_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "worker_id": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -16,6 +16,9 @@
 //! - A commit is gated by a stable `index_hash` computed over the staged path
 //!   list and their staged blob oids; a stale preview (a hash that no longer
 //!   matches the live index) is refused with [`GitMutationErrorCode::IndexChanged`].
+//! - The preview and commit receipt carry a reviewed staged-diff hash/ref so the
+//!   operator approval surface can bind the committed receipt back to the exact
+//!   diff that was reviewed.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -190,6 +193,18 @@ impl GitUnstageResult {
 pub struct GitCommitPreview {
     pub schema: String,
     pub index_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_diff_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_diff_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_final_diff_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_final_diff_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_candidate_id: Option<String>,
     #[serde(default)]
     pub staged_paths: Vec<String>,
     pub has_staged: bool,
@@ -201,9 +216,39 @@ impl GitCommitPreview {
         Self {
             schema: GIT_COMMIT_PREVIEW_SCHEMA.to_string(),
             index_hash: index_hash.into(),
+            staged_diff_hash: None,
+            staged_diff_ref: None,
+            integration_final_diff_hash: None,
+            integration_final_diff_ref: None,
+            integration_run_id: None,
+            integration_candidate_id: None,
             staged_paths,
             has_staged,
         }
+    }
+
+    pub fn with_staged_diff_evidence(
+        mut self,
+        staged_diff_hash: impl Into<String>,
+        staged_diff_ref: impl Into<String>,
+    ) -> Self {
+        self.staged_diff_hash = Some(staged_diff_hash.into());
+        self.staged_diff_ref = Some(staged_diff_ref.into());
+        self
+    }
+
+    pub fn with_integration_final_diff_evidence(
+        mut self,
+        integration_final_diff_hash: impl Into<String>,
+        integration_final_diff_ref: impl Into<String>,
+        integration_run_id: impl Into<String>,
+        integration_candidate_id: impl Into<String>,
+    ) -> Self {
+        self.integration_final_diff_hash = Some(integration_final_diff_hash.into());
+        self.integration_final_diff_ref = Some(integration_final_diff_ref.into());
+        self.integration_run_id = Some(integration_run_id.into());
+        self.integration_candidate_id = Some(integration_candidate_id.into());
+        self
     }
 }
 
@@ -213,6 +258,18 @@ pub struct GitCommit {
     pub schema: String,
     pub committed: bool,
     pub commit: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_staged_diff_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_staged_diff_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_final_diff_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_final_diff_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_candidate_id: Option<String>,
     #[serde(default)]
     pub paths: Vec<String>,
 }
@@ -223,8 +280,38 @@ impl GitCommit {
             schema: GIT_COMMIT_SCHEMA.to_string(),
             committed: true,
             commit: commit.into(),
+            reviewed_staged_diff_hash: None,
+            reviewed_staged_diff_ref: None,
+            integration_final_diff_hash: None,
+            integration_final_diff_ref: None,
+            integration_run_id: None,
+            integration_candidate_id: None,
             paths,
         }
+    }
+
+    pub fn with_reviewed_staged_diff_evidence(
+        mut self,
+        reviewed_staged_diff_hash: impl Into<String>,
+        reviewed_staged_diff_ref: impl Into<String>,
+    ) -> Self {
+        self.reviewed_staged_diff_hash = Some(reviewed_staged_diff_hash.into());
+        self.reviewed_staged_diff_ref = Some(reviewed_staged_diff_ref.into());
+        self
+    }
+
+    pub fn with_integration_final_diff_evidence(
+        mut self,
+        integration_final_diff_hash: impl Into<String>,
+        integration_final_diff_ref: impl Into<String>,
+        integration_run_id: impl Into<String>,
+        integration_candidate_id: impl Into<String>,
+    ) -> Self {
+        self.integration_final_diff_hash = Some(integration_final_diff_hash.into());
+        self.integration_final_diff_ref = Some(integration_final_diff_ref.into());
+        self.integration_run_id = Some(integration_run_id.into());
+        self.integration_candidate_id = Some(integration_candidate_id.into());
+        self
     }
 }
 
@@ -353,8 +440,50 @@ mod tests {
     fn commit_preview_has_staged_reflects_paths() {
         let empty = GitCommitPreview::new("h0", Vec::new());
         assert!(!empty.has_staged);
+        assert!(
+            serde_json::to_string(&empty)
+                .expect("empty preview json")
+                .contains("\"index_hash\":\"h0\"")
+        );
         let some = GitCommitPreview::new("h1", vec!["a.rs".to_string()]);
         assert!(some.has_staged);
+        let evidenced =
+            some.with_staged_diff_evidence("fnv1a64:diff", "git-staged-diff://fnv1a64:diff");
+        let json = serde_json::to_string(&evidenced).expect("ser");
+        assert!(json.contains("\"staged_diff_hash\":\"fnv1a64:diff\""));
+        assert!(json.contains("\"staged_diff_ref\":\"git-staged-diff://fnv1a64:diff\""));
+        let decoded: GitCommitPreview = serde_json::from_str(&json).expect("de");
+        assert_eq!(decoded, evidenced);
+        let integrated = decoded.with_integration_final_diff_evidence(
+            "fnv1a64:final",
+            "artifact://.opensks/runtime/integration-candidates/run-1/final.diff",
+            "run-1",
+            "candidate-1",
+        );
+        let json = serde_json::to_string(&integrated).expect("ser integrated");
+        assert!(json.contains("\"integration_final_diff_hash\":\"fnv1a64:final\""));
+        assert!(json.contains("\"integration_final_diff_ref\":\"artifact://.opensks/runtime/integration-candidates/run-1/final.diff\""));
+        let decoded: GitCommitPreview = serde_json::from_str(&json).expect("de integrated");
+        assert_eq!(decoded, integrated);
+    }
+
+    #[test]
+    fn commit_receipt_roundtrips_reviewed_staged_diff_evidence() {
+        let commit = GitCommit::new("deadbeef", vec!["a.rs".to_string()])
+            .with_reviewed_staged_diff_evidence("fnv1a64:diff", "git-staged-diff://fnv1a64:diff")
+            .with_integration_final_diff_evidence(
+                "fnv1a64:final",
+                "artifact://.opensks/runtime/integration-candidates/run-1/final.diff",
+                "run-1",
+                "candidate-1",
+            );
+        let json = serde_json::to_string(&commit).expect("ser");
+        assert!(json.contains("\"reviewed_staged_diff_hash\":\"fnv1a64:diff\""));
+        assert!(json.contains("\"reviewed_staged_diff_ref\":\"git-staged-diff://fnv1a64:diff\""));
+        assert!(json.contains("\"integration_final_diff_hash\":\"fnv1a64:final\""));
+        assert!(json.contains("\"integration_run_id\":\"run-1\""));
+        let decoded: GitCommit = serde_json::from_str(&json).expect("de");
+        assert_eq!(decoded, commit);
     }
 
     #[test]

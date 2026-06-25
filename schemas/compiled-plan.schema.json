@@ -47,11 +47,35 @@
     "proof_contract": {
       "$ref": "#/definitions/CompletionContract"
     },
+    "repair_plan": {
+      "default": {
+        "actions": [],
+        "bounded": true,
+        "groups": [],
+        "max_iterations": 0,
+        "reason_code": "no_repairs_required"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/CompileRepairPlan"
+        }
+      ]
+    },
     "resource_plan": {
       "$ref": "#/definitions/ResourcePlan"
     },
     "schema": {
       "type": "string"
+    },
+    "shard_policy": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/PlannerShardPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "work_templates": {
       "default": [],
@@ -147,6 +171,127 @@
         }
       }
     },
+    "CompileRepairAction": {
+      "type": "object",
+      "required": [
+        "action",
+        "description",
+        "diagnostic_reason_code",
+        "evidence_required",
+        "id"
+      ],
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "diagnostic_reason_code": {
+          "type": "string"
+        },
+        "evidence_required": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "target_edge_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target_node_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "CompileRepairGroup": {
+      "type": "object",
+      "required": [
+        "description",
+        "group_kind",
+        "id"
+      ],
+      "properties": {
+        "action_ids": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "description": {
+          "type": "string"
+        },
+        "diagnostic_reason_codes": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "edge_ids": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "group_kind": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "node_ids": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "CompileRepairPlan": {
+      "type": "object",
+      "required": [
+        "bounded",
+        "max_iterations",
+        "reason_code"
+      ],
+      "properties": {
+        "actions": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CompileRepairAction"
+          }
+        },
+        "bounded": {
+          "type": "boolean"
+        },
+        "groups": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CompileRepairGroup"
+          }
+        },
+        "max_iterations": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "reason_code": {
+          "type": "string"
+        }
+      }
+    },
     "CompletionContract": {
       "type": "object",
       "required": [
@@ -168,6 +313,13 @@
           "type": "array",
           "items": {
             "type": "string"
+          }
+        },
+        "requirements": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProofRequirement"
           }
         }
       }
@@ -194,6 +346,99 @@
         "warning",
         "error"
       ]
+    },
+    "PlannerShardPolicy": {
+      "type": "object",
+      "required": [
+        "candidate_selection_policy",
+        "id",
+        "implementation_shard_count",
+        "max_parallelism",
+        "role_count",
+        "schema",
+        "source",
+        "verifier_shard_count"
+      ],
+      "properties": {
+        "candidate_selection_policy": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "implementation_shard_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "max_parallelism": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "required_gates": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "role_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "schema": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "verifier_shard_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ProofRequirement": {
+      "type": "object",
+      "required": [
+        "description",
+        "evidence_required",
+        "id"
+      ],
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_required": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "source_node_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "ResourcePlan": {
       "type": "object",
@@ -267,6 +512,34 @@
           "items": {
             "type": "string"
           }
+        },
+        "shard_policy_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "shard_policy_required_source_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "shard_policy_required_verifier_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "shard_policy_selection_policy": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     }

@@ -1,0 +1,187 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ImageProvenanceReceipt",
+  "type": "object",
+  "required": [
+    "asset_id",
+    "content_hash",
+    "model_id",
+    "operation",
+    "provenance_hash",
+    "provider_id",
+    "route_receipt",
+    "schema"
+  ],
+  "properties": {
+    "asset_id": {
+      "type": "string"
+    },
+    "content_hash": {
+      "type": "string"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "model_id": {
+      "type": "string"
+    },
+    "operation": {
+      "$ref": "#/definitions/ImageOperation"
+    },
+    "prompt_hash": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provenance_hash": {
+      "type": "string"
+    },
+    "provider_id": {
+      "type": "string"
+    },
+    "route_receipt": {
+      "$ref": "#/definitions/ModelRouteReceipt"
+    },
+    "schema": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "CapabilityRequirements": {
+      "type": "object",
+      "required": [
+        "code",
+        "image_edit",
+        "image_output",
+        "structured_output",
+        "text",
+        "tool_use",
+        "vision_input"
+      ],
+      "properties": {
+        "code": {
+          "type": "boolean"
+        },
+        "image_edit": {
+          "type": "boolean"
+        },
+        "image_output": {
+          "type": "boolean"
+        },
+        "structured_output": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "boolean"
+        },
+        "tool_use": {
+          "type": "boolean"
+        },
+        "vision_input": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ImageOperation": {
+      "type": "string",
+      "enum": [
+        "generate",
+        "inspect",
+        "edit"
+      ]
+    },
+    "ModelLimits": {
+      "type": "object",
+      "properties": {
+        "max_concurrency": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "max_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "requests_per_minute": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "tokens_per_minute": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ModelRouteReceipt": {
+      "type": "object",
+      "required": [
+        "effective_limits",
+        "reason_code",
+        "registry_revision",
+        "requested_capabilities"
+      ],
+      "properties": {
+        "effective_limits": {
+          "$ref": "#/definitions/ModelLimits"
+        },
+        "fallback_index": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "registry_revision": {
+          "type": "string"
+        },
+        "requested_capabilities": {
+          "$ref": "#/definitions/CapabilityRequirements"
+        }
+      }
+    }
+  }
+}

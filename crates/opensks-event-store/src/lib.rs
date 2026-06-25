@@ -116,6 +116,19 @@ impl EventStore {
         Ok(seq.unwrap_or(0) as u64 + 1)
     }
 
+    pub fn last_sequence(&self, run_id: &str) -> Result<Option<u64>, EventStoreError> {
+        let seq: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MAX(sequence) FROM events WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(seq.map(|value| value as u64))
+    }
+
     pub fn append_event(
         &mut self,
         mut event: ExecutionEventEnvelope,
@@ -355,6 +368,19 @@ mod tests {
         assert_eq!(events[0].sequence, 2);
         assert_eq!(events[1].sequence, 3);
         assert_eq!(events[0].evidence_refs, vec!["unit-test"]);
+    }
+
+    #[test]
+    fn last_sequence_reports_committed_cursor() {
+        let mut store = EventStore::open_memory().expect("store");
+        assert_eq!(store.last_sequence("run-1").expect("empty"), None);
+        store
+            .append_event(event("evt-1", "run-1", Sensitivity::Public))
+            .expect("append 1");
+        store
+            .append_event(event("evt-2", "run-1", Sensitivity::Public))
+            .expect("append 2");
+        assert_eq!(store.last_sequence("run-1").expect("last"), Some(2));
     }
 
     #[test]

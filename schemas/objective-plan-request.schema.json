@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ObjectivePlanRequest",
+  "type": "object",
+  "required": [
+    "objective",
+    "schema"
+  ],
+  "properties": {
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "include_image_lane": {
+      "default": false,
+      "type": "boolean"
+    },
+    "include_research_lane": {
+      "default": false,
+      "type": "boolean"
+    },
+    "max_parallelism": {
+      "default": 8,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "objective": {
+      "type": "string"
+    },
+    "require_git_worktree": {
+      "default": true,
+      "type": "boolean"
+    },
+    "require_integration_approval": {
+      "default": true,
+      "type": "boolean"
+    },
+    "role_count": {
+      "default": 4,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "schema": {
+      "type": "string"
+    }
+  }
+}

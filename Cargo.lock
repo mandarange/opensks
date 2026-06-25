@@ -1077,6 +1077,7 @@ dependencies = [
  "opensks-cli",
  "opensks-contracts",
  "opensks-daemon",
+ "opensks-native-collaboration",
  "opensks-provider",
  "serde_json",
 ]
@@ -1085,9 +1086,15 @@ dependencies = [
 name = "opensks-adapter"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "opensks-codegraph",
+ "opensks-context",
  "opensks-contracts",
+ "opensks-git-service",
+ "opensks-image",
  "opensks-patch-engine",
  "opensks-policy",
+ "opensks-triwiki",
  "reqwest",
  "serde",
  "serde_json",
@@ -1150,7 +1157,9 @@ dependencies = [
 name = "opensks-context"
 version = "0.1.0"
 dependencies = [
+ "opensks-codegraph",
  "opensks-contracts",
+ "opensks-intel",
  "opensks-triwiki",
  "serde_json",
  "thiserror 2.0.18",
@@ -1182,13 +1191,17 @@ name = "opensks-daemon"
 version = "0.1.0"
 dependencies = [
  "opensks-adapter",
+ "opensks-context",
  "opensks-contracts",
  "opensks-conversation",
  "opensks-engine",
  "opensks-event-store",
  "opensks-git",
  "opensks-graph",
+ "opensks-image",
  "opensks-provider",
+ "opensks-scheduler",
+ "opensks-stream",
  "serde_json",
  "thiserror 2.0.18",
 ]
@@ -1249,6 +1262,7 @@ version = "0.1.0"
 dependencies = [
  "opensks-contracts",
  "opensks-policy",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -1278,6 +1292,7 @@ dependencies = [
  "opensks-policy",
  "opensks-provider",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
 ]
 
@@ -1293,6 +1308,10 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
 ]
+
+[[package]]
+name = "opensks-native-collaboration"
+version = "0.1.0"
 
 [[package]]
 name = "opensks-patch-engine"
@@ -1337,6 +1356,7 @@ dependencies = [
  "opensks-contracts",
  "opensks-policy",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

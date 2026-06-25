@@ -293,29 +293,55 @@ struct GitUnstageResult: Codable, Sendable, Equatable {
 /// capture. `indexHash` is the OPTIMISTIC-CONCURRENCY token: it is echoed back
 /// on commit as `--expected-index-hash`; if the live index has moved, the commit
 /// is refused with `index_changed` so a commit can only contain reviewed paths.
+/// `stagedDiffHash/ref` bind that preview to the exact staged diff evidence the
+/// operator reviewed.
 struct GitCommitPreview: Codable, Sendable, Equatable {
     let schema: String
     let indexHash: String
     let stagedPaths: [String]
     let hasStaged: Bool
+    let stagedDiffHash: String?
+    let stagedDiffRef: String?
+    let integrationFinalDiffHash: String?
+    let integrationFinalDiffRef: String?
+    let integrationRunId: String?
+    let integrationCandidateId: String?
 
     enum CodingKeys: String, CodingKey {
         case schema
         case indexHash = "index_hash"
         case stagedPaths = "staged_paths"
         case hasStaged = "has_staged"
+        case stagedDiffHash = "staged_diff_hash"
+        case stagedDiffRef = "staged_diff_ref"
+        case integrationFinalDiffHash = "integration_final_diff_hash"
+        case integrationFinalDiffRef = "integration_final_diff_ref"
+        case integrationRunId = "integration_run_id"
+        case integrationCandidateId = "integration_candidate_id"
     }
 
     init(
         schema: String = "opensks.git-commit-preview.v1",
         indexHash: String,
         stagedPaths: [String],
-        hasStaged: Bool
+        hasStaged: Bool,
+        stagedDiffHash: String? = nil,
+        stagedDiffRef: String? = nil,
+        integrationFinalDiffHash: String? = nil,
+        integrationFinalDiffRef: String? = nil,
+        integrationRunId: String? = nil,
+        integrationCandidateId: String? = nil
     ) {
         self.schema = schema
         self.indexHash = indexHash
         self.stagedPaths = stagedPaths
         self.hasStaged = hasStaged
+        self.stagedDiffHash = stagedDiffHash
+        self.stagedDiffRef = stagedDiffRef
+        self.integrationFinalDiffHash = integrationFinalDiffHash
+        self.integrationFinalDiffRef = integrationFinalDiffRef
+        self.integrationRunId = integrationRunId
+        self.integrationCandidateId = integrationCandidateId
     }
 
     init(from decoder: Decoder) throws {
@@ -324,6 +350,12 @@ struct GitCommitPreview: Codable, Sendable, Equatable {
         indexHash = try c.decodeIfPresent(String.self, forKey: .indexHash) ?? ""
         stagedPaths = try c.decodeIfPresent([String].self, forKey: .stagedPaths) ?? []
         hasStaged = try c.decodeIfPresent(Bool.self, forKey: .hasStaged) ?? false
+        stagedDiffHash = try c.decodeIfPresent(String.self, forKey: .stagedDiffHash)
+        stagedDiffRef = try c.decodeIfPresent(String.self, forKey: .stagedDiffRef)
+        integrationFinalDiffHash = try c.decodeIfPresent(String.self, forKey: .integrationFinalDiffHash)
+        integrationFinalDiffRef = try c.decodeIfPresent(String.self, forKey: .integrationFinalDiffRef)
+        integrationRunId = try c.decodeIfPresent(String.self, forKey: .integrationRunId)
+        integrationCandidateId = try c.decodeIfPresent(String.self, forKey: .integrationCandidateId)
     }
 
     static let empty = GitCommitPreview(indexHash: "", stagedPaths: [], hasStaged: false)
@@ -339,16 +371,45 @@ struct GitCommitResult: Codable, Sendable, Equatable {
     let committed: Bool
     let commit: String
     let paths: [String]
+    let reviewedStagedDiffHash: String?
+    let reviewedStagedDiffRef: String?
+    let integrationFinalDiffHash: String?
+    let integrationFinalDiffRef: String?
+    let integrationRunId: String?
+    let integrationCandidateId: String?
 
     enum CodingKeys: String, CodingKey {
         case schema, committed, commit, paths
+        case reviewedStagedDiffHash = "reviewed_staged_diff_hash"
+        case reviewedStagedDiffRef = "reviewed_staged_diff_ref"
+        case integrationFinalDiffHash = "integration_final_diff_hash"
+        case integrationFinalDiffRef = "integration_final_diff_ref"
+        case integrationRunId = "integration_run_id"
+        case integrationCandidateId = "integration_candidate_id"
     }
 
-    init(schema: String = "opensks.git-commit.v1", committed: Bool, commit: String, paths: [String]) {
+    init(
+        schema: String = "opensks.git-commit.v1",
+        committed: Bool,
+        commit: String,
+        paths: [String],
+        reviewedStagedDiffHash: String? = nil,
+        reviewedStagedDiffRef: String? = nil,
+        integrationFinalDiffHash: String? = nil,
+        integrationFinalDiffRef: String? = nil,
+        integrationRunId: String? = nil,
+        integrationCandidateId: String? = nil
+    ) {
         self.schema = schema
         self.committed = committed
         self.commit = commit
         self.paths = paths
+        self.reviewedStagedDiffHash = reviewedStagedDiffHash
+        self.reviewedStagedDiffRef = reviewedStagedDiffRef
+        self.integrationFinalDiffHash = integrationFinalDiffHash
+        self.integrationFinalDiffRef = integrationFinalDiffRef
+        self.integrationRunId = integrationRunId
+        self.integrationCandidateId = integrationCandidateId
     }
 
     init(from decoder: Decoder) throws {
@@ -357,6 +418,12 @@ struct GitCommitResult: Codable, Sendable, Equatable {
         committed = try c.decodeIfPresent(Bool.self, forKey: .committed) ?? false
         commit = try c.decode(String.self, forKey: .commit)
         paths = try c.decodeIfPresent([String].self, forKey: .paths) ?? []
+        reviewedStagedDiffHash = try c.decodeIfPresent(String.self, forKey: .reviewedStagedDiffHash)
+        reviewedStagedDiffRef = try c.decodeIfPresent(String.self, forKey: .reviewedStagedDiffRef)
+        integrationFinalDiffHash = try c.decodeIfPresent(String.self, forKey: .integrationFinalDiffHash)
+        integrationFinalDiffRef = try c.decodeIfPresent(String.self, forKey: .integrationFinalDiffRef)
+        integrationRunId = try c.decodeIfPresent(String.self, forKey: .integrationRunId)
+        integrationCandidateId = try c.decodeIfPresent(String.self, forKey: .integrationCandidateId)
     }
 
     /// First 8 chars of the commit sha for a compact, honest reference.

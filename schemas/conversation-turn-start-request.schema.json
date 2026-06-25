@@ -45,6 +45,15 @@
     },
     "settings": {
       "$ref": "#/definitions/ConversationTurnSettings"
+    },
+    "thread_settings_updated_at_ms": {
+      "description": "Client-observed durable thread settings revision. The daemon uses this as a compare-and-snapshot guard before accepting a turn; the full `settings` payload below is retained as a compatibility echo and is not the runtime source of truth.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
     }
   },
   "definitions": {

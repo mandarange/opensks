@@ -33,16 +33,22 @@ struct ChatGitContext: Equatable {
 struct ChatWorkspaceView: View {
     @ObservedObject var conversations: ConversationStore
     @ObservedObject var git: GitStudioStore
+    @ObservedObject var providers: ProviderStore
     var pipelines: PipelineProjectionStore?
     var onOpenGraph: (String) -> Void = { _ in }
 
     var body: some View {
         ConversationThreadView(
             store: conversations,
+            providers: providers,
             pipelines: pipelines,
             onOpenGraph: onOpenGraph,
             gitContext: gitContext
         )
+        .sheet(isPresented: $providers.showingAddProvider) {
+            ProviderConnectionWizard(store: providers)
+                .frame(width: 560, height: 620)
+        }
     }
 
     private var gitContext: ChatGitContext {

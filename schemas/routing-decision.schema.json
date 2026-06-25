@@ -196,13 +196,51 @@
       }
     },
     "RoutingStatus": {
-      "type": "string",
-      "enum": [
-        "routed",
-        "blocked_missing_capability",
-        "blocked_disabled",
-        "blocked_policy",
-        "blocked_provider_health"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "blocked_missing_capability",
+            "blocked_disabled",
+            "blocked_policy",
+            "blocked_provider_health"
+          ]
+        },
+        {
+          "description": "A user/thread setting requested a model or auto route, but no registry snapshot has validated provider/model/capability/health yet.",
+          "type": "string",
+          "enum": [
+            "requested"
+          ]
+        },
+        {
+          "description": "A registry snapshot found an enabled compatible provider/model.",
+          "type": "string",
+          "enum": [
+            "resolved"
+          ]
+        },
+        {
+          "description": "Secret resolution, policy, health/circuit, and concurrency admission are all satisfied; the request can be dispatched.",
+          "type": "string",
+          "enum": [
+            "dispatch_ready"
+          ]
+        },
+        {
+          "description": "A provider request was actually sent.",
+          "type": "string",
+          "enum": [
+            "dispatched"
+          ]
+        },
+        {
+          "description": "Legacy compatibility label. New product paths should prefer the staged statuses above and only use this for old receipts already persisted.",
+          "type": "string",
+          "enum": [
+            "routed"
+          ]
+        }
       ]
     }
   }

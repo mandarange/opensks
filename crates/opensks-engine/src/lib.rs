@@ -21,6 +21,8 @@ pub use projection::{ProjectionReducer, project_run, project_run_from_store};
 pub enum EngineError {
     #[error("graph has compile errors")]
     GraphCompileBlocked,
+    #[error("invalid planner shard policy: {0}")]
+    InvalidPlannerShardPolicy(&'static str),
     #[error("scheduler error: {0}")]
     Scheduler(#[from] SchedulerError),
     #[error("event store error: {0}")]
@@ -83,6 +85,7 @@ pub fn plan_graph_for_scheduler(
     {
         return Err(EngineError::GraphCompileBlocked);
     }
+    validate_compiled_planner_shard_policy(graph, &compiled_plan)?;
     let mut work_items = Vec::new();
     for template in &compiled_plan.work_templates {
         let dependencies = template
@@ -95,6 +98,10 @@ pub fn plan_graph_for_scheduler(
         item.kind = template.kind.clone();
         item.capability_requirements = template.capability_requirements.clone();
         item.requirement_ids = template.requirement_ids.clone();
+        item.shard_policy_id = template.shard_policy_id.clone();
+        item.shard_policy_selection_policy = template.shard_policy_selection_policy.clone();
+        item.shard_policy_required_source_count = template.shard_policy_required_source_count;
+        item.shard_policy_required_verifier_count = template.shard_policy_required_verifier_count;
         item.state = WorkState::Ready;
         work_items.push(item);
     }
@@ -102,6 +109,81 @@ pub fn plan_graph_for_scheduler(
         compiled_plan,
         work_items,
     })
+}
+
+fn validate_compiled_planner_shard_policy(
+    graph: &PipelineGraph,
+    compiled_plan: &CompiledPlan,
+) -> Result<(), EngineError> {
+    if !graph_is_objective_planner(graph) {
+        return Ok(());
+    }
+    let policy = compiled_plan
+        .shard_policy
+        .as_ref()
+        .ok_or(EngineError::InvalidPlannerShardPolicy("missing_policy"))?;
+    if policy.schema != opensks_contracts::PLANNER_SHARD_POLICY_SCHEMA {
+        return Err(EngineError::InvalidPlannerShardPolicy("schema_mismatch"));
+    }
+    if policy.id.trim().is_empty() {
+        return Err(EngineError::InvalidPlannerShardPolicy("missing_policy_id"));
+    }
+    if policy.source != "objective_planner" {
+        return Err(EngineError::InvalidPlannerShardPolicy("source_mismatch"));
+    }
+    if policy.role_count == 0 || policy.max_parallelism == 0 {
+        return Err(EngineError::InvalidPlannerShardPolicy(
+            "empty_policy_counts",
+        ));
+    }
+    if policy.implementation_shard_count == 0 {
+        return Err(EngineError::InvalidPlannerShardPolicy(
+            "missing_implementation_shards",
+        ));
+    }
+    if policy.candidate_selection_policy.trim().is_empty() {
+        return Err(EngineError::InvalidPlannerShardPolicy(
+            "missing_candidate_selection_policy",
+        ));
+    }
+    for template in &compiled_plan.work_templates {
+        if template.shard_policy_id.as_deref() != Some(policy.id.as_str()) {
+            return Err(EngineError::InvalidPlannerShardPolicy(
+                "template_policy_id_mismatch",
+            ));
+        }
+        if template.shard_policy_selection_policy.as_deref()
+            != Some(policy.candidate_selection_policy.as_str())
+        {
+            return Err(EngineError::InvalidPlannerShardPolicy(
+                "template_selection_policy_mismatch",
+            ));
+        }
+        if template.shard_policy_required_source_count
+            != Some(policy.implementation_shard_count as usize)
+        {
+            return Err(EngineError::InvalidPlannerShardPolicy(
+                "template_required_source_count_mismatch",
+            ));
+        }
+        if template.shard_policy_required_verifier_count
+            != Some(policy.verifier_shard_count as usize)
+        {
+            return Err(EngineError::InvalidPlannerShardPolicy(
+                "template_required_verifier_count_mismatch",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn graph_is_objective_planner(graph: &PipelineGraph) -> bool {
+    graph.id.starts_with("objective-plan-")
+        || graph
+            .metadata
+            .evidence_refs
+            .iter()
+            .any(|reference| reference == "graph:objective-planner")
 }
 
 pub fn simulate_graph_run(
@@ -384,6 +466,123 @@ mod tests {
         let run_plan = plan_graph_for_scheduler("run-engine", &graph).expect("run plan");
         assert!(!run_plan.work_items.is_empty());
         assert_eq!(run_plan.compiled_plan.graph_id, "single-model-safe");
+    }
+
+    #[test]
+    fn engine_carries_compiled_requirement_ids_into_scheduler_items() {
+        let mut graph = opensks_graph::single_model_safe_template();
+        graph.nodes.get_mut("delegate").expect("delegate").config = serde_json::json!({
+            "requirement_ids": ["req-provider-edit"],
+            "acceptance_criteria": ["final diff is captured before seal"]
+        });
+        let run_plan = plan_graph_for_scheduler("run-requirements", &graph).expect("run plan");
+        let delegate = run_plan
+            .work_items
+            .iter()
+            .find(|item| item.node_id == "delegate")
+            .expect("delegate work item");
+        assert!(
+            delegate
+                .requirement_ids
+                .contains(&"req-provider-edit".to_string())
+        );
+        assert!(
+            delegate
+                .requirement_ids
+                .iter()
+                .any(|id| id.starts_with("req-delegate-1-"))
+        );
+        assert_eq!(
+            run_plan
+                .compiled_plan
+                .proof_contract
+                .required_requirement_ids,
+            delegate.requirement_ids
+        );
+    }
+
+    #[test]
+    fn engine_carries_objective_shard_policy_into_scheduler_items() {
+        let mut request = opensks_contracts::ObjectivePlanRequest::new(
+            "Implement provider UI with verifier shards",
+        );
+        request.max_parallelism = 6;
+        request.role_count = 4;
+        let planned = opensks_graph::plan_graph_from_objective(&request);
+        let shard_policy = planned
+            .compiled_plan
+            .shard_policy
+            .as_ref()
+            .expect("planner shard policy");
+        let run_plan =
+            plan_graph_for_scheduler("run-shard-policy", &planned.graph).expect("run plan");
+
+        assert_eq!(
+            run_plan.compiled_plan.shard_policy.as_ref(),
+            Some(shard_policy)
+        );
+        assert!(
+            run_plan
+                .work_items
+                .iter()
+                .all(|item| { item.shard_policy_id.as_deref() == Some(shard_policy.id.as_str()) })
+        );
+        assert!(run_plan.work_items.iter().all(|item| {
+            item.shard_policy_selection_policy.as_deref()
+                == Some(shard_policy.candidate_selection_policy.as_str())
+        }));
+        assert!(run_plan.work_items.iter().all(|item| {
+            item.shard_policy_required_source_count
+                == Some(shard_policy.implementation_shard_count as usize)
+        }));
+        assert!(run_plan.work_items.iter().all(|item| {
+            item.shard_policy_required_verifier_count
+                == Some(shard_policy.verifier_shard_count as usize)
+        }));
+        assert!(
+            run_plan
+                .compiled_plan
+                .work_templates
+                .iter()
+                .all(|template| {
+                    template.shard_policy_id.as_deref() == Some(shard_policy.id.as_str())
+                })
+        );
+    }
+
+    #[test]
+    fn engine_blocks_invalid_cyclic_scheduler_plan() {
+        let mut graph = opensks_graph::single_model_safe_template();
+        graph.edges = vec![
+            opensks_contracts::EdgeSpec {
+                id: "edge-goal-delegate".to_string(),
+                from: opensks_contracts::PortRef {
+                    node_id: "goal".to_string(),
+                    port: "out".to_string(),
+                },
+                to: opensks_contracts::PortRef {
+                    node_id: "delegate".to_string(),
+                    port: "in".to_string(),
+                },
+                kind: opensks_contracts::EdgeKind::Control,
+                condition: None,
+            },
+            opensks_contracts::EdgeSpec {
+                id: "edge-delegate-goal".to_string(),
+                from: opensks_contracts::PortRef {
+                    node_id: "delegate".to_string(),
+                    port: "out".to_string(),
+                },
+                to: opensks_contracts::PortRef {
+                    node_id: "goal".to_string(),
+                    port: "in".to_string(),
+                },
+                kind: opensks_contracts::EdgeKind::Control,
+                condition: None,
+            },
+        ];
+        let error = plan_graph_for_scheduler("run-cycle", &graph).expect_err("cycle blocked");
+        assert!(matches!(error, EngineError::GraphCompileBlocked));
     }
 
     #[test]

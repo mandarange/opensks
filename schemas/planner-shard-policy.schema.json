@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PlannerShardPolicy",
+  "type": "object",
+  "required": [
+    "candidate_selection_policy",
+    "id",
+    "implementation_shard_count",
+    "max_parallelism",
+    "role_count",
+    "schema",
+    "source",
+    "verifier_shard_count"
+  ],
+  "properties": {
+    "candidate_selection_policy": {
+      "type": "string"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "id": {
+      "type": "string"
+    },
+    "implementation_shard_count": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "max_parallelism": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "required_gates": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "role_count": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "schema": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string"
+    },
+    "verifier_shard_count": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  }
+}

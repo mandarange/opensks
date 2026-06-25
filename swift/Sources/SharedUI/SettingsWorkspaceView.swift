@@ -1,23 +1,23 @@
 // SettingsWorkspaceView.swift — the `.settings` route (PR-045). A truthful
-// settings surface: it exposes what exists today (the keyboard-shortcut
-// reference and the read-only resolved workspace paths) and states plainly that
-// provider, permission and retention settings have their own surfaces in later
-// PRs — without claiming they are present here.
+// settings surface: it exposes runtime capabilities, provider setup, keyboard
+// shortcuts, and resolved workspace paths without claiming unsupported controls.
 
 import SwiftUI
 
 struct SettingsWorkspaceView: View {
     @EnvironmentObject private var state: AppState
-    @State private var capabilities: [RuntimeCapability] = []
+    @EnvironmentObject private var coordinator: AppCoordinator
+    @State private var capabilityReport: RuntimeCapabilityReport?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.s16) {
                 header
+                providerCard
                 capabilitiesCard
                 shortcutsCard
                 workspaceCard
-                upcomingCard
+                policyCard
             }
             .frame(maxWidth: 720, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
@@ -33,7 +33,7 @@ struct SettingsWorkspaceView: View {
                 cli: state.cli,
                 workspace: state.workspace
             ) {
-                capabilities = report.capabilities
+                capabilityReport = report
             }
         }
     }
@@ -48,13 +48,18 @@ struct SettingsWorkspaceView: View {
                     .font(Theme.ui(12.5))
                     .foregroundStyle(Theme.muted)
                     .fixedSize(horizontal: false, vertical: true)
-                if capabilities.isEmpty {
+                if let report = capabilityReport {
+                    CapabilityStatusView(capabilities: report.capabilities)
+                        .padding(.top, Theme.s4)
+                    if let registry = report.toolRegistry {
+                        Divider().overlay(Theme.stroke)
+                            .padding(.vertical, Theme.s4)
+                        ToolRegistryStatusView(registry: registry)
+                    }
+                } else {
                     Text("Capability report unavailable.")
                         .font(Theme.ui(12))
                         .foregroundStyle(Theme.faint)
-                } else {
-                    CapabilityStatusView(capabilities: capabilities)
-                        .padding(.top, Theme.s4)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -71,11 +76,17 @@ struct SettingsWorkspaceView: View {
                 Text("Settings")
                     .font(Theme.ui(18, .semibold))
                     .foregroundStyle(Theme.text)
-                Text("What you can configure today, and what is on its way.")
+                Text("Provider setup, runtime truth, shortcuts, and workspace paths.")
                     .font(Theme.ui(12))
                     .foregroundStyle(Theme.muted)
             }
             Spacer(minLength: 0)
+        }
+    }
+
+    private var providerCard: some View {
+        card {
+            ProviderCenterView(store: coordinator.providers)
         }
     }
 
@@ -119,20 +130,17 @@ struct SettingsWorkspaceView: View {
         .accessibilityIdentifier("settings.workspace.card")
     }
 
-    private var upcomingCard: some View {
+    private var policyCard: some View {
         card {
             VStack(alignment: .leading, spacing: Theme.s8) {
-                HStack(spacing: Theme.s8) {
-                    StatusPill(kind: .neutral, label: "Not here yet")
-                    Spacer()
-                }
-                Text("Provider configuration, permission scopes and retention policy get their own surfaces in later PRs. They are intentionally not shown here so nothing implies a setting exists before it does.")
+                StatusPill(kind: .neutral, label: "Policy surfaces")
+                Text("Permission scopes and retention policy are still runtime-owned surfaces. Provider credentials and model enablement are available above; unsupported actions remain disabled rather than simulated.")
                     .font(Theme.ui(12))
                     .foregroundStyle(Theme.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .accessibilityIdentifier("settings.upcoming.card")
+        .accessibilityIdentifier("settings.policy.card")
     }
 
     private func infoRow(label: String, value: String, systemImage: String) -> some View {

@@ -10,6 +10,7 @@ import SwiftUI
 
 struct ConversationComposer: View {
     @ObservedObject var store: ConversationStore
+    @ObservedObject var providers: ProviderStore
     let conversationID: String
 
     /// Draft text bound through the store so it survives selection changes and
@@ -26,11 +27,19 @@ struct ConversationComposer: View {
     }
 
     private var canSend: Bool {
-        !trimmedDraft.isEmpty && !store.isSending
+        !trimmedDraft.isEmpty && !store.isSending && providers.hasEligibleTextModel
     }
 
     private var settings: ConversationThreadSettings {
         store.threadSettings(for: conversationID)
+    }
+
+    private var contextAttachments: [ConversationContextAttachment] {
+        store.contextAttachments(for: conversationID)
+    }
+
+    private var staleContextCount: Int {
+        contextAttachments.filter(\.isStale).count
     }
 
     var body: some View {
@@ -38,6 +47,12 @@ struct ConversationComposer: View {
             Divider().overlay(Theme.stroke)
             VStack(alignment: .leading, spacing: 8) {
                 settingsBar
+                if !providers.hasEligibleTextModel {
+                    providerReadinessBar
+                }
+                if !contextAttachments.isEmpty {
+                    contextBar
+                }
                 HStack(alignment: .bottom, spacing: 10) {
                     TextField("Message the engine…", text: draftBinding, axis: .vertical)
                         .textFieldStyle(.plain)
@@ -63,6 +78,7 @@ struct ConversationComposer: View {
                     .buttonStyle(.primaryAction)
                     .frame(width: 110)
                     .disabled(!canSend)
+                    .help(sendHelp)
                     .accessibilityIdentifier("conversation.composer.send")
                 }
             }
@@ -75,6 +91,7 @@ struct ConversationComposer: View {
     private var settingsBar: some View {
         HStack(spacing: 8) {
             modelMenu
+            imageModelMenu
             executionModeMenu
             reasoningMenu
             pipelineMenu
@@ -86,6 +103,70 @@ struct ConversationComposer: View {
         .accessibilityIdentifier("conversation.composer.settings")
     }
 
+    private var contextBar: some View {
+        HStack(spacing: Theme.s8) {
+            StatusPill(
+                kind: staleContextCount > 0 ? .warning : .neutral,
+                label: staleContextCount > 0 ? "\(staleContextCount) stale" : "Context \(contextAttachments.count)"
+            )
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: Theme.s6) {
+                    ForEach(contextAttachments) { attachment in
+                        contextChip(attachment)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, Theme.s10)
+        .padding(.vertical, Theme.s8)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                .fill(Theme.input)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                .strokeBorder(Theme.stroke, lineWidth: 1)
+        )
+        .accessibilityIdentifier("conversation.composer.context")
+    }
+
+    private func contextChip(_ attachment: ConversationContextAttachment) -> some View {
+        HStack(spacing: Theme.s6) {
+            Image(systemName: attachment.isStale ? "exclamationmark.triangle.fill" : "doc.text.magnifyingglass")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(attachment.isStale ? Theme.gold : Theme.accent)
+            Text(attachment.displayLabel)
+                .font(Theme.ui(11, .medium))
+                .foregroundStyle(attachment.isStale ? Theme.gold : Theme.textSoft)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Button {
+                store.removeContextAttachment(attachment.id, from: conversationID)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 16, height: 16)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.muted)
+            .help("Remove context")
+            .accessibilityIdentifier("conversation.composer.context.remove.\(attachment.id.uuidString)")
+        }
+        .padding(.leading, Theme.s8)
+        .padding(.trailing, Theme.s4)
+        .frame(height: 24)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                .fill(attachment.isStale ? Theme.gold.opacity(0.10) : Theme.panel)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                .strokeBorder(attachment.isStale ? Theme.gold.opacity(0.35) : Theme.stroke, lineWidth: 1)
+        )
+        .help(attachment.isStale ? "Attached context changed since capture." : attachment.wireRef)
+    }
+
     private var modelMenu: some View {
         Menu {
             Button {
@@ -95,13 +176,26 @@ struct ConversationComposer: View {
             } label: {
                 Label("Auto route", systemImage: settings.modelSelection.mode == .auto ? "checkmark" : "circle")
             }
-            if let model = settings.modelSelection.modelId, !model.isEmpty {
+            if providers.eligibleTextModels.isEmpty {
+                Divider()
                 Button {
-                    updateSettings {
-                        $0.modelSelection = ModelSelection(mode: .pinned, modelId: model, fallbackModelIds: [])
-                    }
+                    providers.showingAddProvider = true
                 } label: {
-                    Label(model, systemImage: settings.modelSelection.mode == .pinned ? "checkmark" : "pin")
+                    Label(providerSetupActionLabel, systemImage: "key")
+                }
+            } else {
+                Divider()
+                ForEach(providers.eligibleTextModels) { model in
+                    Button {
+                        updateSettings {
+                            $0.modelSelection = providers.textModelSelection(pinning: model.id)
+                        }
+                    } label: {
+                        Label(
+                            modelMenuTitle(model),
+                            systemImage: settings.modelSelection.modelId == model.id ? "checkmark" : "cpu"
+                        )
+                    }
                 }
             }
         } label: {
@@ -110,6 +204,76 @@ struct ConversationComposer: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .accessibilityIdentifier("conversation.composer.settings.model")
+    }
+
+    private var imageModelMenu: some View {
+        Menu {
+            Button {
+                updateSettings {
+                    $0.imageModelId = nil
+                }
+            } label: {
+                Label("Auto route", systemImage: settings.imageModelId == nil ? "checkmark" : "circle")
+            }
+            if providers.eligibleImageModels.isEmpty {
+                Divider()
+                Button {
+                    providers.showingAddProvider = true
+                } label: {
+                    Label(providerSetupActionLabel, systemImage: "key")
+                }
+            } else {
+                Divider()
+                ForEach(providers.eligibleImageModels) { model in
+                    Button {
+                        updateSettings {
+                            $0.imageModelId = model.id
+                        }
+                    } label: {
+                        Label(
+                            modelMenuTitle(model),
+                            systemImage: settings.imageModelId == model.id ? "checkmark" : "photo"
+                        )
+                    }
+                }
+            }
+        } label: {
+            settingChip(icon: "photo", text: "Image \(imageModelLabel)")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .accessibilityIdentifier("conversation.composer.settings.image-model")
+    }
+
+    private var providerReadinessBar: some View {
+        HStack(spacing: Theme.s8) {
+            StatusPill(kind: .warning, label: providerReadinessLabel)
+            Text(providerReadinessDetail)
+                .font(Theme.ui(11.5))
+                .foregroundStyle(Theme.muted)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: Theme.s8)
+            Button {
+                providers.showingAddProvider = true
+            } label: {
+                Label(providerSetupActionLabel, systemImage: "key")
+            }
+            .buttonStyle(.secondaryAction)
+            .frame(width: 170)
+            .accessibilityIdentifier("conversation.composer.providers.connect")
+        }
+        .padding(.horizontal, Theme.s10)
+        .padding(.vertical, Theme.s8)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                .fill(Theme.input)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                .strokeBorder(Theme.stroke, lineWidth: 1)
+        )
+        .accessibilityIdentifier("conversation.composer.providers.readiness")
     }
 
     private var executionModeMenu: some View {
@@ -218,10 +382,38 @@ struct ConversationComposer: View {
         switch settings.modelSelection.mode {
         case .auto: return "Auto"
         case .pinned:
-            return settings.modelSelection.modelId?.isEmpty == false
-                ? settings.modelSelection.modelId!
-                : "Pinned"
+            guard let id = settings.modelSelection.modelId, !id.isEmpty else { return "Pinned" }
+            return providers.model(id: id)?.displayName ?? id
         }
+    }
+
+    private var imageModelLabel: String {
+        guard let id = settings.imageModelId, !id.isEmpty else { return "Auto" }
+        return providers.model(id: id)?.displayName ?? id
+    }
+
+    private func modelMenuTitle(_ model: ProviderModelViewModel) -> String {
+        "\(providers.providerDisplayName(for: model.providerID)) · \(model.displayName)"
+    }
+
+    private var providerReadinessLabel: String {
+        providers.enabledProviderCount == 0 ? "No provider" : "No ready model"
+    }
+
+    private var providerSetupActionLabel: String {
+        providers.enabledProviderCount == 0 ? "Connect provider" : "Add provider"
+    }
+
+    private var providerReadinessDetail: String {
+        providers.providerReadinessDetail
+    }
+
+    private var sendHelp: String {
+        if trimmedDraft.isEmpty { return "Enter a message before sending." }
+        if store.isSending { return "A send is already in flight." }
+        if !providers.hasEligibleTextModel { return providerReadinessDetail }
+        if staleContextCount > 0 { return "Attached context changed since capture." }
+        return "Start a conversation turn."
     }
 
     private func pipelineLabel(_ id: String) -> String {

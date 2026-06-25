@@ -208,6 +208,252 @@ struct ConversationTimelinePayload: Codable, Sendable, Equatable {
     let protected: Bool?
     let approvalId: String?
     let approvalMatched: Bool?
+    let stagedDiffHash: String?
+    let stagedDiffRef: String?
+    let reviewedStagedDiffHash: String?
+    let reviewedStagedDiffRef: String?
+    let integrationFinalDiffHash: String?
+    let integrationFinalDiffRef: String?
+    let integrationRunId: String?
+    let integrationCandidateId: String?
+    let assetId: String?
+    let providerId: String?
+    let modelId: String?
+    let path: String?
+    let contentHash: String?
+    let provenanceHash: String?
+    let operation: String?
+    let width: Int?
+    let height: Int?
+    let eventId: String?
+    let eventKind: String?
+    let eventSequence: Int?
+    let actor: String?
+    let agentEventKind: String?
+    let assistantMessageId: String?
+    let assistantText: String?
+    let assistantDelta: String?
+    let completionReason: String?
+    let workerId: String?
+    let workItemId: String?
+    let leaseId: String?
+    let leaseHolder: String?
+    let fencingToken: String?
+    let fencingHolder: String?
+    let batchId: String?
+    let roleLabel: String?
+    let tool: String?
+    let commandRedacted: String?
+    let exitCode: Int?
+    let timedOut: Bool?
+    let durationMs: Int?
+    let patchCount: Int?
+    let applyResultCount: Int?
+    let appliedFiles: [String]?
+    let targetPaths: [String]?
+    let touchedPaths: [String]?
+    let testTargets: [String]?
+    let code: String?
+    let reasonCode: String?
+    let receiptRef: String?
+    let patchRef: String?
+    let verificationRef: String?
+    let repairRef: String?
+    let finalDiffRef: String?
+    let contextPackRef: String?
+    let workerContextPackRef: String?
+    let workerOk: Bool?
+    let mainWorkspaceModified: Bool?
+    let approvalRequired: Bool?
+    let verifierPassed: Bool?
+    let modelCall: Bool?
+    let parallelBatch: Bool?
+    let parallelBatchSize: Int?
+    let parallelLaneIndex: Int?
+    let responseHash: String?
+    let responseBytes: Int?
+
+    init(
+        messageId: String?,
+        role: MessageRole?,
+        messageState: MessageState?,
+        contentRedacted: String?,
+        runRelation: String?,
+        commit: String?,
+        paths: [String]?,
+        message: String?,
+        remote: String?,
+        ref: String?,
+        remoteOid: String?,
+        localOid: String?,
+        alreadyDone: Bool?,
+        sourceSchema: String?,
+        projection: String?,
+        committed: Bool?,
+        pushed: Bool?,
+        intentId: String?,
+        effectDigest: String?,
+        idempotencyKey: String?,
+        remoteUrlRedacted: String?,
+        remoteExpectedOid: String?,
+        protected: Bool?,
+        approvalId: String?,
+        approvalMatched: Bool?,
+        stagedDiffHash: String?,
+        stagedDiffRef: String?,
+        reviewedStagedDiffHash: String?,
+        reviewedStagedDiffRef: String?,
+        integrationFinalDiffHash: String?,
+        integrationFinalDiffRef: String?,
+        integrationRunId: String?,
+        integrationCandidateId: String?,
+        assetId: String? = nil,
+        providerId: String? = nil,
+        modelId: String? = nil,
+        path: String? = nil,
+        contentHash: String? = nil,
+        provenanceHash: String? = nil,
+        operation: String? = nil,
+        width: Int? = nil,
+        height: Int? = nil,
+        eventId: String? = nil,
+        eventKind: String? = nil,
+        eventSequence: Int? = nil,
+        actor: String? = nil,
+        agentEventKind: String? = nil,
+        assistantMessageId: String? = nil,
+        assistantText: String? = nil,
+        assistantDelta: String? = nil,
+        completionReason: String? = nil,
+        workerId: String? = nil,
+        workItemId: String? = nil,
+        leaseId: String? = nil,
+        leaseHolder: String? = nil,
+        fencingToken: String? = nil,
+        fencingHolder: String? = nil,
+        batchId: String? = nil,
+        roleLabel: String? = nil,
+        tool: String? = nil,
+        commandRedacted: String? = nil,
+        exitCode: Int? = nil,
+        timedOut: Bool? = nil,
+        durationMs: Int? = nil,
+        patchCount: Int? = nil,
+        applyResultCount: Int? = nil,
+        appliedFiles: [String]? = nil,
+        targetPaths: [String]? = nil,
+        touchedPaths: [String]? = nil,
+        testTargets: [String]? = nil,
+        code: String? = nil,
+        reasonCode: String? = nil,
+        receiptRef: String? = nil,
+        patchRef: String? = nil,
+        verificationRef: String? = nil,
+        repairRef: String? = nil,
+        finalDiffRef: String? = nil,
+        contextPackRef: String? = nil,
+        workerContextPackRef: String? = nil,
+        workerOk: Bool? = nil,
+        mainWorkspaceModified: Bool? = nil,
+        approvalRequired: Bool? = nil,
+        verifierPassed: Bool? = nil,
+        modelCall: Bool? = nil,
+        parallelBatch: Bool? = nil,
+        parallelBatchSize: Int? = nil,
+        parallelLaneIndex: Int? = nil,
+        responseHash: String? = nil,
+        responseBytes: Int? = nil
+    ) {
+        self.messageId = messageId
+        self.role = role
+        self.messageState = messageState
+        self.contentRedacted = contentRedacted
+        self.runRelation = runRelation
+        self.commit = commit
+        self.paths = paths
+        self.message = message
+        self.remote = remote
+        self.ref = ref
+        self.remoteOid = remoteOid
+        self.localOid = localOid
+        self.alreadyDone = alreadyDone
+        self.sourceSchema = sourceSchema
+        self.projection = projection
+        self.committed = committed
+        self.pushed = pushed
+        self.intentId = intentId
+        self.effectDigest = effectDigest
+        self.idempotencyKey = idempotencyKey
+        self.remoteUrlRedacted = remoteUrlRedacted
+        self.remoteExpectedOid = remoteExpectedOid
+        self.protected = protected
+        self.approvalId = approvalId
+        self.approvalMatched = approvalMatched
+        self.stagedDiffHash = stagedDiffHash
+        self.stagedDiffRef = stagedDiffRef
+        self.reviewedStagedDiffHash = reviewedStagedDiffHash
+        self.reviewedStagedDiffRef = reviewedStagedDiffRef
+        self.integrationFinalDiffHash = integrationFinalDiffHash
+        self.integrationFinalDiffRef = integrationFinalDiffRef
+        self.integrationRunId = integrationRunId
+        self.integrationCandidateId = integrationCandidateId
+        self.assetId = assetId
+        self.providerId = providerId
+        self.modelId = modelId
+        self.path = path
+        self.contentHash = contentHash
+        self.provenanceHash = provenanceHash
+        self.operation = operation
+        self.width = width
+        self.height = height
+        self.eventId = eventId
+        self.eventKind = eventKind
+        self.eventSequence = eventSequence
+        self.actor = actor
+        self.agentEventKind = agentEventKind
+        self.assistantMessageId = assistantMessageId
+        self.assistantText = assistantText
+        self.assistantDelta = assistantDelta
+        self.completionReason = completionReason
+        self.workerId = workerId
+        self.workItemId = workItemId
+        self.leaseId = leaseId
+        self.leaseHolder = leaseHolder
+        self.fencingToken = fencingToken
+        self.fencingHolder = fencingHolder
+        self.batchId = batchId
+        self.roleLabel = roleLabel
+        self.tool = tool
+        self.commandRedacted = commandRedacted
+        self.exitCode = exitCode
+        self.timedOut = timedOut
+        self.durationMs = durationMs
+        self.patchCount = patchCount
+        self.applyResultCount = applyResultCount
+        self.appliedFiles = appliedFiles
+        self.targetPaths = targetPaths
+        self.touchedPaths = touchedPaths
+        self.testTargets = testTargets
+        self.code = code
+        self.reasonCode = reasonCode
+        self.receiptRef = receiptRef
+        self.patchRef = patchRef
+        self.verificationRef = verificationRef
+        self.repairRef = repairRef
+        self.finalDiffRef = finalDiffRef
+        self.contextPackRef = contextPackRef
+        self.workerContextPackRef = workerContextPackRef
+        self.workerOk = workerOk
+        self.mainWorkspaceModified = mainWorkspaceModified
+        self.approvalRequired = approvalRequired
+        self.verifierPassed = verifierPassed
+        self.modelCall = modelCall
+        self.parallelBatch = parallelBatch
+        self.parallelBatchSize = parallelBatchSize
+        self.parallelLaneIndex = parallelLaneIndex
+        self.responseHash = responseHash
+        self.responseBytes = responseBytes
+    }
 }
 
 /// Mirrors one `opensks.timeline-item.v1` entry from
@@ -257,7 +503,13 @@ struct ConversationTimelineItem: Codable, Sendable, Identifiable, Equatable {
             commit: commit,
             paths: payload.paths ?? [],
             message: payload.message ?? "",
-            committedAtMs: createdAtMs
+            committedAtMs: createdAtMs,
+            reviewedStagedDiffHash: payload.reviewedStagedDiffHash ?? payload.stagedDiffHash,
+            reviewedStagedDiffRef: payload.reviewedStagedDiffRef ?? payload.stagedDiffRef,
+            integrationFinalDiffHash: payload.integrationFinalDiffHash,
+            integrationFinalDiffRef: payload.integrationFinalDiffRef,
+            integrationRunId: payload.integrationRunId,
+            integrationCandidateId: payload.integrationCandidateId
         )
     }
 
@@ -437,6 +689,24 @@ struct ConversationTurnSettings: Codable, Sendable, Equatable {
             imageModelId: nil
         )
     }
+
+    static func fromThread(_ settings: ConversationThreadSettings) -> ConversationTurnSettings {
+        ConversationTurnSettings(
+            model: settings.modelSelection,
+            reasoningEffort: settings.reasoningEffort,
+            executionMode: settings.executionMode,
+            pipelineId: settings.pipelineId,
+            graphRevision: nil,
+            maxParallelism: settings.maxParallelism,
+            verifierCount: settings.verifierCount,
+            toolPolicyId: settings.toolPolicyId,
+            approvalPolicyId: settings.approvalPolicyId,
+            tokenBudget: settings.tokenBudget,
+            costBudgetUsd: settings.costBudgetUsd,
+            timeoutMs: settings.timeoutMs,
+            imageModelId: settings.imageModelId
+        )
+    }
 }
 
 /// Mirrors `opensks_contracts::ConversationThreadSettings`: durable per-thread
@@ -453,6 +723,9 @@ struct ConversationThreadSettings: Codable, Sendable, Equatable {
     var verifierCount: UInt32
     var toolPolicyId: String
     var approvalPolicyId: String
+    var tokenBudget: UInt64?
+    var costBudgetUsd: Double?
+    var timeoutMs: UInt64?
     var imageModelId: String?
     var updatedAtMs: Int64
 
@@ -468,6 +741,9 @@ struct ConversationThreadSettings: Codable, Sendable, Equatable {
             verifierCount: 1,
             toolPolicyId: "project-default",
             approvalPolicyId: "safe-interactive",
+            tokenBudget: nil,
+            costBudgetUsd: nil,
+            timeoutMs: nil,
             imageModelId: nil,
             updatedAtMs: updatedAtMs
         )
@@ -485,6 +761,28 @@ struct TurnContextSelection: Codable, Sendable, Equatable {
     static let empty = TurnContextSelection(refs: [])
 }
 
+/// One editor context ref attached to a conversation draft. This is a UI-side
+/// transient projection; the durable turn-start contract receives only
+/// `wireRef`, which embeds path/range/hash and lets the daemon re-resolve bytes.
+struct ConversationContextAttachment: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let ref: EditorContextRef
+    let currentHash: String?
+    let isStale: Bool
+    let checkedAtMs: Int64
+
+    init(ref: EditorContextRef, currentHash: String?, isStale: Bool, checkedAtMs: Int64) {
+        self.id = ref.id
+        self.ref = ref
+        self.currentHash = currentHash
+        self.isStale = isStale
+        self.checkedAtMs = checkedAtMs
+    }
+
+    var wireRef: String { ref.wireReference }
+    var displayLabel: String { ref.contextLabel }
+}
+
 /// Submitted by Swift Chat to the daemon. The daemon persists the accepted turn
 /// and returns `ConversationTurnAccepted` without waiting for adapter execution.
 struct ConversationTurnStartRequest: Codable, Sendable, Equatable {
@@ -494,6 +792,7 @@ struct ConversationTurnStartRequest: Codable, Sendable, Equatable {
     let conversationId: String
     let clientTurnId: String
     let message: UserMessageInput
+    let threadSettingsUpdatedAtMs: Int64?
     let settings: ConversationTurnSettings
     let context: TurnContextSelection
     let idempotencyKey: String

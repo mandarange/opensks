@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ToolDescriptor",
+  "description": "Canonical tool metadata. Provider adapters, UI capability reports, and the executor share these descriptors so unsupported tools are visible but never advertised as callable success paths.",
+  "type": "object",
+  "required": [
+    "availability",
+    "description",
+    "display_name",
+    "input_schema",
+    "name",
+    "permission",
+    "reason_code",
+    "schema"
+  ],
+  "properties": {
+    "availability": {
+      "$ref": "#/definitions/ToolAvailability"
+    },
+    "description": {
+      "type": "string"
+    },
+    "display_name": {
+      "type": "string"
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "input_schema": true,
+    "name": {
+      "type": "string"
+    },
+    "permission": {
+      "$ref": "#/definitions/ToolPermission"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "ToolAvailability": {
+      "description": "Whether a tool is currently executable through the local ToolRegistry.",
+      "type": "string",
+      "enum": [
+        "available",
+        "unavailable"
+      ]
+    },
+    "ToolPermission": {
+      "description": "Per-tool permission (§19.7). Risk rises from `Deny` to `Allow`.",
+      "type": "string",
+      "enum": [
+        "deny",
+        "read_only",
+        "ask",
+        "allow"
+      ]
+    }
+  }
+}

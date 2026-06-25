@@ -15,6 +15,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::agent::{ToolRegistry, default_tool_registry};
+
 /// Schema id for [`RuntimeCapability`].
 pub const RUNTIME_CAPABILITY_SCHEMA: &str = "opensks.runtime-capability.v1";
 /// Schema id for [`RuntimeCapabilityReport`].
@@ -121,6 +123,10 @@ pub struct RuntimeCapabilityReport {
     /// commit/build so a release proof is reproducible.
     pub generated_for: Option<String>,
     pub capabilities: Vec<RuntimeCapability>,
+    /// Canonical tool availability snapshot used by provider tool schemas,
+    /// executors, and UI disablement. Defaults keep older reports decodable.
+    #[serde(default = "default_tool_registry")]
+    pub tool_registry: ToolRegistry,
 }
 
 impl RuntimeCapabilityReport {
@@ -133,6 +139,7 @@ impl RuntimeCapabilityReport {
                 return Err(format!("duplicate capability id `{}`", cap.id));
             }
         }
+        self.tool_registry.validate()?;
         Ok(())
     }
 
@@ -174,6 +181,28 @@ impl RuntimeCapabilityReport {
                 evidence,
             ));
         }
+        out.push_str("\n## Tool Registry\n\n");
+        out.push_str(
+            "Tools are emitted from the same `ToolRegistry` snapshot used by provider adapters and executors.\n\n",
+        );
+        out.push_str("| Tool | Surface | Availability | Permission | Reason | Evidence |\n");
+        out.push_str("|---|---|---|---|---|---|\n");
+        for tool in &self.tool_registry.tools {
+            let evidence = if tool.evidence_refs.is_empty() {
+                "—".to_string()
+            } else {
+                tool.evidence_refs.join(", ")
+            };
+            out.push_str(&format!(
+                "| `{}` | {} | {:?} | {:?} | `{}` | {} |\n",
+                tool.name,
+                tool.display_name,
+                tool.availability,
+                tool.permission,
+                tool.reason_code,
+                evidence,
+            ));
+        }
         out
     }
 }
@@ -186,12 +215,32 @@ fn capability(
     evidence_refs: &[&str],
     actions: &[&str],
 ) -> RuntimeCapability {
+    capability_with_available(
+        id,
+        title,
+        maturity,
+        maturity.is_dependable(),
+        reason_code,
+        evidence_refs,
+        actions,
+    )
+}
+
+fn capability_with_available(
+    id: &str,
+    title: &str,
+    maturity: CapabilityMaturity,
+    available: bool,
+    reason_code: &str,
+    evidence_refs: &[&str],
+    actions: &[&str],
+) -> RuntimeCapability {
     RuntimeCapability {
         schema: RUNTIME_CAPABILITY_SCHEMA.to_string(),
         id: id.to_string(),
         title: title.to_string(),
         maturity,
-        available: maturity.is_dependable(),
+        available,
         reason_code: reason_code.to_string(),
         evidence_refs: evidence_refs.iter().map(|s| s.to_string()).collect(),
         actions: actions.iter().map(|s| s.to_string()).collect(),
@@ -209,6 +258,7 @@ pub fn baseline_capability_report() -> RuntimeCapabilityReport {
     RuntimeCapabilityReport {
         schema: RUNTIME_CAPABILITY_REPORT_SCHEMA.to_string(),
         generated_for: None,
+        tool_registry: default_tool_registry(),
         capabilities: vec![
             capability(
                 "chat.answer",
@@ -235,8 +285,20 @@ pub fn baseline_capability_report() -> RuntimeCapabilityReport {
                 "agentic_loop_and_openrouter_tool_driver_present_need_model_credentials",
                 &[
                     "crate:opensks-adapter",
+                    "crate:opensks-patch-engine",
                     "loop:agentic",
                     "driver:openrouter-tools",
+                    "adapter:request-patch-lease",
+                    "scheduler:lease-visible-to-worker",
+                    "daemon:turn-scheduler-worker-route",
+                    "patch-engine:typed-preflight-read",
+                    "patch-engine:pre-apply-revalidated",
+                    "patch-engine:path-lease-bound",
+                    "patch-engine:fence-token-bound",
+                    "patch-engine:stale-temp-scavenger",
+                    "patch-engine:rollback-fault-injected",
+                    "patch-engine:attempt-aware-recovery",
+                    "patch-engine:read-back-verified",
                 ],
                 &["connect_model"],
             ),
@@ -244,8 +306,37 @@ pub fn baseline_capability_report() -> RuntimeCapabilityReport {
                 "agent.parallel_build",
                 "Parallel subcontract build",
                 Foundation,
-                "scheduler_present_but_sync_deterministic_worker",
-                &[],
+                "objective_plan_live_model_planner_apply_seal_runtime_present_live_vendor_pending",
+                &[
+                    "crate:opensks-scheduler",
+                    "planner:shard-policy",
+                    "scheduler:objective-plan-turn-bootstrap",
+                    "daemon:objective-plan-live-model-planner",
+                    "daemon:objective-plan-artifact",
+                    "daemon:objective-plan-child-runtime",
+                    "daemon:objective-plan-apply-runtime",
+                    "daemon:objective-plan-seal-runtime",
+                    "integration:planner-shard-selection",
+                    "daemon:role-worker-parallel-batch",
+                    "daemon:role-worker-model-call",
+                    "daemon:semantic-verifier-judgment",
+                    "integration:semantic-verifier-gate",
+                    "daemon:role-worker-code-candidate",
+                    "integration:role-candidate-aggregate",
+                    "integration:aggregate-candidate-ready",
+                    "schema:integration-candidate-receipt",
+                    "integration:candidate-selection-receipt",
+                    "schema:integration-candidate-selection-receipt",
+                    "integration:verification-receipt",
+                    "integration:read-only-verifier-lane",
+                    "provider:role-routing",
+                    "provider:health-cost-concurrency-scoring",
+                    "scheduler:parallel-batch-dispatch",
+                    "scheduler:provider-model-semaphore",
+                    "scheduler:provider-registry-concurrency",
+                    "scheduler:duplicate-outcome-rejected",
+                    "scheduler:worker-context-pack",
+                ],
                 &["connect_model"],
             ),
             capability(
@@ -263,17 +354,47 @@ pub fn baseline_capability_report() -> RuntimeCapabilityReport {
                 "deterministic_adapter_performs_real_file_io",
                 &[
                     "crate:opensks-adapter",
+                    "crate:opensks-patch-engine",
                     "test:local_test_adapter_really_edits_a_file_on_disk",
+                    "adapter:request-patch-lease",
+                    "patch-engine:typed-preflight-read",
+                    "patch-engine:pre-apply-revalidated",
+                    "patch-engine:path-lease-bound",
+                    "patch-engine:fence-token-bound",
+                    "patch-engine:stale-temp-scavenger",
+                    "patch-engine:rollback-fault-injected",
+                    "patch-engine:attempt-aware-recovery",
+                    "patch-engine:read-back-verified",
                 ],
                 &[],
             ),
-            capability(
+            capability_with_available(
                 "image.generate",
                 "Image generation",
-                Foundation,
-                "fake_image_model_no_adapter",
-                &[],
+                Degraded,
+                false,
+                "provider_image_lane_present_needs_enabled_image_route",
+                &[
+                    "crate:opensks-image",
+                    "crate:opensks-adapter",
+                    "daemon:provider-image-tool-executor",
+                    "schema:image-provenance-receipt",
+                ],
                 &["connect_image_model"],
+            ),
+            capability_with_available(
+                "image.inspect",
+                "Image inspection",
+                Degraded,
+                false,
+                "provider_vision_lane_present_needs_enabled_vision_route",
+                &[
+                    "crate:opensks-image",
+                    "crate:opensks-adapter",
+                    "daemon:provider-image-tool-executor",
+                    "schema:image-provenance-receipt",
+                ],
+                &["connect_vision_model"],
             ),
             capability(
                 "web.research",
@@ -331,11 +452,24 @@ pub fn baseline_capability_report() -> RuntimeCapabilityReport {
                 "pipeline.graph",
                 "Live pipeline graph",
                 Foundation,
-                "timeline_read_model_no_live_event_stream_projection",
+                "objective_planner_live_model_artifact_apply_seal_runtime_present_live_vendor_pending",
                 &[
-                    "swift:pipeline-projection-ingest",
-                    "conversation:timeline-read-model",
-                    "swift:conversation-timeline-read-model",
+                    "crate:opensks-graph",
+                    "crate:opensks-engine",
+                    "graph:objective-planner",
+                    "graph:dag-validation",
+                    "graph:proof-contract-requirements",
+                    "graph:bounded-repair-plan",
+                    "graph:repair-groups",
+                    "planner:shard-policy",
+                    "engine:scheduler-requirement-propagation",
+                    "scheduler:objective-plan-turn-bootstrap",
+                    "daemon:objective-plan-live-model-planner",
+                    "daemon:objective-plan-artifact",
+                    "daemon:objective-plan-child-runtime",
+                    "daemon:objective-plan-apply-runtime",
+                    "daemon:objective-plan-seal-runtime",
+                    "schema:compiled-plan",
                 ],
                 &[],
             ),
@@ -354,11 +488,40 @@ pub fn baseline_capability_report() -> RuntimeCapabilityReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{ToolAvailability, ToolPermission};
 
     #[test]
     fn baseline_report_is_internally_valid() {
         let report = baseline_capability_report();
         report.validate().expect("baseline report must be valid");
+    }
+
+    #[test]
+    fn baseline_report_carries_canonical_tool_registry() {
+        let report = baseline_capability_report();
+        let registry = &report.tool_registry;
+        assert_eq!(registry.registry_id, "opensks-runtime-tools");
+
+        let skill = registry
+            .descriptor("skill.invoke")
+            .expect("skill.invoke descriptor");
+        assert_eq!(skill.availability, ToolAvailability::Available);
+        assert_eq!(skill.permission, ToolPermission::Ask);
+        assert_eq!(skill.reason_code, "local_skill_registry_executable");
+
+        let image = registry
+            .descriptor("image.generate")
+            .expect("image.generate descriptor");
+        assert_eq!(image.availability, ToolAvailability::Available);
+        assert_eq!(image.reason_code, "provider_image_executor_route_required");
+        let inspect = registry
+            .descriptor("image.inspect")
+            .expect("image.inspect descriptor");
+        assert_eq!(inspect.availability, ToolAvailability::Available);
+        assert_eq!(
+            inspect.reason_code,
+            "provider_vision_executor_route_required"
+        );
     }
 
     #[test]
@@ -391,6 +554,9 @@ mod tests {
         let b = report.render_truth_matrix_markdown();
         assert_eq!(a, b);
         assert!(a.contains("| `agent.code_edit` |"));
+        assert!(a.contains("## Tool Registry"));
+        assert!(a.contains("| `skill.invoke` |"));
+        assert!(a.contains("| `image.generate` |"));
         // agent.code_edit is now Foundation (the agentic loop + OpenRouter tool
         // driver exist; live model-driven edits need credentials) — no longer a
         // Simulation stand-in.

@@ -7,8 +7,13 @@ license.workspace = true
 
 [dependencies]
 opensks-contracts = { path = "../opensks-contracts" }
+opensks-codegraph = { path = "../opensks-codegraph" }
+opensks-context = { path = "../opensks-context" }
+opensks-git-service = { path = "../opensks-git-service" }
+opensks-image = { path = "../opensks-image" }
 opensks-patch-engine = { path = "../opensks-patch-engine" }
 opensks-policy = { path = "../opensks-policy" }
+base64 = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -17,6 +22,9 @@ thiserror = { workspace = true }
 [features]
 default = []
 simulation = []
+
+[dev-dependencies]
+opensks-triwiki = { path = "../opensks-triwiki" }
 
 [lints]
 workspace = true

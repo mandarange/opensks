@@ -46,6 +46,12 @@ struct CommitComposerView: View {
                             commit: receipt.commit,
                             paths: receipt.paths,
                             message: "",
+                            reviewedStagedDiffHash: receipt.reviewedStagedDiffHash,
+                            reviewedStagedDiffRef: receipt.reviewedStagedDiffRef,
+                            integrationFinalDiffHash: receipt.integrationFinalDiffHash,
+                            integrationFinalDiffRef: receipt.integrationFinalDiffRef,
+                            integrationRunId: receipt.integrationRunId,
+                            integrationCandidateId: receipt.integrationCandidateId,
                             onDismiss: { store.dismissReceipt() }
                         )
                     }

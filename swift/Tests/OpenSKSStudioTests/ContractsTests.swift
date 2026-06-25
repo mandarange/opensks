@@ -154,6 +154,38 @@ final class ContractsTests: XCTestCase {
         XCTAssertFalse(subscribeFinal.lines.contains { $0.contains("\"id\":\"evt-from-start\"") })
     }
 
+    @MainActor
+    func testEnginePendingResponseRouterRoutesSubscribeStreamFramesByStreamId() {
+        let router = EnginePendingResponseRouter()
+        let subscribe = EngineRequestEnvelope.subscribeEvents(
+            id: "req-subscribe-framed",
+            runId: "run-framed",
+            sinceSequence: 0
+        )
+
+        router.register(subscribe)
+        router.append(Data("""
+        {"frame_type":"stream_opened","schema":"opensks.engine-stream-frame.v2","stream_id":"event-stream-run-framed","request_id":"req-subscribe-framed","project_id":"engine","conversation_id":"engine","run_id":"run-framed","protocol_version":"opensks.stream.v2","cursor":0}
+        {"frame_type":"event","schema":"opensks.engine-stream-frame.v2","stream_id":"event-stream-run-framed","cursor":1,"event":{"schema":"opensks.execution-event-envelope.v1","id":"evt-framed-1","run_id":"run-framed","sequence":1,"occurred_at":"t1","actor":"opensks-engine","kind":"run_started","payload":{"message":"started"},"sensitivity":"public","evidence_refs":["daemon:run-start-request"]}}
+        {"schema":"opensks.execution-event-envelope.v1","id":"evt-framed-1","run_id":"run-framed","sequence":1,"occurred_at":"t1","actor":"opensks-engine","kind":"run_started","payload":{"message":"started"},"sensitivity":"public","evidence_refs":["daemon:run-start-request"]}
+        {"frame_type":"stream_completed","schema":"opensks.engine-stream-frame.v2","stream_id":"event-stream-run-framed","cursor":2,"reason_code":"replay_complete"}
+        {"schema":"opensks.engine-event.v1","event_id":"engine-request-completed-req-subscribe-framed","request_id":"req-subscribe-framed","event_type":"request_completed","severity":"info","message":"request completed","protocol_version":"opensks.contracts.v1","timestamp_ms":2,"evidence_refs":["daemon:request-completed"],"redacted":true}
+
+        """.utf8))
+
+        let snapshot = router.snapshot(for: "req-subscribe-framed")
+        XCTAssertTrue(snapshot.sawRequestEvent)
+        XCTAssertTrue(snapshot.isComplete)
+        XCTAssertEqual(snapshot.lines.count, 4)
+        XCTAssertTrue(snapshot.lines.contains { $0.contains("\"frame_type\":\"stream_opened\"") })
+        XCTAssertTrue(snapshot.lines.contains { $0.contains("\"frame_type\":\"event\"") })
+        XCTAssertTrue(snapshot.lines.contains { $0.contains("\"frame_type\":\"stream_completed\"") })
+        XCTAssertFalse(snapshot.lines.contains { $0.contains("request_completed") })
+
+        let stream = EngineProcess.decodeRunStream(snapshot.lines)
+        XCTAssertEqual(stream.executionEvents.map(\.id), ["evt-framed-1"])
+    }
+
     func testEnginePendingResponseRouterUsesLatestSameRunRequestOwner() {
         let router = EnginePendingResponseRouter()
         let start = EngineRequestEnvelope.runStart(
@@ -391,6 +423,7 @@ final class ContractsTests: XCTestCase {
             conversationId: "conversation-1",
             clientTurnId: "client-turn-1",
             message: UserMessageInput(text: "start this turn", attachmentRefs: []),
+            threadSettingsUpdatedAtMs: 42,
             settings: .defaultForTurn(),
             context: .empty,
             idempotencyKey: "idem-1"
@@ -409,6 +442,7 @@ final class ContractsTests: XCTestCase {
         XCTAssertEqual(nested["request_id"] as? String, "req-conversation-turn")
         XCTAssertEqual(nested["project_id"] as? String, "project-1")
         XCTAssertEqual(nested["conversation_id"] as? String, "conversation-1")
+        XCTAssertEqual(nested["thread_settings_updated_at_ms"] as? Int, 42)
         XCTAssertEqual(nested["idempotency_key"] as? String, "idem-1")
         XCTAssertEqual(settings["execution_mode"] as? String, "worktree")
         XCTAssertEqual(settings["reasoning_effort"] as? String, "standard")
@@ -432,6 +466,9 @@ final class ContractsTests: XCTestCase {
             verifierCount: 2,
             toolPolicyId: "read-only",
             approvalPolicyId: "safe-interactive",
+            tokenBudget: 120_000,
+            costBudgetUsd: 2.5,
+            timeoutMs: 600_000,
             imageModelId: nil,
             updatedAtMs: 42
         )
@@ -445,6 +482,9 @@ final class ContractsTests: XCTestCase {
         XCTAssertEqual(object["reasoning_effort"] as? String, "deep")
         XCTAssertEqual(object["pipeline_id"] as? String, "parallel-build")
         XCTAssertEqual(object["tool_policy_id"] as? String, "read-only")
+        XCTAssertEqual(object["token_budget"] as? Int, 120_000)
+        XCTAssertEqual(object["cost_budget_usd"] as? Double, 2.5)
+        XCTAssertEqual(object["timeout_ms"] as? Int, 600_000)
         XCTAssertEqual(model["mode"] as? String, "pinned")
         XCTAssertEqual(model["model_id"] as? String, "openai/gpt-4o-mini")
 
@@ -477,6 +517,7 @@ final class ContractsTests: XCTestCase {
             conversationId: "conversation-1",
             clientTurnId: "client-turn-1",
             message: UserMessageInput(text: "start this turn", attachmentRefs: []),
+            threadSettingsUpdatedAtMs: nil,
             settings: .defaultForTurn(),
             context: .empty,
             idempotencyKey: "idem-1"
@@ -495,6 +536,118 @@ final class ContractsTests: XCTestCase {
         XCTAssertTrue(snapshot.lines[0].contains("opensks.conversation-turn-accepted.v1"))
         let accepted = try XCTUnwrap(EngineProcess.decodeConversationTurnAccepted(snapshot.lines))
         XCTAssertEqual(accepted.runId, "turn-turn-1")
+    }
+
+    func testConversationTimelineItemDecodesExecutionDetailFields() throws {
+        let json = """
+        {
+          "schema": "opensks.timeline-item.v1",
+          "id": "timeline-event-evt-tool",
+          "project_id": "project-1",
+          "conversation_id": "conversation-1",
+          "turn_id": "turn-1",
+          "run_id": "run-1",
+          "sequence": 200001,
+          "kind": "tool_call",
+          "state": "work_item_completed",
+          "payload": {
+            "source_schema": "opensks.execution-event-envelope.v1",
+            "projection": "event_journal_replay",
+            "content_redacted": "targeted tests passed",
+            "event_id": "evt-tool",
+            "event_kind": "work_item_completed",
+            "event_sequence": 7,
+            "actor": "opensks-daemon",
+            "agent_event_kind": "tool_call_completed",
+            "worker_id": "worker-code",
+            "work_item_id": "work-code",
+            "role_label": "code",
+            "tool": "test.run_targeted",
+            "command_redacted": "cargo test -p opensks-cli push_cli",
+            "exit_code": 0,
+            "timed_out": false,
+            "duration_ms": 42,
+            "test_targets": ["opensks-cli::push_cli"],
+            "applied_files": ["crates/opensks-cli/src/lib.rs"],
+            "patch_count": 1,
+            "apply_result_count": 1,
+            "main_workspace_modified": false
+          },
+          "created_at_ms": 1700000000007,
+          "updated_at_ms": 1700000000007
+        }
+        """.data(using: .utf8)!
+
+        let item = try JSONDecoder.opensks.decode(ConversationTimelineItem.self, from: json)
+        XCTAssertEqual(item.kind, .toolCall)
+        XCTAssertEqual(item.payload.projection, "event_journal_replay")
+        XCTAssertEqual(item.payload.eventId, "evt-tool")
+        XCTAssertEqual(item.payload.eventKind, "work_item_completed")
+        XCTAssertEqual(item.payload.eventSequence, 7)
+        XCTAssertEqual(item.payload.actor, "opensks-daemon")
+        XCTAssertEqual(item.payload.agentEventKind, "tool_call_completed")
+        XCTAssertEqual(item.payload.workerId, "worker-code")
+        XCTAssertEqual(item.payload.workItemId, "work-code")
+        XCTAssertEqual(item.payload.roleLabel, "code")
+        XCTAssertEqual(item.payload.tool, "test.run_targeted")
+        XCTAssertEqual(item.payload.commandRedacted, "cargo test -p opensks-cli push_cli")
+        XCTAssertEqual(item.payload.exitCode, 0)
+        XCTAssertEqual(item.payload.timedOut, false)
+        XCTAssertEqual(item.payload.durationMs, 42)
+        XCTAssertEqual(item.payload.testTargets, ["opensks-cli::push_cli"])
+        XCTAssertEqual(item.payload.appliedFiles, ["crates/opensks-cli/src/lib.rs"])
+        XCTAssertEqual(item.payload.patchCount, 1)
+        XCTAssertEqual(item.payload.applyResultCount, 1)
+        XCTAssertEqual(item.payload.mainWorkspaceModified, false)
+    }
+
+    func testConversationTimelineItemDecodesAssistantEventFields() throws {
+        let json = """
+        {
+          "schema": "opensks.timeline-item.v1",
+          "id": "timeline-event-evt-assistant",
+          "project_id": "project-1",
+          "conversation_id": "conversation-1",
+          "turn_id": "turn-1",
+          "run_id": "run-1",
+          "sequence": 200002,
+          "kind": "assistant_message",
+          "state": "completed",
+          "payload": {
+            "source_schema": "opensks.execution-event-envelope.v1",
+            "projection": "assistant_execution_event",
+            "content_redacted": "Release note finished.",
+            "event_id": "evt-assistant",
+            "event_kind": "work_item_completed",
+            "event_sequence": 8,
+            "actor": "opensks-daemon",
+            "agent_event_kind": "assistant_text_completed",
+            "assistant_message_id": "assistant-1",
+            "assistant_text": "Release note finished.",
+            "provider_id": "provider-openai",
+            "model_id": "gpt-4.1-mini",
+            "response_hash": "sha256:assistant-response",
+            "response_bytes": 128,
+            "completion_reason": "stop"
+          },
+          "created_at_ms": 1700000000008,
+          "updated_at_ms": 1700000000008
+        }
+        """.data(using: .utf8)!
+
+        let item = try JSONDecoder.opensks.decode(ConversationTimelineItem.self, from: json)
+        XCTAssertEqual(item.kind, .assistantMessage)
+        XCTAssertNil(item.message)
+        XCTAssertEqual(item.state, "completed")
+        XCTAssertEqual(item.payload.projection, "assistant_execution_event")
+        XCTAssertEqual(item.payload.agentEventKind, "assistant_text_completed")
+        XCTAssertEqual(item.payload.assistantMessageId, "assistant-1")
+        XCTAssertEqual(item.payload.assistantText, "Release note finished.")
+        XCTAssertEqual(item.payload.providerId, "provider-openai")
+        XCTAssertEqual(item.payload.modelId, "gpt-4.1-mini")
+        XCTAssertEqual(item.payload.responseHash, "sha256:assistant-response")
+        XCTAssertEqual(item.payload.responseBytes, 128)
+        XCTAssertEqual(item.payload.completionReason, "stop")
     }
 
     func testConversationSupervisorTickRequestEncodesTypedParams() throws {
@@ -557,18 +710,40 @@ final class ContractsTests: XCTestCase {
     @MainActor
     func testSubscribeReplayStreamRebuildsExecutionStore() throws {
         let ndjson = """
-        {"schema":"opensks.engine-event.v1","event_id":"engine-subscribe-events-run-swift","request_id":"req-subscribe","event_type":"execution_event","severity":"info","message":"event stream replayed 2 events since sequence 0","protocol_version":"opensks.contracts.v1","timestamp_ms":123,"evidence_refs":["daemon:subscription-accepted","event-store:replay-since"],"redacted":true}
+        {"schema":"opensks.engine-event.v1","event_id":"engine-subscribe-events-run-swift","request_id":"req-subscribe","event_type":"execution_event","severity":"info","message":"event stream replayed 3 events since sequence 0","protocol_version":"opensks.contracts.v1","timestamp_ms":123,"evidence_refs":["daemon:subscription-accepted","event-store:replay-since"],"redacted":true}
+        {"frame_type":"stream_opened","schema":"opensks.engine-stream-frame.v2","stream_id":"event-stream-run-swift","request_id":"req-subscribe","project_id":"engine","conversation_id":"engine","run_id":"run-swift","protocol_version":"opensks.stream.v2","cursor":0}
         {"schema":"opensks.execution-event-envelope.v1","id":"evt-1","run_id":"run-swift","sequence":1,"occurred_at":"t1","actor":"opensks-engine","kind":"run_started","payload":{"message":"started"},"sensitivity":"public","evidence_refs":["daemon:run-start-request"]}
+        {"frame_type":"event","schema":"opensks.engine-stream-frame.v2","stream_id":"event-stream-run-swift","cursor":1,"event":{"schema":"opensks.execution-event-envelope.v1","id":"evt-2","run_id":"run-swift","sequence":2,"occurred_at":"t2","actor":"opensks-engine","kind":"snapshot_written","payload":{"message":"snapshot written"},"sensitivity":"public","evidence_refs":["event-store:snapshot-written"]}}
         {"schema":"opensks.execution-event-envelope.v1","id":"evt-2","run_id":"run-swift","sequence":2,"occurred_at":"t2","actor":"opensks-engine","kind":"snapshot_written","payload":{"message":"snapshot written"},"sensitivity":"public","evidence_refs":["event-store:snapshot-written"]}
+        {"frame_type":"event","schema":"opensks.engine-stream-frame.v2","stream_id":"event-stream-run-swift","cursor":2,"event":{"schema":"opensks.execution-event-envelope.v1","id":"evt-3","run_id":"run-swift","sequence":3,"occurred_at":"t3","actor":"opensks-scheduler","kind":"work_item_running","payload":{"work_item_id":"wi-swift","to":"running"},"sensitivity":"public","evidence_refs":[]}}
+        {"frame_type":"stream_completed","schema":"opensks.engine-stream-frame.v2","stream_id":"event-stream-run-swift","cursor":3,"reason_code":"replay_complete"}
         """.data(using: .utf8)!
 
         let stream = EngineProcess.decodeRunStream(ndjson)
         XCTAssertEqual(stream.engineEvents.first?.evidenceRefs, ["daemon:subscription-accepted", "event-store:replay-since"])
-        XCTAssertEqual(stream.executionEvents.count, 2)
+        XCTAssertEqual(stream.executionEvents.map(\.id), ["evt-1", "evt-2", "evt-3"])
         let store = ExecutionStore()
         store.rebuild(from: stream.executionEvents)
         XCTAssertEqual(store.runs.first?.id, "run-swift")
-        XCTAssertEqual(store.runs.first?.state, "snapshot")
+        XCTAssertEqual(store.runs.first?.state, "running")
+        XCTAssertEqual(store.queueItems.first?.state, "running")
+    }
+
+    func testRunStreamDecodesResumableStreamFailureFrame() throws {
+        let ndjson = """
+        {"frame_type":"stream_opened","schema":"opensks.engine-stream-frame.v2","stream_id":"event-stream-run-gap","request_id":"req-subscribe-gap","project_id":"engine","conversation_id":"engine","run_id":"run-gap","protocol_version":"opensks.stream.v2","cursor":0}
+        {"frame_type":"stream_failed","schema":"opensks.engine-stream-frame.v2","stream_id":"event-stream-run-gap","cursor":1,"error":{"schema":"opensks.public-engine-error.v1","code":"subscription_cursor_gap","message":"Requested event sequence 999 is beyond durable sequence 2","retryable":true,"remediation":"Reconnect from sequence 2","evidence_refs":["daemon:subscription-cursor-gap","event-store:last-sequence"],"redacted":true},"resumable":true}
+        """
+
+        let stream = EngineProcess.decodeRunStream(Data(ndjson.utf8))
+        XCTAssertTrue(stream.executionEvents.isEmpty)
+        let failure = try XCTUnwrap(stream.streamFailures.first)
+        XCTAssertEqual(failure.streamID, "event-stream-run-gap")
+        XCTAssertEqual(failure.cursor, 1)
+        XCTAssertTrue(failure.resumable)
+        XCTAssertEqual(failure.error.code, "subscription_cursor_gap")
+        XCTAssertEqual(failure.error.remediation, "Reconnect from sequence 2")
+        XCTAssertEqual(failure.error.evidenceRefs, ["daemon:subscription-cursor-gap", "event-store:last-sequence"])
     }
 
     @MainActor

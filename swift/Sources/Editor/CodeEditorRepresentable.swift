@@ -132,6 +132,7 @@ struct CodeEditorRepresentable: NSViewRepresentable {
             textView.setSelectedRange(clamped)
             highlight()
             isApplyingExternal = false
+            updateSelection(from: textView)
             rulerView?.needsDisplay = true
         }
 
@@ -145,8 +146,38 @@ struct CodeEditorRepresentable: NSViewRepresentable {
             guard !isApplyingExternal, let textView else { return }
             let newText = textView.string
             document.textDidChange(newText)
+            updateSelection(from: textView)
             rulerView?.needsDisplay = true
             scheduleHighlight()
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard !isApplyingExternal, let textView else { return }
+            updateSelection(from: textView)
+        }
+
+        private func updateSelection(from textView: NSTextView) {
+            document.updateSelectedLineRange(Self.lineRange(for: textView.selectedRange(), in: textView.string))
+        }
+
+        private static func lineRange(for selection: NSRange, in text: String) -> EditorLineRange? {
+            let nsText = text as NSString
+            guard nsText.length > 0, selection.location != NSNotFound else { return nil }
+            let startLocation = min(max(selection.location, 0), nsText.length)
+            let rawEnd = selection.length == 0 ? startLocation : NSMaxRange(selection) - 1
+            let endLocation = min(max(rawEnd, startLocation), max(0, nsText.length - 1))
+            return EditorLineRange(
+                start: lineNumber(at: startLocation, in: nsText),
+                end: lineNumber(at: endLocation, in: nsText)
+            )
+        }
+
+        private static func lineNumber(at location: Int, in text: NSString) -> Int {
+            let clamped = min(max(location, 0), text.length)
+            guard clamped > 0 else { return 1 }
+            return text.substring(to: clamped).reduce(into: 1) { count, ch in
+                if ch == "\n" { count += 1 }
+            }
         }
 
         /// Debounce: a burst of keystrokes collapses to a single re-highlight

@@ -196,6 +196,7 @@ final class EnginePendingResponseRouter: @unchecked Sendable {
     private let lock = NSLock()
     private var partial = Data()
     private var pending: [String: EnginePendingResponse] = [:]
+    private var streamOwners: [String: String] = [:]
     private var nextRegistrationOrder: UInt64 = 0
     private var nextLineOrder: UInt64 = 0
 
@@ -254,6 +255,7 @@ final class EnginePendingResponseRouter: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         let response = pending.removeValue(forKey: requestId)
+        streamOwners = streamOwners.filter { $0.value != requestId }
         return EngineCollectedResponse(
             lines: response?.lines ?? [],
             sawRequestEvent: response?.sawRequestEvent ?? false,
@@ -265,18 +267,28 @@ final class EnginePendingResponseRouter: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         pending.removeValue(forKey: requestId)
+        streamOwners = streamOwners.filter { $0.value != requestId }
     }
 
     private func route(_ line: String) {
         let engine = decodedEngineEvent(from: line)
+        let frame = decodedStreamFrame(from: line)
         let requestId = engine?.requestId
+            ?? frame?.requestId
             ?? decodedConversationTurnAcceptedRequestId(from: line)
             ?? decodedTurnSupervisorTickRequestId(from: line)
         let isTerminal = engine?.isTerminal ?? false
-        let runId = decodedExecutionRunId(from: line)
-        let matchedIds = matchedPendingIds(requestId: requestId, runId: runId)
+        let runId = decodedExecutionRunId(from: line) ?? frame?.runId
+        let matchedIds = matchedPendingIds(
+            requestId: requestId,
+            runId: runId,
+            streamId: frame?.streamId
+        )
         guard !matchedIds.isEmpty else {
             return
+        }
+        if let frame, let requestId, pending[requestId] != nil {
+            streamOwners[frame.streamId] = requestId
         }
         nextLineOrder += 1
         let lineOrder = nextLineOrder
@@ -301,9 +313,14 @@ final class EnginePendingResponseRouter: @unchecked Sendable {
         }
     }
 
-    private func matchedPendingIds(requestId: String?, runId: String?) -> [String] {
+    private func matchedPendingIds(requestId: String?, runId: String?, streamId: String?) -> [String] {
         if let requestId, pending[requestId] != nil {
             return [requestId]
+        }
+        if let streamId,
+           let owner = streamOwners[streamId],
+           pending[owner] != nil {
+            return [owner]
         }
         guard let runId else {
             return []
@@ -361,6 +378,20 @@ final class EnginePendingResponseRouter: @unchecked Sendable {
             return nil
         }
         return event.runId
+    }
+
+    private func decodedStreamFrame(from line: String) -> (requestId: String?, runId: String?, streamId: String)? {
+        guard let data = line.data(using: .utf8),
+              let frame = try? JSONDecoder().decode(EngineStreamFrame.self, from: data)
+        else {
+            return nil
+        }
+        switch frame {
+        case .opened(let streamID, let requestID, _, _, let runID, _, _):
+            return (requestID, runID, streamID)
+        default:
+            return (nil, nil, frame.streamID)
+        }
     }
 }
 
@@ -719,12 +750,36 @@ actor EngineProcess {
 
     static func decodeRunStream(_ data: Data) -> EngineRunStream {
         var stream = EngineRunStream(engineEvents: [], executionEvents: [], exitCode: nil, stderr: "")
+        var seenExecutionEventIDs = Set<String>()
+        func appendExecutionEvent(_ event: ExecutionEventEnvelope) {
+            guard seenExecutionEventIDs.insert(event.id).inserted else { return }
+            stream.executionEvents.append(event)
+        }
         for line in data.split(separator: UInt8(ascii: "\n")) where !line.isEmpty {
             let lineData = Data(line)
             if let engineEvent = try? JSONDecoder.opensks.decode(EngineEvent.self, from: lineData) {
                 stream.engineEvents.append(engineEvent)
             } else if let executionEvent = try? JSONDecoder.opensks.decode(ExecutionEventEnvelope.self, from: lineData) {
-                stream.executionEvents.append(executionEvent)
+                appendExecutionEvent(executionEvent)
+            } else if let frame = try? JSONDecoder().decode(EngineStreamFrame.self, from: lineData) {
+                switch frame {
+                case .event(_, _, let eventPayload):
+                    if let eventData = try? JSONEncoder().encode(eventPayload),
+                       let executionEvent = try? JSONDecoder.opensks.decode(ExecutionEventEnvelope.self, from: eventData) {
+                        appendExecutionEvent(executionEvent)
+                    }
+                case .failed(let streamID, let cursor, let error, let resumable):
+                    stream.streamFailures.append(
+                        EngineStreamFailure(
+                            streamID: streamID,
+                            cursor: cursor,
+                            error: error,
+                            resumable: resumable
+                        )
+                    )
+                default:
+                    break
+                }
             }
         }
         return stream
@@ -769,7 +824,15 @@ struct EngineRunStream: Sendable {
     var executionEvents: [ExecutionEventEnvelope]
     var exitCode: Int32?
     var stderr: String
+    var streamFailures: [EngineStreamFailure] = []
     var rawLines: [String] = []
+}
+
+struct EngineStreamFailure: Sendable, Equatable {
+    let streamID: String
+    let cursor: UInt64
+    let error: PublicEngineError
+    let resumable: Bool
 }
 
 struct EngineConversationTurnStartResult: Sendable {

@@ -28,19 +28,33 @@ use opensks_contracts::{
     AgentAdapterDescriptor, AgentEventEnvelope, AgentEventKind, FileOperation,
     PATCH_APPLY_RESULT_SCHEMA, PatchApplyResult, PatchProposal,
 };
-use opensks_patch_engine::{PatchEngine, PlannedPatchWrite};
 use serde::{Deserialize, Serialize};
 
 pub mod agentic;
 pub mod openrouter;
+mod patch_write;
 pub use agentic::{
-    AgentStep, AgenticConfig, FnDriver, SequenceDriver, ToolCall, ToolDriver, ToolResult,
-    run_agentic_loop,
+    AgentStep, AgenticConfig, FnDriver, ImageGenerateToolRequest, ImageInspectToolRequest,
+    ImageInspectToolResult, ImageToolExecutor, SequenceDriver, ToolCall, ToolDriver, ToolResult,
+    run_agentic_loop, run_agentic_loop_with_image_tools,
 };
 pub use openrouter::{
-    ChatCompleter, NativeHttpChatCompleter, OpenRouterAdapter, OpenRouterToolDriver, parse_step,
-    tool_definitions,
+    ChatCompleter, NativeHttpChatCompleter, OpenAiCompatibleChatCompleter,
+    OpenAiCompatibleImageGenerator, OpenRouterAdapter, OpenRouterToolDriver, parse_step,
+    tool_definitions, tool_definitions_with_extra_available_tools,
 };
+pub use patch_write::{PatchPathLease, PlannedWrite, apply_file_writes_with_path_lease};
+pub(crate) use patch_write::{
+    content_hash, minimal_unified_diff, patch_path_lease, resolve_in_workspace,
+};
+
+pub fn apply_file_writes(
+    workspace: &Path,
+    proposal_id: &str,
+    writes: &[PlannedWrite],
+) -> Result<PatchApplyResult, AgentAdapterError> {
+    patch_write::apply_file_writes(workspace, proposal_id, writes)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentAdapterError {
@@ -60,8 +74,7 @@ pub enum AgentAdapterError {
     Provider(String),
 }
 
-/// Everything an adapter needs to perform one turn. Timestamps are passed in so
-/// runs are deterministic and testable.
+/// Everything an adapter needs to perform one deterministic turn.
 #[derive(Debug, Clone)]
 pub struct AgentRunRequest {
     pub workspace: PathBuf,
@@ -70,9 +83,13 @@ pub struct AgentRunRequest {
     pub turn_id: String,
     pub run_id: String,
     pub stream_id: String,
+    /// Optional scheduler-owned patch lease for PatchEngine fence binding.
+    pub patch_lease: Option<PatchPathLease>,
+    /// Shared cancellation signal owned by the runtime/supervisor. Adapter loops
+    /// must stop before later model/tool/apply steps once this is set.
+    pub cancellation_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub now_ms: u64,
-    /// The user prompt. For [`LocalTestAdapter`] this may carry a structured
-    /// instruction (see [`LocalTestInstruction`]).
+    /// User prompt, or a structured [`LocalTestInstruction`] in simulation tests.
     pub prompt: String,
 }
 
@@ -326,7 +343,8 @@ impl AgentAdapter for LocalTestAdapter {
         // Apply through the transactional writer: it re-validates the on-disk
         // pre-image against before_hash (no silent overwrite of a file that
         // changed since it was read — §10.5) and rolls back on any IO failure.
-        let apply = apply_file_writes(
+        let lease = patch_path_lease(request, &proposal.proposal_id);
+        let apply = apply_file_writes_with_path_lease(
             &request.workspace,
             &proposal.proposal_id,
             &[PlannedWrite {
@@ -335,6 +353,7 @@ impl AgentAdapter for LocalTestAdapter {
                 after_content: after.clone(),
                 operation,
             }],
+            &lease,
         )?;
 
         self.emit(
@@ -371,79 +390,6 @@ impl AgentAdapter for LocalTestAdapter {
             final_state,
         })
     }
-}
-
-/// A single planned file write with the pre-image hash it expects on disk.
-#[derive(Debug, Clone)]
-pub struct PlannedWrite {
-    pub path: String,
-    pub expected_before_hash: String,
-    pub after_content: String,
-    pub operation: FileOperation,
-}
-
-/// Apply a set of file writes as a transaction (recovery directive §10.4/§10.5):
-///
-/// 1. **Validate** every target's on-disk pre-image against
-///    `expected_before_hash`. If any file changed since it was read, nothing is
-///    written and the conflicting paths are returned — no silent overwrite.
-/// 2. **Apply with rollback**: snapshot each target's original content, then
-///    write all of them. Any IO failure restores every target to its pre-image
-///    so a multi-file patch never lands half-applied.
-///
-/// A path that escapes the workspace is a hard error (`PathEscape`).
-pub fn apply_file_writes(
-    workspace: &Path,
-    proposal_id: &str,
-    writes: &[PlannedWrite],
-) -> Result<PatchApplyResult, AgentAdapterError> {
-    let engine = PatchEngine::open(workspace).map_err(|error| match error {
-        opensks_patch_engine::PatchEngineError::PathEscape(path)
-        | opensks_patch_engine::PatchEngineError::SymlinkRejected(path) => {
-            AgentAdapterError::PathEscape(path)
-        }
-        other => AgentAdapterError::InvalidInstruction(other.to_string()),
-    })?;
-    let planned: Vec<PlannedPatchWrite> = writes
-        .iter()
-        .map(|write| PlannedPatchWrite {
-            path: write.path.clone(),
-            expected_before_hash: write.expected_before_hash.clone(),
-            after_content: write.after_content.clone(),
-            operation: write.operation,
-            rename_to: None,
-        })
-        .collect();
-    engine
-        .apply(proposal_id, &planned)
-        .map_err(|error| match error {
-            opensks_patch_engine::PatchEngineError::PathEscape(path)
-            | opensks_patch_engine::PatchEngineError::SymlinkRejected(path) => {
-                AgentAdapterError::PathEscape(path)
-            }
-            other => AgentAdapterError::InvalidInstruction(other.to_string()),
-        })
-}
-
-/// Resolve a workspace-relative path through the PatchEngine path guard.
-fn resolve_in_workspace(workspace: &Path, rel: &str) -> Result<PathBuf, AgentAdapterError> {
-    let engine = PatchEngine::open(workspace)
-        .map_err(|error| AgentAdapterError::InvalidInstruction(error.to_string()))?;
-    engine.resolve(rel).map_err(|error| match error {
-        opensks_patch_engine::PatchEngineError::PathEscape(path)
-        | opensks_patch_engine::PatchEngineError::SymlinkRejected(path) => {
-            AgentAdapterError::PathEscape(path)
-        }
-        other => AgentAdapterError::InvalidInstruction(other.to_string()),
-    })
-}
-
-fn content_hash(content: &str) -> String {
-    opensks_patch_engine::content_hash(content)
-}
-
-fn minimal_unified_diff(path: &str, before: &str, after: &str) -> String {
-    opensks_patch_engine::unified_diff(path, before, after)
 }
 
 /// Pure planning for a local-test edit (no writes, no events): resolve the path,
@@ -634,6 +580,8 @@ mod tests {
             turn_id: "t1".to_string(),
             run_id: "r1".to_string(),
             stream_id: "s1".to_string(),
+            patch_lease: None,
+            cancellation_token: None,
             now_ms: 1000,
             prompt: prompt.to_string(),
         }
@@ -658,6 +606,16 @@ mod tests {
         assert_eq!(outcome.patches.len(), 1);
         assert_eq!(outcome.apply_results.len(), 1);
         assert!(outcome.apply_results[0].applied);
+        assert!(
+            outcome.apply_results[0]
+                .evidence_refs
+                .contains(&"patch-engine:path-lease-bound".to_string())
+        );
+        assert!(
+            outcome.apply_results[0]
+                .evidence_refs
+                .contains(&"patch-engine:fence-token-bound".to_string())
+        );
         assert_ne!(
             outcome.patches[0].files[0].before_hash,
             outcome.patches[0].files[0].after_hash
@@ -669,6 +627,56 @@ mod tests {
         assert_eq!(kinds.last(), Some(&AgentEventKind::AssistantTextCompleted));
         let seqs: Vec<u64> = sink.events().into_iter().map(|e| e.sequence).collect();
         assert_eq!(seqs, (0..seqs.len() as u64).collect::<Vec<_>>());
+
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn local_test_adapter_uses_request_scheduler_patch_lease_without_leaking_raw_fence() {
+        let ws = temp_workspace("scheduler-lease");
+        let file = ws.join("NOTES.md");
+        std::fs::write(&file, "first line\n").unwrap();
+        let adapter = LocalTestAdapter::new();
+        let sink = CollectingSink::new();
+        let prompt =
+            r#"{"local_test": {"op": "append_line", "path": "NOTES.md", "value": "second line"}}"#;
+        let scheduler_lease = opensks_contracts::Lease {
+            id: "lease-run-scheduler-work-item-12345".to_string(),
+            lease_type: opensks_contracts::LeaseType::ProviderSlot,
+            holder: "worker-a".to_string(),
+            acquired_at_ms: 1,
+            last_heartbeat_at_ms: Some(2),
+            ttl_ms: 30_000,
+        };
+        let mut request = request(&ws, prompt);
+        request.patch_lease = Some(PatchPathLease::from_scheduler_lease(&scheduler_lease));
+
+        let outcome = adapter.run(&request, &sink).unwrap();
+
+        assert!(outcome.apply_results[0].applied);
+        assert!(
+            outcome.apply_results[0]
+                .evidence_refs
+                .contains(&"patch-engine:path-lease-bound".to_string())
+        );
+        assert!(
+            outcome.apply_results[0]
+                .evidence_refs
+                .contains(&"patch-engine:fence-token-bound".to_string())
+        );
+        let journal_dir = ws.join(".opensks/patch-engine/transactions");
+        let journal = std::fs::read_dir(&journal_dir)
+            .unwrap()
+            .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(journal.contains("\"raw_tokens_redacted\":true"));
+        assert!(journal.contains(&content_hash(&scheduler_lease.id)));
+        assert!(!journal.contains(&scheduler_lease.id));
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "first line\nsecond line\n"
+        );
 
         std::fs::remove_dir_all(&ws).ok();
     }
@@ -795,6 +803,10 @@ mod tests {
         let res = apply_file_writes(&ws, "pp-2", &writes).unwrap();
         assert!(res.applied);
         assert_eq!(res.applied_files.len(), 2);
+        assert!(
+            !res.evidence_refs
+                .contains(&"patch-engine:path-lease-bound".to_string())
+        );
         assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "A2");
         assert_eq!(
             std::fs::read_to_string(ws.join("nested/b.txt")).unwrap(),

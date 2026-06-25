@@ -1,0 +1,127 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WorktreeIsolationInventoryReceipt",
+  "type": "object",
+  "required": [
+    "content_redacted",
+    "generated_at_ms",
+    "git_available",
+    "id",
+    "inventory_ref",
+    "isolation_count",
+    "path_redacted",
+    "reason_code",
+    "run_id",
+    "schema",
+    "state"
+  ],
+  "properties": {
+    "content_redacted": {
+      "type": "boolean"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "generated_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "git_available": {
+      "type": "boolean"
+    },
+    "id": {
+      "type": "string"
+    },
+    "inventory_ref": {
+      "type": "string"
+    },
+    "isolation_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "isolations": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/WorktreeIsolationInventoryEntry"
+      }
+    },
+    "path_redacted": {
+      "type": "boolean"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "state": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "IsolationMode": {
+      "type": "string",
+      "enum": [
+        "git_worktree",
+        "snapshot"
+      ]
+    },
+    "WorktreeIsolationInventoryEntry": {
+      "type": "object",
+      "required": [
+        "artifact_ref",
+        "content_redacted",
+        "exists",
+        "has_git_metadata",
+        "isolation_id",
+        "mode",
+        "path_redacted",
+        "reason_code",
+        "run_id",
+        "worker_id"
+      ],
+      "properties": {
+        "artifact_ref": {
+          "type": "string"
+        },
+        "content_redacted": {
+          "type": "boolean"
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "has_git_metadata": {
+          "type": "boolean"
+        },
+        "isolation_id": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/definitions/IsolationMode"
+        },
+        "path_redacted": {
+          "type": "boolean"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "worker_id": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -44,6 +44,7 @@ struct RootView: View {
             // card sink) for the PR-035 local mutations.
             coordinator.bindGit(cli: state.cli, workspace: state.workspace)
             coordinator.wireGit(editorStore: state.editorStore)
+            coordinator.bindProviders(cli: state.cli, workspace: state.workspace)
             // Bind the LOCAL design-import store (PR-039) to the same resolved CLI +
             // workspace, then read this project's quarantine listing.
             coordinator.bindDesignImport(cli: state.cli, workspace: state.workspace)

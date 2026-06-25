@@ -13,6 +13,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: 10k scheduler simulation
         run: cargo test -p opensks-scheduler scheduler_simulates_ten_thousand_items_without_loss -- --exact
+      - name: 100k perf stress contract
+        run: |
+          mkdir -p .opensks/perf
+          cargo run -- perf stress --events 100000 --cache-capacity 256 > .opensks/perf/ci-perf-stress-report.json
+          jq -e '
+            .schema == "opensks.perf-stress-report.v1"
+            and .events == 100000
+            and .within_budget == true
+            and .leaked_handles == 0
+            and .children_spawned == .children_reaped
+          ' .opensks/perf/ci-perf-stress-report.json
+      - name: Upload perf stress report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-performance-stress-report
+          path: .opensks/perf/ci-perf-stress-report.json
+          if-no-files-found: error
       - name: Graph compile smoke
         run: cargo run -- graph compile extreme-parallel
       - name: CodeGraph index smoke

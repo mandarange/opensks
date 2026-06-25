@@ -17,7 +17,8 @@
 //      same evidence reports `already_done:true` and pushes exactly once. A push
 //      that fails (e.g. unreachable remote) preserves the LOCAL commit + the
 //      pending intent for retry.
-//   4. push-status recovers pending / approved / completed from SQLite.
+//   4. push-status recovers pending / approved / failed diagnostics / completed
+//      from SQLite.
 //
 // Decoding is tolerant (`.unknown` fallbacks, optional fields default) so a
 // future server value never crashes the decoder. There is no secret material on
@@ -231,29 +232,105 @@ struct GitPushCompleted: Codable, Sendable, Equatable, Identifiable {
     var shortRemoteOid: String { String(remoteOid.prefix(8)) }
 }
 
+/// One failed remote push attempt recovered from the durable outbox. It carries
+/// only the reviewed effect and a reason code, never raw stderr or credentials.
+struct GitPushFailureDiagnostic: Codable, Sendable, Equatable, Identifiable {
+    let schema: String
+    let intentId: String
+    let idempotencyKey: String
+    let effectDigest: String
+    let remote: String
+    let remoteUrlRedacted: String
+    let ref: String
+    let localOid: String
+    let remoteExpectedOid: String?
+    let reasonCode: String
+    let attempts: Int
+
+    var id: String { idempotencyKey }
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case intentId = "intent_id"
+        case idempotencyKey = "idempotency_key"
+        case effectDigest = "effect_digest"
+        case remote
+        case remoteUrlRedacted = "remote_url_redacted"
+        case ref
+        case localOid = "local_oid"
+        case remoteExpectedOid = "remote_expected_oid"
+        case reasonCode = "reason_code"
+        case attempts
+    }
+
+    init(
+        schema: String = "opensks.push-failure-diagnostic.v1",
+        intentId: String,
+        idempotencyKey: String,
+        effectDigest: String,
+        remote: String,
+        remoteUrlRedacted: String,
+        ref: String,
+        localOid: String,
+        remoteExpectedOid: String?,
+        reasonCode: String,
+        attempts: Int
+    ) {
+        self.schema = schema
+        self.intentId = intentId
+        self.idempotencyKey = idempotencyKey
+        self.effectDigest = effectDigest
+        self.remote = remote
+        self.remoteUrlRedacted = remoteUrlRedacted
+        self.ref = ref
+        self.localOid = localOid
+        self.remoteExpectedOid = remoteExpectedOid
+        self.reasonCode = reasonCode
+        self.attempts = attempts
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try c.decodeIfPresent(String.self, forKey: .schema) ?? "opensks.push-failure-diagnostic.v1"
+        intentId = try c.decode(String.self, forKey: .intentId)
+        idempotencyKey = try c.decodeIfPresent(String.self, forKey: .idempotencyKey) ?? ""
+        effectDigest = try c.decodeIfPresent(String.self, forKey: .effectDigest) ?? ""
+        remote = try c.decodeIfPresent(String.self, forKey: .remote) ?? "origin"
+        remoteUrlRedacted = try c.decodeIfPresent(String.self, forKey: .remoteUrlRedacted) ?? ""
+        ref = try c.decodeIfPresent(String.self, forKey: .ref) ?? ""
+        localOid = try c.decodeIfPresent(String.self, forKey: .localOid) ?? ""
+        remoteExpectedOid = try c.decodeIfPresent(String.self, forKey: .remoteExpectedOid)
+        reasonCode = try c.decodeIfPresent(String.self, forKey: .reasonCode) ?? "push_failed"
+        attempts = try c.decodeIfPresent(Int.self, forKey: .attempts) ?? 0
+    }
+}
+
 /// `opensks.push-status.v1` — the push outbox recovered from SQLite: intents that
 /// are still pending approval, intents that are approved but not yet executed,
-/// and completed pushes. Survives relaunch, so the studio can show in-flight work
-/// after a restart.
+/// failed push diagnostics, and completed pushes. Survives relaunch, so the
+/// studio can show in-flight work after a restart.
 struct GitPushStatus: Codable, Sendable, Equatable {
     let schema: String
     let pending: [GitPushIntent]
     let approved: [GitPushIntent]
+    let failures: [GitPushFailureDiagnostic]
     let completed: [GitPushCompleted]
 
     enum CodingKeys: String, CodingKey {
-        case schema, pending, approved, completed
+        case schema, pending, approved, failures, completed
     }
 
     init(
         schema: String = "opensks.push-status.v1",
         pending: [GitPushIntent] = [],
         approved: [GitPushIntent] = [],
+        failures: [GitPushFailureDiagnostic] = [],
         completed: [GitPushCompleted] = []
     ) {
         self.schema = schema
         self.pending = pending
         self.approved = approved
+        self.failures = failures
         self.completed = completed
     }
 
@@ -262,12 +339,13 @@ struct GitPushStatus: Codable, Sendable, Equatable {
         schema = try c.decodeIfPresent(String.self, forKey: .schema) ?? "opensks.push-status.v1"
         pending = try c.decodeIfPresent([GitPushIntent].self, forKey: .pending) ?? []
         approved = try c.decodeIfPresent([GitPushIntent].self, forKey: .approved) ?? []
+        failures = try c.decodeIfPresent([GitPushFailureDiagnostic].self, forKey: .failures) ?? []
         completed = try c.decodeIfPresent([GitPushCompleted].self, forKey: .completed) ?? []
     }
 
     static let empty = GitPushStatus()
 
-    var isEmpty: Bool { pending.isEmpty && approved.isEmpty && completed.isEmpty }
+    var isEmpty: Bool { pending.isEmpty && approved.isEmpty && failures.isEmpty && completed.isEmpty }
 }
 
 // MARK: - Store-side view state (not wire types)
@@ -321,9 +399,9 @@ enum GitPushError: Error, Equatable {
 
 /// The push-outbox state owned by the store: the active approval prompt, the most
 /// recent successful push receipt, the recovered push status (pending / approved
-/// / completed), and the last non-fatal push error. Commit and push are SEPARATE:
-/// this state is independent of `GitCommitComposerState` so a commit receipt can
-/// stand while a push is still pending or failed.
+/// / failed / completed), and the last non-fatal push error. Commit and push are
+/// SEPARATE: this state is independent of `GitCommitComposerState` so a commit
+/// receipt can stand while a push is still pending or failed.
 struct GitPushOutboxState: Equatable {
     /// The active approval prompt, if a push is awaiting approval. Non-nil ⇒ the
     /// operator must approve the exact effect before any push runs.
@@ -340,8 +418,12 @@ struct GitPushOutboxState: Equatable {
     var error: String?
 
     /// True when there is in-flight push work to surface (a prompt, a retryable
-    /// failure, or recovered pending/approved intents).
+    /// failure, or recovered pending/approved/failed intents).
     var hasOutbox: Bool {
-        prompt != nil || retryable != nil || !status.pending.isEmpty || !status.approved.isEmpty
+        prompt != nil
+            || retryable != nil
+            || !status.pending.isEmpty
+            || !status.approved.isEmpty
+            || !status.failures.isEmpty
     }
 }

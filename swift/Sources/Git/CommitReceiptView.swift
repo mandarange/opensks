@@ -20,6 +20,12 @@ struct GitCommitCard: Identifiable, Sendable, Equatable {
     let paths: [String]
     let message: String
     let committedAtMs: Int64
+    var reviewedStagedDiffHash: String? = nil
+    var reviewedStagedDiffRef: String? = nil
+    var integrationFinalDiffHash: String? = nil
+    var integrationFinalDiffRef: String? = nil
+    var integrationRunId: String? = nil
+    var integrationCandidateId: String? = nil
 
     /// First 8 chars of the commit sha for a compact, honest reference.
     var shortSha: String { String(commit.prefix(8)) }
@@ -38,6 +44,12 @@ struct CommitReceiptView: View {
     let commit: String
     let paths: [String]
     let message: String
+    var reviewedStagedDiffHash: String?
+    var reviewedStagedDiffRef: String?
+    var integrationFinalDiffHash: String?
+    var integrationFinalDiffRef: String?
+    var integrationRunId: String?
+    var integrationCandidateId: String?
     /// Optional relative-time line (shown in the conversation card).
     var subtitle: String?
     /// Optional dismiss handler (shown as an X in the studio confirmation).
@@ -57,6 +69,12 @@ struct CommitReceiptView: View {
                     .textSelection(.enabled)
             }
             pathsList
+            if reviewedStagedDiffHash != nil || reviewedStagedDiffRef != nil {
+                reviewedDiffEvidence
+            }
+            if integrationFinalDiffHash != nil || integrationFinalDiffRef != nil {
+                integrationDiffEvidence
+            }
         }
         .padding(Theme.s12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -72,6 +90,67 @@ struct CommitReceiptView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityIdentifier("git.commit.receipt.\(shortSha)")
+    }
+
+    private var reviewedDiffEvidence: some View {
+        HStack(spacing: Theme.s6) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Theme.faint)
+            Text(reviewedStagedDiffHash.map(shortEvidence) ?? "reviewed diff")
+                .font(Theme.mono(10.5, .semibold))
+                .foregroundStyle(Theme.textSoft)
+                .lineLimit(1)
+                .textSelection(.enabled)
+            if let reviewedStagedDiffRef {
+                Text(reviewedStagedDiffRef)
+                    .font(Theme.mono(9.5))
+                    .foregroundStyle(Theme.faint)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(Theme.s8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                .fill(Theme.bg.opacity(0.45))
+        )
+    }
+
+    private var integrationDiffEvidence: some View {
+        HStack(spacing: Theme.s6) {
+            Image(systemName: "checkmark.seal")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(GeneratedDesignTokens.colorStatusSuccess)
+            Text(integrationFinalDiffHash.map(shortEvidence) ?? "final diff")
+                .font(Theme.mono(10.5, .semibold))
+                .foregroundStyle(Theme.textSoft)
+                .lineLimit(1)
+                .textSelection(.enabled)
+            if let integrationFinalDiffRef {
+                Text(integrationFinalDiffRef)
+                    .font(Theme.mono(9.5))
+                    .foregroundStyle(Theme.faint)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            } else if let integrationRunId {
+                Text(integrationRunId)
+                    .font(Theme.mono(9.5))
+                    .foregroundStyle(Theme.faint)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(Theme.s8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                .fill(GeneratedDesignTokens.colorStatusSuccess.opacity(0.08))
+        )
     }
 
     private var header: some View {
@@ -141,6 +220,11 @@ struct CommitReceiptView: View {
         let fileList = paths.joined(separator: ", ")
         return "Committed \(shortSha): \(message). \(paths.count) files: \(fileList)"
     }
+
+    private func shortEvidence(_ value: String) -> String {
+        guard let suffix = value.split(separator: ":").last else { return value }
+        return "diff \(suffix.prefix(10))"
+    }
 }
 
 // MARK: - Conversation commit card
@@ -155,6 +239,12 @@ struct CommitReceiptCard: View {
             commit: card.commit,
             paths: card.paths,
             message: card.message,
+            reviewedStagedDiffHash: card.reviewedStagedDiffHash,
+            reviewedStagedDiffRef: card.reviewedStagedDiffRef,
+            integrationFinalDiffHash: card.integrationFinalDiffHash,
+            integrationFinalDiffRef: card.integrationFinalDiffRef,
+            integrationRunId: card.integrationRunId,
+            integrationCandidateId: card.integrationCandidateId,
             subtitle: RelativeTime.string(from: card.committedAtDate)
         )
         .frame(maxWidth: 720, alignment: .leading)

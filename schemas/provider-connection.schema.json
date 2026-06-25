@@ -1,0 +1,214 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProviderConnection",
+  "type": "object",
+  "required": [
+    "auth",
+    "concurrency",
+    "created_at_ms",
+    "display_name",
+    "enabled",
+    "endpoint",
+    "health",
+    "id",
+    "kind",
+    "revision",
+    "schema",
+    "updated_at_ms"
+  ],
+  "properties": {
+    "auth": {
+      "$ref": "#/definitions/SecretRef"
+    },
+    "concurrency": {
+      "$ref": "#/definitions/ProviderConcurrencyPolicy"
+    },
+    "created_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "display_name": {
+      "type": "string"
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "endpoint": {
+      "$ref": "#/definitions/ProviderEndpoint"
+    },
+    "health": {
+      "$ref": "#/definitions/ProviderHealthSnapshot"
+    },
+    "id": {
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/definitions/ProviderKind"
+    },
+    "organization_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "project_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "revision": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "schema": {
+      "type": "string"
+    },
+    "updated_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "HealthState": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "healthy",
+        "degraded",
+        "unavailable",
+        "open_circuit"
+      ]
+    },
+    "ProviderConcurrencyPolicy": {
+      "type": "object",
+      "required": [
+        "max_concurrent_requests"
+      ],
+      "properties": {
+        "max_concurrent_requests": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "requests_per_minute": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "tokens_per_minute": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ProviderEndpoint": {
+      "type": "object",
+      "required": [
+        "base_url"
+      ],
+      "properties": {
+        "allow_insecure_http": {
+          "default": false,
+          "type": "boolean"
+        },
+        "base_url": {
+          "type": "string"
+        }
+      }
+    },
+    "ProviderHealthSnapshot": {
+      "type": "object",
+      "required": [
+        "circuit_open",
+        "reason_code",
+        "state"
+      ],
+      "properties": {
+        "checked_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "circuit_open": {
+          "type": "boolean"
+        },
+        "diagnostic_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/HealthState"
+        }
+      }
+    },
+    "ProviderKind": {
+      "type": "string",
+      "enum": [
+        "open_router",
+        "open_ai",
+        "open_ai_compatible",
+        "anthropic_compatible",
+        "google_compatible",
+        "local_open_ai_compatible",
+        "custom"
+      ]
+    },
+    "SecretRef": {
+      "type": "object",
+      "required": [
+        "account",
+        "schema",
+        "service",
+        "store",
+        "version"
+      ],
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "service": {
+          "type": "string"
+        },
+        "store": {
+          "$ref": "#/definitions/SecretStoreKind"
+        },
+        "version": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "SecretStoreKind": {
+      "type": "string",
+      "enum": [
+        "macos_keychain",
+        "external_broker",
+        "local_development",
+        "test_memory"
+      ]
+    }
+  }
+}

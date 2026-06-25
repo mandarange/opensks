@@ -118,7 +118,10 @@ final class ReleaseReadinessTests: XCTestCase {
     /// The Settings route renders the real SettingsWorkspaceView (with the
     /// shortcuts entry point), non-nil and filling width.
     func testSettingsWorkspaceRendersAndFillsWidth() throws {
-        let view = SettingsWorkspaceView().environmentObject(AppState())
+        let coordinator = AppCoordinator()
+        let view = SettingsWorkspaceView()
+            .environmentObject(AppState())
+            .environmentObject(coordinator)
         for width in [1024.0, 1440.0] {
             try assertFillsWidthNoLetterbox(view, width: width, "settings workspace")
         }

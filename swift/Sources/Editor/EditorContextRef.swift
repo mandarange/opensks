@@ -32,6 +32,13 @@ struct EditorLineRange: Hashable, Sendable {
     var label: String {
         start == end ? "L\(start)" : "L\(start)–L\(end)"
     }
+
+    /// Backend wire label for `editor://` refs. Keep this ASCII-only and stable:
+    /// the Rust resolver accepts `L1` or `L1-L2`; tests and fixtures use
+    /// `L1-L1` even for single-line refs.
+    var wireLabel: String {
+        "L\(start)-L\(end)"
+    }
 }
 
 /// A reference from an editor selection to a chat message. Carries enough to
@@ -95,5 +102,15 @@ struct EditorContextRef: Hashable, Sendable, Identifiable {
     /// A ref is fresh only when its lines still hash to the captured value.
     func isStale(against fullText: String) -> Bool {
         currentHash(in: fullText) != contentHash
+    }
+
+    /// The compact ref consumed by the daemon context-pack builder. It carries
+    /// only path/range/hash, never the selected source bytes.
+    var wireReference: String {
+        "editor://\(workspaceRelativePath)#\(lineRange.wireLabel)#\(contentHash)"
+    }
+
+    var contextLabel: String {
+        "\(displayName) \(lineRange.label)"
     }
 }

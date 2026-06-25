@@ -20,6 +20,36 @@ fn capability_report_emits_valid_json_and_matrix() {
             .any(|c| c.id == "agent.local_test_edit"),
         "report must include known capabilities"
     );
+    assert!(
+        report
+            .tool_registry
+            .descriptor("mcp.invoke")
+            .is_some_and(|tool| {
+                tool.availability == opensks_contracts::ToolAvailability::Available
+                    && tool.reason_code == "local_mcp_broker_executable"
+            }),
+        "runtime report must expose available MCP tool truth"
+    );
+    assert!(
+        report
+            .tool_registry
+            .descriptor("image.generate")
+            .is_some_and(|tool| {
+                tool.availability == opensks_contracts::ToolAvailability::Available
+                    && tool.reason_code == "provider_image_executor_route_required"
+            }),
+        "runtime report must expose provider-backed image tool truth"
+    );
+    assert!(
+        report
+            .tool_registry
+            .descriptor("image.inspect")
+            .is_some_and(|tool| {
+                tool.availability == opensks_contracts::ToolAvailability::Available
+                    && tool.reason_code == "provider_vision_executor_route_required"
+            }),
+        "runtime report must expose provider-backed vision tool truth"
+    );
     let local_test = report
         .capabilities
         .iter()
@@ -66,5 +96,7 @@ fn capability_report_emits_valid_json_and_matrix() {
     let matrix = run_capability_command(&["matrix".to_string()], &cwd).expect("matrix");
     assert!(matrix.stdout.contains("Runtime Truth Matrix"));
     assert!(matrix.stdout.contains("runtime capability report"));
+    assert!(matrix.stdout.contains("Tool Registry"));
+    assert!(matrix.stdout.contains("| `skill.invoke` |"));
     assert!(run_capability_command(&["nope".to_string()], &cwd).is_err());
 }

@@ -331,7 +331,7 @@ final class ConversationUITests: XCTestCase {
             messages: ["a": msgs]
         )
         store.selectedConversationID = "a"
-        let thread = ConversationThreadView(store: store)
+        let thread = ConversationThreadView(store: store, providers: ProviderStore(secretStore: InMemoryProviderSecretStore()))
             .frame(width: 720, height: 600)
         let renderer = ImageRenderer(content: thread)
         renderer.scale = 1
@@ -340,7 +340,10 @@ final class ConversationUITests: XCTestCase {
 
     func testEmptyThreadRendersEmptyState() throws {
         let store = makeStore()
-        let thread = ConversationThreadView(store: store)
+        let thread = ConversationThreadView(
+            store: store,
+            providers: ProviderStore(secretStore: InMemoryProviderSecretStore())
+        )
             .frame(width: 720, height: 600)
         XCTAssertNotNil(ImageRenderer(content: thread).nsImage)
     }
@@ -375,6 +378,7 @@ final class ConversationUITests: XCTestCase {
         store.selectedConversationID = "a"
         let thread = ConversationThreadView(
             store: store,
+            providers: ProviderStore(secretStore: InMemoryProviderSecretStore()),
             gitContext: ChatGitContext(
                 inRepo: true,
                 branch: "main",

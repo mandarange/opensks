@@ -32,7 +32,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use opensks_contracts::{PushApproval, PushError, PushIntent, PushReceipt, PushStatus};
+use opensks_contracts::{
+    PushApproval, PushError, PushErrorCode, PushFailureDiagnostic, PushIntent, PushReceipt,
+    PushStatus,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::GitError;
@@ -42,7 +45,7 @@ use crate::GitError;
 pub const PUSH_OUTBOX_DB_RELATIVE_PATH: &str = ".opensks/runtime/push-outbox.sqlite3";
 
 /// The schema version stamped into `user_version` for the push-outbox store.
-pub const PUSH_OUTBOX_MIGRATION_VERSION: i64 = 1;
+pub const PUSH_OUTBOX_MIGRATION_VERSION: i64 = 2;
 
 /// Protected refs that require an explicit `--ack-protected` acknowledgement at
 /// approval time before they can be pushed.
@@ -111,6 +114,21 @@ impl PushOutbox {
                     intent_id TEXT NOT NULL,
                     remote_oid TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (intent_id) REFERENCES push_intents (intent_id)
+                );
+                CREATE TABLE IF NOT EXISTS push_failure_diagnostics (
+                    idempotency_key TEXT PRIMARY KEY,
+                    intent_id TEXT NOT NULL,
+                    effect_digest TEXT NOT NULL,
+                    remote TEXT NOT NULL,
+                    remote_url_redacted TEXT NOT NULL,
+                    ref_name TEXT NOT NULL,
+                    local_oid TEXT NOT NULL,
+                    remote_expected_oid TEXT,
+                    code TEXT NOT NULL,
+                    attempts INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (intent_id) REFERENCES push_intents (intent_id)
                 );
                 ",
@@ -339,6 +357,7 @@ impl PushOutbox {
         // Run the real push to the configured remote. On failure, persist NOTHING
         // as completed and leave the intent pending for retry.
         if self.run_push(&intent.remote, &intent.r#ref).is_err() {
+            self.record_failure(&intent, &idempotency_key, PushErrorCode::PushFailed)?;
             return Ok(Err(PushError::push_failed()));
         }
 
@@ -347,7 +366,10 @@ impl PushOutbox {
             Some(oid) => oid,
             // A push that reports success but leaves no observable oid is treated
             // as a failure: record nothing, keep the intent pending.
-            None => return Ok(Err(PushError::push_failed())),
+            None => {
+                self.record_failure(&intent, &idempotency_key, PushErrorCode::PushFailed)?;
+                return Ok(Err(PushError::push_failed()));
+            }
         };
 
         self.conn
@@ -357,8 +379,53 @@ impl PushOutbox {
                 params![idempotency_key, intent.intent_id, remote_oid],
             )
             .map_err(sqlite)?;
+        self.conn
+            .execute(
+                "DELETE FROM push_failure_diagnostics WHERE idempotency_key = ?1",
+                params![idempotency_key],
+            )
+            .map_err(sqlite)?;
 
         Ok(Ok(PushReceipt::new(remote_oid, idempotency_key, false)))
+    }
+
+    fn record_failure(
+        &self,
+        intent: &PushIntent,
+        idempotency_key: &str,
+        code: PushErrorCode,
+    ) -> Result<(), GitError> {
+        self.conn
+            .execute(
+                "INSERT INTO push_failure_diagnostics (
+                    idempotency_key, intent_id, effect_digest, remote,
+                    remote_url_redacted, ref_name, local_oid, remote_expected_oid,
+                    code, attempts, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(idempotency_key) DO UPDATE SET
+                    effect_digest = excluded.effect_digest,
+                    remote = excluded.remote,
+                    remote_url_redacted = excluded.remote_url_redacted,
+                    ref_name = excluded.ref_name,
+                    local_oid = excluded.local_oid,
+                    remote_expected_oid = excluded.remote_expected_oid,
+                    code = excluded.code,
+                    attempts = push_failure_diagnostics.attempts + 1,
+                    updated_at = CURRENT_TIMESTAMP",
+                params![
+                    idempotency_key,
+                    intent.intent_id,
+                    intent.effect_digest,
+                    intent.remote,
+                    intent.remote_url_redacted,
+                    intent.r#ref,
+                    intent.local_oid,
+                    intent.remote_expected_oid,
+                    code.as_str(),
+                ],
+            )
+            .map_err(sqlite)?;
+        Ok(())
     }
 
     fn completed_remote_oid(&self, idempotency_key: &str) -> Result<Option<String>, GitError> {
@@ -416,8 +483,9 @@ impl PushOutbox {
                 pending.push(intent);
             }
         }
+        let failures = self.all_failure_diagnostics()?;
         let completed = self.all_receipts()?;
-        Ok(PushStatus::new(pending, approved, completed))
+        Ok(PushStatus::new(pending, approved, failures, completed))
     }
 
     fn all_intents(&self) -> Result<Vec<PushIntent>, GitError> {
@@ -459,6 +527,45 @@ impl PushOutbox {
             receipts.push(row.map_err(sqlite)?);
         }
         Ok(receipts)
+    }
+
+    fn all_failure_diagnostics(&self) -> Result<Vec<PushFailureDiagnostic>, GitError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT failure.intent_id, failure.idempotency_key, failure.effect_digest,
+                        failure.remote, failure.remote_url_redacted, failure.ref_name,
+                        failure.local_oid, failure.remote_expected_oid, failure.code,
+                        failure.attempts
+                 FROM push_failure_diagnostics failure
+                 LEFT JOIN push_receipts receipt
+                    ON receipt.idempotency_key = failure.idempotency_key
+                 WHERE receipt.idempotency_key IS NULL
+                 ORDER BY failure.updated_at ASC, failure.rowid ASC",
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let code = push_error_code_from_str(&row.get::<_, String>(8)?);
+                Ok(PushFailureDiagnostic::new(
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    code,
+                    row.get::<_, i64>(9)? as u32,
+                ))
+            })
+            .map_err(sqlite)?;
+        let mut diagnostics = Vec::new();
+        for row in rows {
+            diagnostics.push(row.map_err(sqlite)?);
+        }
+        Ok(diagnostics)
     }
 
     // --- git plumbing --------------------------------------------------------
@@ -526,6 +633,16 @@ fn row_to_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<PushIntent> {
         row.get::<_, Option<String>>(6)?,
         row.get::<_, i64>(7)? != 0,
     ))
+}
+
+fn push_error_code_from_str(value: &str) -> PushErrorCode {
+    match value {
+        "digest_mismatch" => PushErrorCode::DigestMismatch,
+        "no_matching_approval" => PushErrorCode::NoMatchingApproval,
+        "protected_branch" => PushErrorCode::ProtectedBranch,
+        "unknown_intent" => PushErrorCode::UnknownIntent,
+        _ => PushErrorCode::PushFailed,
+    }
 }
 
 /// True when `r#ref` is in the small protected set requiring `--ack-protected`.
@@ -862,6 +979,33 @@ mod tests {
         // It is still approved-but-not-completed, i.e. retryable.
         assert_eq!(status.approved.len(), 1);
         assert_eq!(status.approved[0].intent_id, "intent-1");
+        assert_eq!(
+            status.failures.len(),
+            1,
+            "failed push diagnostic is recovered from the durable outbox"
+        );
+        let failure = &status.failures[0];
+        assert_eq!(failure.schema, "opensks.push-failure-diagnostic.v1");
+        assert_eq!(failure.intent_id, "intent-1");
+        assert_eq!(failure.reason_code, "push_failed");
+        assert_eq!(failure.code.as_str(), "push_failed");
+        assert_eq!(
+            failure.idempotency_key,
+            format!("push:intent-1:{local_before}")
+        );
+        assert_eq!(
+            failure.remote_url_redacted,
+            fixture.bare.to_string_lossy().as_ref()
+        );
+        assert_eq!(failure.attempts, 1);
+
+        let reopened =
+            PushOutbox::open_workspace(&fixture.source).expect("reopen failed-push outbox");
+        let recovered = reopened.status().expect("recovered status");
+        assert_eq!(
+            recovered.failures, status.failures,
+            "failed push diagnostic survives reopening the outbox"
+        );
     }
 
     #[test]

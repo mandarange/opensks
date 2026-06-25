@@ -113,6 +113,7 @@ final class EditorDocumentState: ObservableObject, Identifiable {
     @Published private(set) var onDiskModificationMs: UInt64
     @Published var saveState: EditorSaveState
     @Published var conflictState: EditorConflictState?
+    @Published private(set) var selectedLineRange: EditorLineRange?
 
     init(id: EditorDocumentID, snapshot: EditorDocumentSnapshot, text: String) {
         self.id = id
@@ -128,6 +129,7 @@ final class EditorDocumentState: ObservableObject, Identifiable {
         } else {
             self.saveState = .clean
         }
+        self.selectedLineRange = snapshot.isEditable && !text.isEmpty ? EditorLineRange(start: 1, end: 1) : nil
     }
 
     var displayName: String { snapshot.displayName }
@@ -182,6 +184,14 @@ final class EditorDocumentState: ObservableObject, Identifiable {
     func markConflict(_ message: String) {
         conflictState = EditorConflictState(message: message)
         saveState = .conflict
+    }
+
+    func updateSelectedLineRange(_ range: EditorLineRange?) {
+        guard isEditable else {
+            selectedLineRange = nil
+            return
+        }
+        selectedLineRange = range
     }
 }
 

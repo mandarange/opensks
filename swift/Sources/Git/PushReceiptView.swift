@@ -234,13 +234,134 @@ struct PushRetrySurface: View {
     }
 }
 
+// MARK: - Recovered failed-push diagnostics
+
+/// A broader, durable failed-push diagnostic surface backed by
+/// `GitPushStatus.failures`. Unlike the compact outbox count, this gives the
+/// operator enough reviewed-effect context to retry deliberately after relaunch.
+struct PushFailureDiagnosticsPanel: View {
+    let failures: [GitPushFailureDiagnostic]
+    var onReview: (() -> Void)?
+
+    var body: some View {
+        if !failures.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.s8) {
+                HStack(spacing: Theme.s8) {
+                    Image(systemName: "arrow.up.circle.badge.exclamationmark")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(GeneratedDesignTokens.colorStatusDanger)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Recovered failed pushes")
+                            .font(Theme.ui(12.5, .semibold))
+                            .foregroundStyle(Theme.text)
+                        Text("The local commits are preserved. Re-review the exact push effects before retrying.")
+                            .font(Theme.ui(10.5))
+                            .foregroundStyle(Theme.textSoft)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                    StatusPill(kind: .danger, label: "\(failures.count) failed")
+                }
+                VStack(alignment: .leading, spacing: Theme.s6) {
+                    ForEach(failures) { failure in
+                        diagnosticRow(failure)
+                    }
+                }
+                if let onReview {
+                    Button(action: onReview) {
+                        Label("Review push outbox", systemImage: "arrow.right.circle")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(.quietAction)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("git.push.failures.review")
+                }
+            }
+            .padding(Theme.s10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous)
+                    .fill(GeneratedDesignTokens.colorStatusDanger.opacity(0.10))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous)
+                    .strokeBorder(GeneratedDesignTokens.colorStatusDanger.opacity(0.32), lineWidth: 1)
+            )
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("git.push.failureDiagnostics")
+            .accessibilityLabel("Recovered failed pushes: \(failures.count)")
+        }
+    }
+
+    private func diagnosticRow(_ failure: GitPushFailureDiagnostic) -> some View {
+        VStack(alignment: .leading, spacing: Theme.s4) {
+            HStack(spacing: Theme.s6) {
+                Text("\(failure.remote)/\(failure.ref)")
+                    .font(Theme.ui(11.5, .semibold))
+                    .foregroundStyle(Theme.textSoft)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+                Text("attempts \(failure.attempts)")
+                    .font(Theme.mono(9.5, .semibold))
+                    .foregroundStyle(Theme.muted)
+            }
+            HStack(spacing: Theme.s8) {
+                detail("Local", shortOid(failure.localOid))
+                detail("Expected", remoteExpectedLabel(failure.remoteExpectedOid))
+                detail("Reason", failure.reasonCode)
+            }
+            if !failure.remoteUrlRedacted.isEmpty {
+                Text(failure.remoteUrlRedacted)
+                    .font(Theme.mono(9.5))
+                    .foregroundStyle(Theme.faint)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(Theme.s8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                .fill(Theme.panel.opacity(0.72))
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "Failed push to \(failure.remote) \(failure.ref), local commit \(shortOid(failure.localOid)), expected \(remoteExpectedLabel(failure.remoteExpectedOid)), attempts \(failure.attempts), \(failure.reasonCode)"
+        )
+    }
+
+    private func detail(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label.uppercased())
+                .font(Theme.ui(8.5, .bold))
+                .foregroundStyle(Theme.faint)
+            Text(value)
+                .font(Theme.mono(9.5, .semibold))
+                .foregroundStyle(Theme.textSoft)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func shortOid(_ oid: String) -> String {
+        oid.isEmpty ? "unknown" : String(oid.prefix(8))
+    }
+
+    private func remoteExpectedLabel(_ oid: String?) -> String {
+        guard let oid, !oid.isEmpty else { return "new ref" }
+        return String(oid.prefix(8))
+    }
+}
+
 // MARK: - Push outbox (pending / approved / completed)
 
 /// A compact, relaunch-surviving view of the push outbox recovered from SQLite
 /// (`push-status`): how many intents are pending approval, approved-but-unexecuted,
-/// and completed. Shown in the commit composer so in-flight push work is visible
-/// after a restart. Read-only — acting on a pending intent re-opens the approval
-/// prompt elsewhere.
+/// failed after execution, and completed. Shown in the commit composer so
+/// in-flight push work is visible after a restart. Read-only — acting on a
+/// pending intent re-opens the approval prompt elsewhere.
 struct PushOutboxSummary: View {
     let status: GitPushStatus
 
@@ -258,7 +379,16 @@ struct PushOutboxSummary: View {
             HStack(spacing: Theme.s8) {
                 outboxCount(kind: .warning, label: "Pending", count: status.pending.count)
                 outboxCount(kind: .running, label: "Approved", count: status.approved.count)
+                outboxCount(kind: .danger, label: "Failed", count: status.failures.count)
                 outboxCount(kind: .success, label: "Completed", count: status.completed.count)
+            }
+            if !status.failures.isEmpty {
+                VStack(alignment: .leading, spacing: Theme.s6) {
+                    ForEach(status.failures) { failure in
+                        failureRow(failure)
+                    }
+                }
+                .padding(.top, Theme.s4)
             }
         }
         .padding(Theme.s10)
@@ -270,7 +400,7 @@ struct PushOutboxSummary: View {
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("git.push.outbox")
         .accessibilityLabel(
-            "Push outbox: \(status.pending.count) pending, \(status.approved.count) approved, \(status.completed.count) completed"
+            "Push outbox: \(status.pending.count) pending, \(status.approved.count) approved, \(status.failures.count) failed, \(status.completed.count) completed"
         )
     }
 
@@ -286,5 +416,40 @@ struct PushOutboxSummary: View {
                 .font(Theme.ui(10))
                 .foregroundStyle(Theme.muted)
         }
+    }
+
+    private func failureRow(_ failure: GitPushFailureDiagnostic) -> some View {
+        HStack(alignment: .top, spacing: Theme.s8) {
+            Image(systemName: "arrow.up.circle.badge.xmark")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(GeneratedDesignTokens.colorStatusDanger)
+                .frame(width: 16, height: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(failure.remote)/\(failure.ref) failed after approval")
+                    .font(Theme.ui(10.5, .semibold))
+                    .foregroundStyle(Theme.textSoft)
+                    .lineLimit(1)
+                Text("Local \(shortOid(failure.localOid)) · attempts \(failure.attempts) · \(failure.reasonCode)")
+                    .font(Theme.mono(9.5))
+                    .foregroundStyle(Theme.muted)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, Theme.s4)
+        .padding(.horizontal, Theme.s6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                .fill(GeneratedDesignTokens.colorStatusDanger.opacity(0.10))
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "Failed push to \(failure.remote) \(failure.ref), local commit \(shortOid(failure.localOid)), attempts \(failure.attempts), \(failure.reasonCode)"
+        )
+    }
+
+    private func shortOid(_ oid: String) -> String {
+        oid.isEmpty ? "unknown" : String(oid.prefix(8))
     }
 }

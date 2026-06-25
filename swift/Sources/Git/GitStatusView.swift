@@ -57,6 +57,7 @@ struct GitStatusView: View {
         .overlay(alignment: .top) { errorBanner }
         .overlay(alignment: .top) { switchBlockBanner }
         .accessibilityIdentifier("git.studio.view")
+        .task { await store.refreshPushStatus() }
     }
 
     /// Wide: branch | changes | diff | commit. Columns are flexible (min/ideal/
@@ -93,6 +94,13 @@ struct GitStatusView: View {
             .padding(8)
             .accessibilityIdentifier("git.studio.compact.tabs")
             Divider().overlay(Theme.stroke)
+            if compactPane != .commit, !store.push.status.failures.isEmpty {
+                PushFailureDiagnosticsPanel(failures: store.push.status.failures) {
+                    compactPane = .commit
+                }
+                .padding(.horizontal, Theme.s8)
+                .padding(.bottom, Theme.s8)
+            }
             switch compactPane {
             case .changes: changesColumn
             case .diff: diffColumn

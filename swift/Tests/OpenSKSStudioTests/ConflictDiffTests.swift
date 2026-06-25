@@ -271,6 +271,53 @@ final class ConflictDiffTests: XCTestCase {
                        "an edit outside the selected lines does not stale the ref")
     }
 
+    func testContextRefWireReferenceUsesBackendRangeFormat() throws {
+        let text = "head\nSELECTED\ntail\n"
+        let ref = try XCTUnwrap(EditorContextRef.capture(
+            workspaceRelativePath: "src/lib.rs",
+            displayName: "lib.rs",
+            fullText: text,
+            lineRange: EditorLineRange(start: 2, end: 2)
+        ))
+
+        XCTAssertEqual(ref.contextLabel, "lib.rs L2")
+        XCTAssertEqual(ref.lineRange.wireLabel, "L2-L2")
+        XCTAssertEqual(ref.wireReference, "editor://src/lib.rs#L2-L2#\(ref.contentHash)")
+    }
+
+    func testEditorDocumentTracksSelectedLinesForContextCapture() throws {
+        let snapshot = EditorDocumentSnapshot(
+            workspaceRelativePath: "src/lib.rs",
+            displayName: "lib.rs",
+            language: .swift,
+            encoding: "utf-8",
+            lineEnding: .lf,
+            baselineContentHash: EditorContentHash.compute("one\ntwo\nthree\n"),
+            byteSize: 14,
+            onDiskModificationMs: 1_000,
+            isSecretRestricted: false,
+            isBinary: false
+        )
+        let document = EditorDocumentState(
+            id: EditorDocumentID(),
+            snapshot: snapshot,
+            text: "one\ntwo\nthree\n"
+        )
+        document.updateSelectedLineRange(EditorLineRange(start: 2, end: 3))
+
+        let selected = try XCTUnwrap(document.selectedLineRange)
+        let ref = try XCTUnwrap(EditorContextRef.capture(
+            workspaceRelativePath: document.workspaceRelativePath,
+            displayName: document.displayName,
+            fullText: document.text,
+            lineRange: selected
+        ))
+
+        XCTAssertEqual(selected.start, 2)
+        XCTAssertEqual(selected.end, 3)
+        XCTAssertEqual(ref.contextLabel, "lib.rs L2–L3")
+    }
+
     // MARK: - Views render + fill width (no letterbox)
 
     func testConflictResolutionViewRenders() async throws {

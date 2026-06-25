@@ -68,15 +68,119 @@ struct RuntimeCapability: Codable, Identifiable, Sendable {
     }
 }
 
+enum ToolAvailability: String, Codable, Sendable {
+    case available
+    case unavailable
+
+    var isAvailable: Bool { self == .available }
+
+    var displayLabel: String {
+        switch self {
+        case .available: return "Available"
+        case .unavailable: return "Disabled"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .available: return Theme.accent
+        case .unavailable: return Theme.muted
+        }
+    }
+}
+
+enum ToolPermission: String, Codable, Sendable {
+    case deny
+    case readOnly = "read_only"
+    case ask
+    case allow
+
+    var displayLabel: String {
+        switch self {
+        case .deny: return "Deny"
+        case .readOnly: return "Read-only"
+        case .ask: return "Ask"
+        case .allow: return "Allow"
+        }
+    }
+}
+
+struct ToolDescriptor: Codable, Identifiable, Sendable {
+    let schema: String
+    let name: String
+    let displayName: String
+    let description: String
+    let permission: ToolPermission
+    let availability: ToolAvailability
+    let reasonCode: String
+    let evidenceRefs: [String]
+
+    var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+        case schema, name, description, permission, availability
+        case displayName = "display_name"
+        case reasonCode = "reason_code"
+        case evidenceRefs = "evidence_refs"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try c.decode(String.self, forKey: .schema)
+        name = try c.decode(String.self, forKey: .name)
+        displayName = try c.decode(String.self, forKey: .displayName)
+        description = try c.decode(String.self, forKey: .description)
+        permission = try c.decode(ToolPermission.self, forKey: .permission)
+        availability = try c.decode(ToolAvailability.self, forKey: .availability)
+        reasonCode = try c.decode(String.self, forKey: .reasonCode)
+        evidenceRefs = (try? c.decode([String].self, forKey: .evidenceRefs)) ?? []
+    }
+}
+
+struct ToolRegistry: Codable, Sendable {
+    let schema: String
+    let registryId: String
+    let revision: UInt64
+    let tools: [ToolDescriptor]
+
+    enum CodingKeys: String, CodingKey {
+        case schema, revision, tools
+        case registryId = "registry_id"
+    }
+
+    func descriptor(named name: String) -> ToolDescriptor? {
+        tools.first { $0.name == name }
+    }
+
+    var availableToolCount: Int {
+        tools.filter { $0.availability.isAvailable }.count
+    }
+
+    var unavailableToolCount: Int {
+        tools.count - availableToolCount
+    }
+
+    var sortedTools: [ToolDescriptor] {
+        tools.sorted { left, right in
+            if left.availability != right.availability {
+                return left.availability.isAvailable && !right.availability.isAvailable
+            }
+            return left.name < right.name
+        }
+    }
+}
+
 struct RuntimeCapabilityReport: Codable, Sendable {
     let schema: String
     let generatedFor: String?
     let capabilities: [RuntimeCapability]
+    let toolRegistry: ToolRegistry?
 
     enum CodingKeys: String, CodingKey {
         case schema
         case generatedFor = "generated_for"
         case capabilities
+        case toolRegistry = "tool_registry"
     }
 
     init(from decoder: Decoder) throws {
@@ -84,6 +188,7 @@ struct RuntimeCapabilityReport: Codable, Sendable {
         schema = try c.decode(String.self, forKey: .schema)
         generatedFor = try? c.decode(String.self, forKey: .generatedFor)
         capabilities = try c.decode([RuntimeCapability].self, forKey: .capabilities)
+        toolRegistry = try? c.decode(ToolRegistry.self, forKey: .toolRegistry)
     }
 
     /// Decode a report from the raw `opensks capability report` JSON.
@@ -139,5 +244,73 @@ struct CapabilityStatusView: View {
                 .accessibilityLabel("\(capability.title): \(capability.maturity.displayLabel)")
             }
         }
+    }
+}
+
+/// Read-only view of canonical tool availability. Unavailable tools are rendered
+/// as disabled rows, because the registry is the only source that may unlock a
+/// tool in product UI.
+struct ToolRegistryStatusView: View {
+    let registry: ToolRegistry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.s8) {
+            HStack(spacing: Theme.s8) {
+                Text("Tool registry")
+                    .font(Theme.ui(13, .semibold))
+                    .foregroundStyle(Theme.text)
+                Text("\(registry.availableToolCount) available")
+                    .font(Theme.ui(11, .semibold))
+                    .foregroundStyle(Theme.accent)
+                if registry.unavailableToolCount > 0 {
+                    Text("\(registry.unavailableToolCount) disabled")
+                        .font(Theme.ui(11, .semibold))
+                        .foregroundStyle(Theme.muted)
+                }
+                Spacer(minLength: 0)
+            }
+            ForEach(registry.sortedTools) { tool in
+                ToolStatusRow(tool: tool)
+            }
+        }
+        .accessibilityIdentifier("settings.tools.registry")
+    }
+}
+
+private struct ToolStatusRow: View {
+    let tool: ToolDescriptor
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: Theme.s10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(tool.displayName)
+                    .font(Theme.ui(12.5, .medium))
+                    .foregroundStyle(tool.availability.isAvailable ? Theme.text : Theme.muted)
+                Text(tool.name)
+                    .font(Theme.mono(10.5))
+                    .foregroundStyle(Theme.faint)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(tool.permission.displayLabel)
+                .font(Theme.ui(11, .semibold))
+                .foregroundStyle(Theme.textSoft)
+                .frame(width: 68, alignment: .leading)
+            Text(tool.availability.displayLabel)
+                .font(Theme.ui(11, .semibold))
+                .foregroundStyle(tool.availability.tint)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .background(
+                    Capsule().fill(tool.availability.tint.opacity(0.14))
+                )
+        }
+        .opacity(tool.availability.isAvailable ? 1 : 0.58)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            "\(tool.displayName): \(tool.availability.displayLabel), \(tool.permission.displayLabel), \(tool.reasonCode)"
+        )
+        .accessibilityIdentifier("settings.tools.\(tool.name)")
     }
 }

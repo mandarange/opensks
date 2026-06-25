@@ -109,6 +109,12 @@ pub struct ConversationTurnStartRequest {
     pub conversation_id: String,
     pub client_turn_id: String,
     pub message: UserMessageInput,
+    /// Client-observed durable thread settings revision. The daemon uses this
+    /// as a compare-and-snapshot guard before accepting a turn; the full
+    /// `settings` payload below is retained as a compatibility echo and is not
+    /// the runtime source of truth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_settings_updated_at_ms: Option<u64>,
     pub settings: ConversationTurnSettings,
     #[serde(default)]
     pub context: TurnContextSelection,
@@ -144,6 +150,12 @@ pub struct ConversationThreadSettings {
     pub tool_policy_id: String,
     pub approval_policy_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_budget_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_model_id: Option<String>,
     pub updated_at_ms: u64,
 }
@@ -166,6 +178,9 @@ impl ConversationThreadSettings {
             verifier_count: 1,
             tool_policy_id: "project-default".to_string(),
             approval_policy_id: "safe-interactive".to_string(),
+            token_budget: None,
+            cost_budget_usd: None,
+            timeout_ms: None,
             image_model_id: None,
             updated_at_ms: now_ms,
         }
@@ -226,6 +241,7 @@ mod tests {
                 text: "add a test".to_string(),
                 attachment_refs: vec![],
             },
+            thread_settings_updated_at_ms: Some(42),
             settings: ConversationTurnSettings {
                 model: ModelSelection {
                     mode: ModelSelectionMode::Auto,

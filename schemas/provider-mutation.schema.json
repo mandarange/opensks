@@ -1,0 +1,104 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProviderMutationReceipt",
+  "type": "object",
+  "required": [
+    "mutation",
+    "occurred_at_ms",
+    "provider_id",
+    "reason_code",
+    "revision",
+    "schema",
+    "secret_value_exposed"
+  ],
+  "properties": {
+    "mutation": {
+      "$ref": "#/definitions/ProviderMutationKind"
+    },
+    "occurred_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "provider_id": {
+      "type": "string"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "revision": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "schema": {
+      "type": "string"
+    },
+    "secret_ref": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SecretRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "secret_value_exposed": {
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+    "ProviderMutationKind": {
+      "type": "string",
+      "enum": [
+        "created",
+        "updated",
+        "credential_replaced",
+        "credential_deleted",
+        "enabled",
+        "disabled",
+        "deleted",
+        "models_synced"
+      ]
+    },
+    "SecretRef": {
+      "type": "object",
+      "required": [
+        "account",
+        "schema",
+        "service",
+        "store",
+        "version"
+      ],
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "service": {
+          "type": "string"
+        },
+        "store": {
+          "$ref": "#/definitions/SecretStoreKind"
+        },
+        "version": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "SecretStoreKind": {
+      "type": "string",
+      "enum": [
+        "macos_keychain",
+        "external_broker",
+        "local_development",
+        "test_memory"
+      ]
+    }
+  }
+}

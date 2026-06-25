@@ -23,6 +23,13 @@
     "conversation_id": {
       "type": "string"
     },
+    "cost_budget_usd": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
     "execution_mode": {
       "$ref": "#/definitions/ExecutionMode"
     },
@@ -48,6 +55,22 @@
     },
     "schema": {
       "type": "string"
+    },
+    "timeout_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "token_budget": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
     },
     "tool_policy_id": {
       "type": "string"

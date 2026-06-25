@@ -23,6 +23,523 @@
     },
     "schema": {
       "type": "string"
+    },
+    "tool_registry": {
+      "description": "Canonical tool availability snapshot used by provider tool schemas, executors, and UI disablement. Defaults keep older reports decodable.",
+      "default": {
+        "registry_id": "opensks-runtime-tools",
+        "revision": 1,
+        "schema": "opensks.tool-registry.v1",
+        "tools": [
+          {
+            "availability": "available",
+            "description": "List non-hidden entries under a workspace-relative directory.",
+            "display_name": "List Directory",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "object"
+            },
+            "name": "workspace.list_directory",
+            "permission": "read_only",
+            "reason_code": "workspace_tool_executable",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Read UTF-8 text lines from a workspace-relative file.",
+            "display_name": "Read File Range",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "end_line": {
+                  "type": "integer"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "start_line": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "object"
+            },
+            "name": "workspace.read_file_range",
+            "permission": "read_only",
+            "reason_code": "workspace_tool_executable",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Search UTF-8 workspace files for literal text.",
+            "display_name": "Search Text",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "max_results": {
+                  "type": "integer"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "query": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            "name": "workspace.search_text",
+            "permission": "read_only",
+            "reason_code": "workspace_tool_executable",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Query the persisted CodeGraph symbol index.",
+            "display_name": "Query Symbol",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "max_results": {
+                  "type": "integer"
+                },
+                "query": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            "name": "codegraph.query_symbol",
+            "permission": "read_only",
+            "reason_code": "codegraph_executor_available",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Find references for a persisted CodeGraph symbol id.",
+            "display_name": "Symbol References",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "symbol_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "symbol_id"
+              ],
+              "type": "object"
+            },
+            "name": "codegraph.references",
+            "permission": "read_only",
+            "reason_code": "codegraph_executor_available",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Build a worker-scoped context pack from TriWiki and code evidence.",
+            "display_name": "Build Context Pack",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "token_budget": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "type": "object"
+            },
+            "name": "context.build_pack",
+            "permission": "read_only",
+            "reason_code": "context_executor_available",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Propose a full-file replacement to be applied through PatchEngine.",
+            "display_name": "Propose Patch",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ],
+              "type": "object"
+            },
+            "name": "workspace.propose_patch",
+            "permission": "allow",
+            "reason_code": "patch_engine_executable",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Append one line through PatchEngine after producing a diff-backed proposal.",
+            "display_name": "Diff Patch",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "value"
+              ],
+              "type": "object"
+            },
+            "name": "workspace.diff_patch",
+            "permission": "allow",
+            "reason_code": "patch_engine_executable",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Run an approved argv command under sandbox policy.",
+            "display_name": "Run Command",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "timeout_ms": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "type": "object"
+            },
+            "name": "command.run",
+            "permission": "ask",
+            "reason_code": "command_runner_executable",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Run an approved targeted test command and capture redacted output.",
+            "display_name": "Run Targeted Tests",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "target": {
+                  "type": "string"
+                },
+                "timeout_ms": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "target"
+              ],
+              "type": "object"
+            },
+            "name": "test.run_targeted",
+            "permission": "ask",
+            "reason_code": "command_runner_executable",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Read git status through the git service.",
+            "display_name": "Git Status",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object"
+            },
+            "name": "git.status",
+            "permission": "read_only",
+            "reason_code": "git_service_read_only",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Read path-limited git diff through the git service.",
+            "display_name": "Git Diff",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "type": "object"
+            },
+            "name": "git.diff",
+            "permission": "read_only",
+            "reason_code": "git_service_read_only",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Read recent git history through the git service.",
+            "display_name": "Git Log",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "max_count": {
+                  "type": "integer"
+                }
+              },
+              "required": [],
+              "type": "object"
+            },
+            "name": "git.log",
+            "permission": "read_only",
+            "reason_code": "git_service_read_only",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Read a runtime artifact by artifact ref.",
+            "display_name": "Read Artifact",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "artifact_ref": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "artifact_ref"
+              ],
+              "type": "object"
+            },
+            "name": "artifact.read",
+            "permission": "read_only",
+            "reason_code": "artifact_store_executable",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Write a redacted runtime artifact by artifact ref.",
+            "display_name": "Write Artifact",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "artifact_ref": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "artifact_ref",
+                "content"
+              ],
+              "type": "object"
+            },
+            "name": "artifact.write",
+            "permission": "ask",
+            "reason_code": "artifact_store_executable",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Generate an image through a provider-backed image lane.",
+            "display_name": "Generate Image",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "asset_id": {
+                  "type": "string"
+                },
+                "height": {
+                  "type": "integer"
+                },
+                "prompt": {
+                  "type": "string"
+                },
+                "width": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "prompt"
+              ],
+              "type": "object"
+            },
+            "name": "image.generate",
+            "permission": "ask",
+            "reason_code": "provider_image_executor_route_required",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Inspect an image artifact through a provider-backed vision lane.",
+            "display_name": "Inspect Image",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "artifact_ref": {
+                  "type": "string"
+                },
+                "asset_id": {
+                  "type": "string"
+                },
+                "prompt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "artifact_ref"
+              ],
+              "type": "object"
+            },
+            "name": "image.inspect",
+            "permission": "read_only",
+            "reason_code": "provider_vision_executor_route_required",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Invoke an allowlisted local MCP tool through the broker.",
+            "display_name": "Invoke MCP",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "payload": {
+                  "type": "object"
+                },
+                "tool": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tool"
+              ],
+              "type": "object"
+            },
+            "name": "mcp.invoke",
+            "permission": "ask",
+            "reason_code": "local_mcp_broker_executable",
+            "schema": "opensks.tool-descriptor.v1"
+          },
+          {
+            "availability": "available",
+            "description": "Load an allowlisted local skill route as bounded context.",
+            "display_name": "Invoke Skill",
+            "evidence_refs": [
+              "tool-registry:canonical-catalog"
+            ],
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "payload": {
+                  "type": "object"
+                },
+                "skill": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "skill"
+              ],
+              "type": "object"
+            },
+            "name": "skill.invoke",
+            "permission": "ask",
+            "reason_code": "local_skill_registry_executable",
+            "schema": "opensks.tool-descriptor.v1"
+          }
+        ]
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ToolRegistry"
+        }
+      ]
     }
   },
   "definitions": {
@@ -115,6 +632,97 @@
         "title": {
           "description": "Short human-facing surface name, e.g. `Chat code edit`.",
           "type": "string"
+        }
+      }
+    },
+    "ToolAvailability": {
+      "description": "Whether a tool is currently executable through the local ToolRegistry.",
+      "type": "string",
+      "enum": [
+        "available",
+        "unavailable"
+      ]
+    },
+    "ToolDescriptor": {
+      "description": "Canonical tool metadata. Provider adapters, UI capability reports, and the executor share these descriptors so unsupported tools are visible but never advertised as callable success paths.",
+      "type": "object",
+      "required": [
+        "availability",
+        "description",
+        "display_name",
+        "input_schema",
+        "name",
+        "permission",
+        "reason_code",
+        "schema"
+      ],
+      "properties": {
+        "availability": {
+          "$ref": "#/definitions/ToolAvailability"
+        },
+        "description": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "input_schema": true,
+        "name": {
+          "type": "string"
+        },
+        "permission": {
+          "$ref": "#/definitions/ToolPermission"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "ToolPermission": {
+      "description": "Per-tool permission (§19.7). Risk rises from `Deny` to `Allow`.",
+      "type": "string",
+      "enum": [
+        "deny",
+        "read_only",
+        "ask",
+        "allow"
+      ]
+    },
+    "ToolRegistry": {
+      "description": "A registry snapshot for the tools known to the current runtime.",
+      "type": "object",
+      "required": [
+        "registry_id",
+        "revision",
+        "schema",
+        "tools"
+      ],
+      "properties": {
+        "registry_id": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "schema": {
+          "type": "string"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ToolDescriptor"
+          }
         }
       }
     }

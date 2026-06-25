@@ -15,6 +15,11 @@ final class AppCoordinator: ObservableObject {
     /// service is rebound via `bindConversations(cli:workspace:)`.
     let conversations: ConversationStore
 
+    /// Provider registry/control center state. Credentials are stored through
+    /// Keychain-backed secret refs; the UI never holds or renders raw keys after
+    /// the Add Provider wizard saves them.
+    let providers = ProviderStore()
+
     /// Node-level pipeline projections keyed by run id (PR-029). The `.graph`
     /// route and the conversation thread's `PipelineRunCard`s both read live
     /// projections from here. Multiple concurrent runs coexist (one reducer per
@@ -114,6 +119,11 @@ final class AppCoordinator: ObservableObject {
             LiveConversationService(cli: cli, workspace: workspace)
         )
         Task { await conversations.load() }
+    }
+
+    func bindProviders(cli: URL, workspace: URL) {
+        providers.updateService(LiveProviderRegistryService(cli: cli, workspace: workspace))
+        Task { await providers.refresh() }
     }
 
     /// Rebind the Git studio to the resolved workspace + bundled CLI, refresh, and

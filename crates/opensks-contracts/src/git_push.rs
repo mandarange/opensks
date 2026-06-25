@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 pub const PUSH_INTENT_SCHEMA: &str = "opensks.push-intent.v1";
 pub const PUSH_APPROVAL_SCHEMA: &str = "opensks.push-approval.v1";
 pub const PUSH_RECEIPT_SCHEMA: &str = "opensks.push-receipt.v1";
+pub const PUSH_FAILURE_DIAGNOSTIC_SCHEMA: &str = "opensks.push-failure-diagnostic.v1";
 pub const PUSH_STATUS_SCHEMA: &str = "opensks.push-status.v1";
 pub const PUSH_ERROR_SCHEMA: &str = "opensks.git-error.v1";
 
@@ -130,8 +131,61 @@ impl PushReceipt {
     }
 }
 
+/// A durable diagnostic for a remote push attempt that failed after approval.
+/// It deliberately stores only the reviewed push effect and a machine-readable
+/// code, never the raw remote URL, stderr, credentials, or argv.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PushFailureDiagnostic {
+    pub schema: String,
+    pub intent_id: String,
+    pub idempotency_key: String,
+    pub effect_digest: String,
+    pub remote: String,
+    pub remote_url_redacted: String,
+    #[serde(rename = "ref")]
+    pub r#ref: String,
+    pub local_oid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_expected_oid: Option<String>,
+    pub code: PushErrorCode,
+    pub reason_code: String,
+    pub attempts: u32,
+}
+
+impl PushFailureDiagnostic {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        intent_id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        effect_digest: impl Into<String>,
+        remote: impl Into<String>,
+        remote_url_redacted: impl Into<String>,
+        r#ref: impl Into<String>,
+        local_oid: impl Into<String>,
+        remote_expected_oid: Option<String>,
+        code: PushErrorCode,
+        attempts: u32,
+    ) -> Self {
+        Self {
+            schema: PUSH_FAILURE_DIAGNOSTIC_SCHEMA.to_string(),
+            intent_id: intent_id.into(),
+            idempotency_key: idempotency_key.into(),
+            effect_digest: effect_digest.into(),
+            remote: remote.into(),
+            remote_url_redacted: remote_url_redacted.into(),
+            r#ref: r#ref.into(),
+            local_oid: local_oid.into(),
+            remote_expected_oid,
+            reason_code: code.as_str().to_string(),
+            code,
+            attempts,
+        }
+    }
+}
+
 /// The durable push outbox state, recovered from SQLite: intents still awaiting
-/// approval, intents approved but not yet executed, and completed receipts.
+/// approval, intents approved but not yet executed, failed push diagnostics, and
+/// completed receipts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PushStatus {
     pub schema: String,
@@ -140,6 +194,8 @@ pub struct PushStatus {
     #[serde(default)]
     pub approved: Vec<PushIntent>,
     #[serde(default)]
+    pub failures: Vec<PushFailureDiagnostic>,
+    #[serde(default)]
     pub completed: Vec<PushReceipt>,
 }
 
@@ -147,12 +203,14 @@ impl PushStatus {
     pub fn new(
         pending: Vec<PushIntent>,
         approved: Vec<PushIntent>,
+        failures: Vec<PushFailureDiagnostic>,
         completed: Vec<PushReceipt>,
     ) -> Self {
         Self {
             schema: PUSH_STATUS_SCHEMA.to_string(),
             pending,
             approved,
+            failures,
             completed,
         }
     }
@@ -320,10 +378,34 @@ mod tests {
 
     #[test]
     fn push_status_roundtrips_empty() {
-        let status = PushStatus::new(Vec::new(), Vec::new(), Vec::new());
+        let status = PushStatus::new(Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let json = serde_json::to_string(&status).expect("ser");
         assert!(json.contains("\"schema\":\"opensks.push-status.v1\""));
         let decoded: PushStatus = serde_json::from_str(&json).expect("de");
         assert_eq!(decoded, status);
+    }
+
+    #[test]
+    fn push_failure_diagnostic_is_secretless_and_roundtrips_in_status() {
+        let diagnostic = PushFailureDiagnostic::new(
+            "intent-1",
+            "push:intent-1:abc123",
+            "fnv1a64:deadbeefdeadbeef",
+            "origin",
+            "https://github.com/acme/repo.git",
+            "feature",
+            "abc123",
+            Some("def456".to_string()),
+            PushErrorCode::PushFailed,
+            2,
+        );
+        let status = PushStatus::new(Vec::new(), Vec::new(), vec![diagnostic.clone()], Vec::new());
+        let json = serde_json::to_string(&status).expect("ser");
+        assert!(json.contains("\"schema\":\"opensks.push-failure-diagnostic.v1\""));
+        assert!(json.contains("\"reason_code\":\"push_failed\""));
+        assert!(!json.contains("s3cr3t"));
+        assert!(!json.contains("stderr"));
+        let decoded: PushStatus = serde_json::from_str(&json).expect("de");
+        assert_eq!(decoded.failures, vec![diagnostic]);
     }
 }

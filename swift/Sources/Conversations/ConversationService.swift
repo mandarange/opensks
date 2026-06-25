@@ -26,6 +26,12 @@ protocol ConversationService: Sendable {
         state: String,
         payloadJSON: String
     ) async throws -> ConversationTimelineItem
+    func appendGitReceiptEvent(
+        conversationID: String,
+        kind: ExecutionEventKind,
+        idempotencyKey: String,
+        payloadJSON: String
+    ) async throws -> ConversationTimelineItem
 
     /// Start ONE conversation runtime run for `id`: persist the redacted user
     /// message + an assistant placeholder, run the engine, set the assistant
@@ -36,12 +42,25 @@ protocol ConversationService: Sendable {
         conversationID: String,
         projectID: String,
         text: String,
+        settings: ConversationTurnSettings,
+        threadSettingsUpdatedAtMs: Int64?,
+        context: TurnContextSelection,
         idempotencyKey: String
     ) async throws -> ConversationTurn
 
     /// Ask the daemon turn supervisor to recover expired leases, claim at most
     /// one queued accepted turn, execute it, and persist its final projections.
     func supervisorTick() async throws -> TurnSupervisorTickResult
+
+    /// Subscribe to a run's durable execution-event stream. Live chat uses this
+    /// as the product path for incremental run progress; reloads only reconcile
+    /// the durable projection afterward.
+    func subscribeRunEvents(
+        runID: String,
+        sinceSequence: UInt64,
+        tailMs: UInt64?,
+        pollIntervalMs: UInt64?
+    ) async throws -> EngineRunStream
 
     /// The runs linked to a conversation (`opensks.conversation-run-list.v1`).
     func runs(conversationID: String) async throws -> [ConversationRunRef]
@@ -52,6 +71,44 @@ protocol ConversationService: Sendable {
         _ settings: ConversationThreadSettings,
         conversationID: String
     ) async throws -> ConversationThreadSettings
+}
+
+extension ConversationService {
+    func turnStart(
+        conversationID: String,
+        projectID: String,
+        text: String,
+        settings: ConversationTurnSettings,
+        context: TurnContextSelection,
+        idempotencyKey: String
+    ) async throws -> ConversationTurn {
+        try await turnStart(
+            conversationID: conversationID,
+            projectID: projectID,
+            text: text,
+            settings: settings,
+            threadSettingsUpdatedAtMs: nil,
+            context: context,
+            idempotencyKey: idempotencyKey
+        )
+    }
+
+    func turnStart(
+        conversationID: String,
+        projectID: String,
+        text: String,
+        idempotencyKey: String
+    ) async throws -> ConversationTurn {
+        try await turnStart(
+            conversationID: conversationID,
+            projectID: projectID,
+            text: text,
+            settings: .defaultForTurn(),
+            threadSettingsUpdatedAtMs: nil,
+            context: .empty,
+            idempotencyKey: idempotencyKey
+        )
+    }
 }
 
 // MARK: - Errors
@@ -173,10 +230,27 @@ struct LiveConversationService: ConversationService {
         )
     }
 
+    func appendGitReceiptEvent(
+        conversationID id: String,
+        kind: ExecutionEventKind,
+        idempotencyKey: String,
+        payloadJSON: String
+    ) async throws -> ConversationTimelineItem {
+        try await run(
+            ["conversation", "receipt-event-append", "--workspace", workspace.path,
+             "--conversation", id, "--kind", kind.rawValue, "--idempotency-key", idempotencyKey,
+             "--payload", payloadJSON],
+            verb: "receipt-event-append"
+        )
+    }
+
     func turnStart(
         conversationID: String,
         projectID: String,
         text: String,
+        settings: ConversationTurnSettings,
+        threadSettingsUpdatedAtMs: Int64?,
+        context: TurnContextSelection,
         idempotencyKey: String
     ) async throws -> ConversationTurn {
         let requestId = "req-conversation-turn-\(UUID().uuidString)"
@@ -187,8 +261,9 @@ struct LiveConversationService: ConversationService {
             conversationId: conversationID,
             clientTurnId: "client-\(UUID().uuidString)",
             message: UserMessageInput(text: text, attachmentRefs: []),
-            settings: .defaultForTurn(),
-            context: .empty,
+            threadSettingsUpdatedAtMs: threadSettingsUpdatedAtMs,
+            settings: settings,
+            context: context,
             idempotencyKey: idempotencyKey
         )
         let result = await engine.conversationTurnStart(cli: cli, cwd: workspace, request: request)
@@ -243,6 +318,29 @@ struct LiveConversationService: ConversationService {
             )
         }
         return tick
+    }
+
+    func subscribeRunEvents(
+        runID: String,
+        sinceSequence: UInt64,
+        tailMs: UInt64?,
+        pollIntervalMs: UInt64?
+    ) async throws -> EngineRunStream {
+        let stream = await engine.subscribeEvents(
+            cli: cli,
+            cwd: workspace,
+            runId: runID,
+            sinceSequence: sinceSequence,
+            tailMs: tailMs,
+            pollIntervalMs: pollIntervalMs
+        )
+        if stream.exitCode != 0 && stream.streamFailures.isEmpty {
+            throw ConversationServiceError.nonZeroExit(
+                stream.exitCode ?? 1,
+                stderr: Self.daemonErrorText(stream)
+            )
+        }
+        return stream
     }
 
     func runs(conversationID: String) async throws -> [ConversationRunRef] {
@@ -343,12 +441,25 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
     private var timelineItemsByConversation: [String: [ConversationTimelineItem]] = [:]
     private var runsByConversation: [String: [ConversationRunRef]] = [:]
     private var settingsByConversation: [String: ConversationThreadSettings] = [:]
+    private var executionEventsByRun: [String: [ExecutionEventEnvelope]] = [:]
+    private var defaultSubscribeRunFailure: EngineStreamFailure?
     /// Idempotency ledger: `"<conversationID>\u{1}<key>" -> turn` so a replayed
     /// key returns the same ids (reused) without starting a second run.
     private var turnsByIdempotencyKey: [String: ConversationTurn] = [:]
     private var nextId = 0
     private var clock: Int64 = 1_000
     private(set) var supervisorTickCount = 0
+    private(set) var subscribeRunEventsCallCount = 0
+    private(set) var subscribeRunEventsRequests: [(runID: String, sinceSequence: UInt64, tailMs: UInt64?, pollIntervalMs: UInt64?)] = []
+    private(set) var turnStartRequests: [(
+        conversationID: String,
+        projectID: String,
+        text: String,
+        settings: ConversationTurnSettings,
+        threadSettingsUpdatedAtMs: Int64?,
+        context: TurnContextSelection,
+        idempotencyKey: String
+    )] = []
 
     let projectId: String
 
@@ -553,6 +664,66 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         }
     }
 
+    func appendGitReceiptEvent(
+        conversationID id: String,
+        kind: ExecutionEventKind,
+        idempotencyKey: String,
+        payloadJSON: String
+    ) async throws -> ConversationTimelineItem {
+        try withLock {
+            guard summaries.contains(where: { $0.id == id }) else {
+                throw ConversationServiceError.emptyOutput("receipt-event-append")
+            }
+            let payload = try JSONDecoder.opensks.decode(
+                ConversationTimelinePayload.self,
+                from: Data(payloadJSON.utf8)
+            )
+            let now = tick()
+            let existing = timelineItemsByConversation[id] ?? []
+            let durableID = "timeline-event-\(idempotencyKey)"
+            if let already = existing.first(where: { $0.id == durableID }) {
+                return already
+            }
+            let messageMax = (messagesByConversation[id] ?? []).map(\.sequence).max() ?? 0
+            let timelineMax = existing.map(\.sequence).max() ?? 0
+            let itemKind: ConversationTimelineItemKind
+            let state: String
+            switch kind {
+            case .gitCommitReceipt:
+                itemKind = .commitReceipt
+                state = "committed"
+            case .gitPushReceipt:
+                itemKind = .pushReceipt
+                state = "pushed"
+            case .gitPushFailed:
+                itemKind = .pushReceipt
+                state = "failed"
+            default:
+                itemKind = .warning
+                state = kind.rawValue
+            }
+            let item = ConversationTimelineItem(
+                schema: "opensks.timeline-item.v1",
+                id: durableID,
+                projectId: projectId,
+                conversationId: id,
+                turnId: nil,
+                runId: "git-receipt-\(idempotencyKey)",
+                sequence: max(messageMax, timelineMax) + 1,
+                kind: itemKind,
+                state: state,
+                payload: payload,
+                createdAtMs: now,
+                updatedAtMs: now
+            )
+            timelineItemsByConversation[id] = existing + [item]
+            if let idx = summaries.firstIndex(where: { $0.id == id }) {
+                summaries[idx] = summaries[idx].with(updatedAtMs: now)
+            }
+            return item
+        }
+    }
+
     private func appendLocked(id: String, role: MessageRole, text: String) -> ConversationMessage {
         let now = tick()
         let existing = messagesByConversation[id] ?? []
@@ -635,7 +806,15 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
                     remoteExpectedOid: nil,
                     protected: nil,
                     approvalId: nil,
-                    approvalMatched: nil
+                    approvalMatched: nil,
+                    stagedDiffHash: nil,
+                    stagedDiffRef: nil,
+                    reviewedStagedDiffHash: nil,
+                    reviewedStagedDiffRef: nil,
+                    integrationFinalDiffHash: nil,
+                    integrationFinalDiffRef: nil,
+                    integrationRunId: nil,
+                    integrationCandidateId: nil
                 ),
                 createdAtMs: message.createdAtMs,
                 updatedAtMs: message.updatedAtMs
@@ -660,6 +839,9 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         conversationID: String,
         projectID: String,
         text: String,
+        settings: ConversationTurnSettings,
+        threadSettingsUpdatedAtMs: Int64?,
+        context: TurnContextSelection,
         idempotencyKey: String
     ) async throws -> ConversationTurn {
         try withLock {
@@ -667,6 +849,9 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
                 conversationID: conversationID,
                 projectID: projectID,
                 text: text,
+                settings: settings,
+                threadSettingsUpdatedAtMs: threadSettingsUpdatedAtMs,
+                context: context,
                 idempotencyKey: idempotencyKey
             )
         }
@@ -676,8 +861,20 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         conversationID id: String,
         projectID: String,
         text: String,
+        settings: ConversationTurnSettings,
+        threadSettingsUpdatedAtMs: Int64?,
+        context: TurnContextSelection,
         idempotencyKey: String
     ) throws -> ConversationTurn {
+        turnStartRequests.append((
+            conversationID: id,
+            projectID: projectID,
+            text: text,
+            settings: settings,
+            threadSettingsUpdatedAtMs: threadSettingsUpdatedAtMs,
+            context: context,
+            idempotencyKey: idempotencyKey
+        ))
         guard summaries.contains(where: { $0.id == id && $0.projectId == projectID }) else {
             throw ConversationServiceError.emptyOutput("turn-start")
         }
@@ -751,6 +948,14 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
             reused: false
         )
         turnsByIdempotencyKey[ledgerKey] = turn
+        executionEventsByRun[runId, default: []].append(executionEvent(
+            id: "evt-\(runId)-started",
+            runID: runId,
+            sequence: 1,
+            kind: .runStarted,
+            message: "run started",
+            occurredAtMs: clock
+        ))
         return turn
     }
 
@@ -796,6 +1001,14 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
                     lastMessageAtMs: now
                 )
             }
+            executionEventsByRun[run.runId, default: []].append(executionEvent(
+                id: "evt-\(run.runId)-terminal",
+                runID: run.runId,
+                sequence: 2,
+                kind: finalRunState == .failed ? .verificationFailed : .snapshotWritten,
+                message: assistantText,
+                occurredAtMs: now
+            ))
 
             return TurnSupervisorTickResult(
                 schema: "opensks.turn-supervisor-tick.v1",
@@ -832,6 +1045,34 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
             claimed: nil,
             executed: nil
         )
+    }
+
+    func subscribeRunEvents(
+        runID: String,
+        sinceSequence: UInt64,
+        tailMs: UInt64?,
+        pollIntervalMs: UInt64?
+    ) async throws -> EngineRunStream {
+        withLock {
+            subscribeRunEventsCallCount += 1
+            subscribeRunEventsRequests.append((runID, sinceSequence, tailMs, pollIntervalMs))
+            let events = (executionEventsByRun[runID] ?? [])
+                .filter { $0.sequence > sinceSequence }
+            return EngineRunStream(
+                engineEvents: [],
+                executionEvents: events,
+                exitCode: 0,
+                stderr: "",
+                streamFailures: defaultSubscribeRunFailure.map { [$0] } ?? [],
+                rawLines: []
+            )
+        }
+    }
+
+    func setDefaultSubscribeRunFailure(_ failure: EngineStreamFailure?) {
+        withLock {
+            defaultSubscribeRunFailure = failure
+        }
     }
 
     func runs(conversationID id: String) async throws -> [ConversationRunRef] {
@@ -933,4 +1174,28 @@ private extension ConversationMessage {
             updatedAtMs: updatedAtMs
         )
     }
+}
+
+private func executionEvent(
+    id: String,
+    runID: String,
+    sequence: UInt64,
+    kind: ExecutionEventKind,
+    message: String,
+    occurredAtMs: Int64
+) -> ExecutionEventEnvelope {
+    ExecutionEventEnvelope(
+        schema: "opensks.execution-event-envelope.v1",
+        id: id,
+        runId: runID,
+        sequence: sequence,
+        occurredAt: "\(occurredAtMs / 1_000).000000000",
+        actor: "mock-conversation-service",
+        causationId: nil,
+        correlationId: nil,
+        kind: kind,
+        payload: .object(["message": .string(message)]),
+        sensitivity: .public,
+        evidenceRefs: ["mock:conversation-service"]
+    )
 }

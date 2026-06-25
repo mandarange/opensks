@@ -37,6 +37,7 @@ pub(crate) fn conversation_usage() -> &'static str {
         "       opensks conversation runs --workspace <path> --conversation <id>\n",
         "       opensks conversation timeline --workspace <path> --conversation <id> [--limit N]\n",
         "       opensks conversation timeline-append --workspace <path> --conversation <id> --kind <kind> [--state <state>] --payload '<json>'\n",
+        "       opensks conversation receipt-event-append --workspace <path> --conversation <id> --kind git_commit_receipt|git_push_receipt|git_push_failed --idempotency-key <key> --payload '<json>'\n",
         "       opensks conversation settings-get --workspace <path> --conversation <id>\n",
         "       opensks conversation settings-set --workspace <path> --conversation <id> --settings '<json>'\n"
     )

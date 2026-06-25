@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{Arc, Barrier};
@@ -9,13 +9,18 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+mod capability;
 mod conversation_args;
 mod conversation_timeline;
+mod file_command;
+mod graph_command;
+mod provider_registry;
 mod retention;
 use conversation_args::{
     parse_conversation_filter, parse_conversation_options, parse_conversation_role,
     parse_timeline_kind, require_conversation_field,
 };
+pub use provider_registry::{is_registry_subcommand, run_provider_registry_command};
 pub use retention::{gc_usage, release_usage, run_gc_command, run_release_command};
 
 const DEFAULT_WORKER_LEASE_TTL_SECONDS: u64 = 30;
@@ -155,8 +160,7 @@ pub fn run_daemon_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliE
         return Err(CliError::Usage(daemon_usage().to_string()));
     }
 
-    let mut input = String::new();
-    io::stdin().read_to_string(&mut input)?;
+    let input = read_stdin_to_string()?;
     let output = opensks_daemon::run_stdio(
         &input,
         &opensks_daemon::DaemonOptions {
@@ -171,171 +175,15 @@ pub fn daemon_usage() -> &'static str {
     "usage: opensks daemon --stdio --workspace <path>\n"
 }
 
-/// `opensks capability report [--json]` / `opensks capability matrix` — emit the
-/// machine-readable runtime capability report (recovery directive §18.4) so CI,
-/// the app, and the generated truth matrix all read one honest source. The report
-/// starts from the conservative contract baseline, then overlays current
-/// workspace/build/runtime evidence (provider setup, daemon protocol, ToolGateway,
-/// patch engine, and generated release fixture identity).
 pub fn run_capability_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
-    let subcommand = args.first().map(String::as_str).unwrap_or("report");
-    let report = runtime_capability_report(cwd, args);
-    match subcommand {
-        "report" => {
-            // JSON is the contract for §18.4; `--json` (if present) is implied.
-            let json = serde_json::to_string_pretty(&report).map_err(|error| {
-                CliError::Invalid(format!("serialize capability report: {error}"))
-            })?;
-            Ok(CliOutput {
-                stdout: format!("{json}\n"),
-            })
-        }
-        "matrix" => Ok(CliOutput {
-            stdout: report.render_truth_matrix_markdown(),
-        }),
-        other => Err(CliError::Usage(format!(
-            "unknown capability subcommand `{other}`\n\nusage: opensks capability report [--json]\n       opensks capability matrix\n"
-        ))),
-    }
+    capability::run_capability_command(args, cwd)
 }
 
 pub fn runtime_capability_report(
     cwd: &Path,
     args: &[String],
 ) -> opensks_contracts::RuntimeCapabilityReport {
-    let mut report = opensks_contracts::baseline_capability_report();
-    let workspace_marker = cwd
-        .canonicalize()
-        .unwrap_or_else(|_| cwd.to_path_buf())
-        .display()
-        .to_string();
-    let fixture = args
-        .windows(2)
-        .find_map(|pair| (pair[0] == "--runtime-fixture").then(|| pair[1].to_ascii_lowercase()))
-        .unwrap_or_else(|| "local".to_string());
-    report.generated_for = Some(format!(
-        "workspace:{workspace_marker};crate:{};fixture:{fixture}",
-        env!("CARGO_PKG_VERSION")
-    ));
-
-    if let Some(cap) = capability_mut(&mut report, "chat.answer") {
-        cap.maturity = opensks_contracts::CapabilityMaturity::Foundation;
-        cap.available = false;
-        cap.reason_code = if std::env::var_os("OPENROUTER_API_KEY").is_some() {
-            "openrouter_key_present_but_live_chat_answer_unprobed".to_string()
-        } else {
-            "model_credentials_missing_for_live_chat_answer".to_string()
-        };
-        cap.evidence_refs = vec![
-            "runtime:capability-registry".to_string(),
-            "adapter:openrouter-native-http".to_string(),
-        ];
-        cap.actions = vec!["connect_model".to_string()];
-    }
-
-    if let Some(cap) = capability_mut(&mut report, "agent.code_edit") {
-        cap.maturity = opensks_contracts::CapabilityMaturity::Foundation;
-        cap.available = false;
-        cap.reason_code =
-            "agentic_loop_toolgateway_patch_engine_need_live_provider_credentials".to_string();
-        cap.evidence_refs = vec![
-            "crate:opensks-adapter".to_string(),
-            "crate:opensks-patch-engine".to_string(),
-            "toolgateway:policy-enforced".to_string(),
-            "patch-engine:fsynced-transaction-journal".to_string(),
-            "patch-engine:transactional-delete-rename".to_string(),
-            "driver:openrouter-tools".to_string(),
-            "driver:provider-failure-terminal".to_string(),
-        ];
-        cap.actions = vec![
-            "connect_model".to_string(),
-            "review_patch_policy".to_string(),
-        ];
-    }
-
-    if let Some(cap) = capability_mut(&mut report, "model.dispatch") {
-        cap.maturity = opensks_contracts::CapabilityMaturity::Foundation;
-        cap.available = false;
-        cap.reason_code = if std::env::var_os("OPENROUTER_API_KEY").is_some() {
-            "openrouter_secret_present_runtime_probe_required".to_string()
-        } else {
-            "openrouter_secret_missing".to_string()
-        };
-        cap.evidence_refs = vec![
-            "provider:openrouter-native-reqwest".to_string(),
-            "registry:runtime-overlay".to_string(),
-        ];
-        cap.actions = vec!["connect_model".to_string()];
-    }
-
-    if let Some(cap) = capability_mut(&mut report, "agent.local_test_edit") {
-        if cfg!(feature = "simulation") {
-            cap.maturity = opensks_contracts::CapabilityMaturity::Live;
-            cap.available = true;
-            cap.reason_code = "explicit_local_test_adapter_real_file_io".to_string();
-            append_evidence(cap, "toolgateway:workspace-policy");
-            append_evidence(cap, "patch-engine:transactional-apply");
-            append_evidence(cap, "patch-engine:fsynced-transaction-journal");
-        } else {
-            cap.maturity = opensks_contracts::CapabilityMaturity::Unavailable;
-            cap.available = false;
-            cap.reason_code = "simulation_feature_disabled_for_release_build".to_string();
-            cap.evidence_refs = vec!["build:simulation-feature-disabled".to_string()];
-            cap.actions = vec!["enable_simulation_feature_for_developer_smoke".to_string()];
-        }
-    }
-
-    if let Some(cap) = capability_mut(&mut report, "stream.protocol") {
-        cap.maturity = opensks_contracts::CapabilityMaturity::Degraded;
-        cap.available = true;
-        cap.reason_code = "daemon_ndjson_explicit_terminal_protocol_v2_missing".to_string();
-        cap.evidence_refs = vec![
-            "daemon:request_completed".to_string(),
-            "swift:explicit-terminal-router".to_string(),
-            "test:request_response_ends_with_an_explicit_terminal_marker".to_string(),
-        ];
-    }
-
-    if let Some(cap) = capability_mut(&mut report, "pipeline.graph") {
-        cap.maturity = opensks_contracts::CapabilityMaturity::Foundation;
-        cap.available = false;
-        cap.reason_code = "timeline_read_model_no_live_event_stream_projection".to_string();
-        cap.evidence_refs = vec![
-            "swift:pipeline-projection-ingest".to_string(),
-            "conversation:timeline-read-model".to_string(),
-            "swift:conversation-timeline-read-model".to_string(),
-        ];
-    }
-
-    if let Some(cap) = capability_mut(&mut report, "git.push") {
-        cap.maturity = opensks_contracts::CapabilityMaturity::Degraded;
-        cap.available = true;
-        cap.reason_code = "protected_push_outbox_local_remote_proof_only".to_string();
-        cap.evidence_refs = vec![
-            "crate:opensks-git-service".to_string(),
-            "test:push_cli_full_handshake_pushes_to_local_bare_remote_only".to_string(),
-        ];
-        cap.actions = vec!["approve_push".to_string()];
-    }
-
-    report
-}
-
-fn capability_mut<'a>(
-    report: &'a mut opensks_contracts::RuntimeCapabilityReport,
-    id: &str,
-) -> Option<&'a mut opensks_contracts::RuntimeCapability> {
-    report.capabilities.iter_mut().find(|cap| cap.id == id)
-}
-
-fn append_evidence(cap: &mut opensks_contracts::RuntimeCapability, evidence: &str) {
-    if !cap
-        .evidence_refs
-        .iter()
-        .any(|existing| existing == evidence)
-    {
-        cap.evidence_refs.push(evidence.to_string());
-    }
+    capability::runtime_capability_report(cwd, args)
 }
 
 pub fn run_history_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
@@ -399,71 +247,11 @@ pub fn history_usage() -> &'static str {
 }
 
 pub fn run_graph_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
-    let subcommand = args
-        .first()
-        .ok_or_else(|| CliError::Usage(graph_usage().to_string()))?;
-    match subcommand.as_str() {
-        "templates" => {
-            let written = opensks_graph::write_default_templates(cwd)
-                .map_err(|error| CliError::Invalid(format!("write graph templates: {error}")))?;
-            Ok(CliOutput {
-                stdout: format!(
-                    "wrote default pipeline graph templates\ntemplates: {}\n",
-                    written.len()
-                ),
-            })
-        }
-        "compile" => {
-            let template_id = args
-                .get(1)
-                .map(String::as_str)
-                .unwrap_or("single-model-safe");
-            let graph = opensks_graph::default_templates()
-                .into_iter()
-                .find(|graph| graph.id == template_id)
-                .ok_or_else(|| {
-                    CliError::Usage(format!(
-                        "unknown graph template `{template_id}`\n\n{}",
-                        graph_usage()
-                    ))
-                })?;
-            let plan = opensks_graph::compile_graph(&graph);
-            let dir = cwd.join(".opensks").join("pipelines").join("compiled");
-            fs::create_dir_all(&dir)?;
-            let artifact = dir.join(format!("{template_id}.plan.json"));
-            write_text_atomic(
-                &artifact,
-                &(serde_json::to_string_pretty(&plan).map_err(|error| {
-                    CliError::Invalid(format!("serialize compiled graph plan: {error}"))
-                })? + "\n"),
-            )?;
-            let error_count = plan
-                .diagnostics
-                .iter()
-                .filter(|item| item.severity == opensks_contracts::DiagnosticSeverity::Error)
-                .count();
-            Ok(CliOutput {
-                stdout: format!(
-                    "compiled pipeline graph\nid: {}\nplan_hash: {}\ndiagnostics_errors: {}\nartifact: {}\n",
-                    plan.graph_id,
-                    plan.plan_hash,
-                    error_count,
-                    artifact.display()
-                ),
-            })
-        }
-        other => Err(CliError::Usage(format!(
-            "unknown graph subcommand `{other}`\n\n{}",
-            graph_usage()
-        ))),
-    }
+    graph_command::run_graph_command(args, cwd)
 }
 
 pub fn graph_usage() -> &'static str {
-    concat!(
-        "usage: opensks graph templates\n",
-        "       opensks graph compile [single-model-safe|balanced-multi-model|extreme-parallel|image-heavy-product-build|research-report]\n"
-    )
+    graph_command::graph_usage()
 }
 
 pub fn run_hooks_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
@@ -842,8 +630,10 @@ pub fn run_context_command(args: &[String], cwd: &Path) -> Result<CliOutput, Cli
         .map_err(|error| CliError::Invalid(format!("write context pack: {error}")))?;
     Ok(CliOutput {
         stdout: format!(
-            "built context pack\nrecords: {}\nestimated_tokens: {}\nartifact: {}\n",
+            "built context pack\nrecords: {}\ncodegraph_records: {}\ntest_targets: {}\nestimated_tokens: {}\nartifact: {}\n",
             pack.record_ids.len(),
+            pack.codegraph_record_ids.len(),
+            pack.selected_test_targets.len(),
             pack.estimated_tokens,
             path.display()
         ),
@@ -858,6 +648,63 @@ pub fn run_worktree_command(args: &[String], cwd: &Path) -> Result<CliOutput, Cl
     let subcommand = args
         .first()
         .ok_or_else(|| CliError::Usage(worktree_usage().to_string()))?;
+    if subcommand == "inventory" {
+        let run_id =
+            require_worktree_run_id(&args[1..], "usage: opensks worktree inventory <run-id>")?;
+        let receipt = opensks_git::inventory_isolations(cwd, run_id, now_unix_millis()?)
+            .map_err(|error| CliError::Invalid(format!("inventory isolations: {error}")))?;
+        let artifact_path = worktree_runtime_dir(cwd, run_id).join("inventory.json");
+        write_text_atomic(
+            &artifact_path,
+            &(serde_json::to_string_pretty(&receipt).map_err(|error| {
+                CliError::Invalid(format!("serialize worktree inventory: {error}"))
+            })? + "\n"),
+        )?;
+        return Ok(CliOutput {
+            stdout: format!(
+                "inventoried runtime isolations\nrun_id: {}\nstate: {}\nisolation_count: {}\nartifact: {}\n",
+                receipt.run_id,
+                receipt.state,
+                receipt.isolation_count,
+                artifact_path.display()
+            ),
+        });
+    }
+    if subcommand == "recover" {
+        let run_id =
+            require_worktree_run_id(&args[1..], "usage: opensks worktree recover <run-id>")?;
+        let generated_at_ms = now_unix_millis()?;
+        let inventory = opensks_git::inventory_isolations(cwd, run_id, generated_at_ms)
+            .map_err(|error| CliError::Invalid(format!("inventory isolations: {error}")))?;
+        let runtime_dir = worktree_runtime_dir(cwd, run_id);
+        let inventory_path = runtime_dir.join("inventory.json");
+        write_text_atomic(
+            &inventory_path,
+            &(serde_json::to_string_pretty(&inventory).map_err(|error| {
+                CliError::Invalid(format!("serialize worktree inventory: {error}"))
+            })? + "\n"),
+        )?;
+        let receipt = opensks_git::recover_isolations(cwd, run_id, generated_at_ms)
+            .map_err(|error| CliError::Invalid(format!("recover isolations: {error}")))?;
+        let recovery_path = runtime_dir.join("recovery.json");
+        write_text_atomic(
+            &recovery_path,
+            &(serde_json::to_string_pretty(&receipt).map_err(|error| {
+                CliError::Invalid(format!("serialize worktree recovery: {error}"))
+            })? + "\n"),
+        )?;
+        return Ok(CliOutput {
+            stdout: format!(
+                "recovered runtime isolations\nrun_id: {}\nstate: {}\ntarget_count: {}\nrecovered_count: {}\ninventory: {}\nartifact: {}\n",
+                receipt.run_id,
+                receipt.state,
+                receipt.target_count,
+                receipt.recovered_count,
+                inventory_path.display(),
+                recovery_path.display()
+            ),
+        });
+    }
     if subcommand == "isolate" {
         let label = require_freeform_cli(&args[1..], worktree_usage())?;
         let run_id = format!("run-{}", ClockStamp::now()?.compact_id());
@@ -913,8 +760,34 @@ pub fn run_worktree_command(args: &[String], cwd: &Path) -> Result<CliOutput, Cl
 pub fn worktree_usage() -> &'static str {
     concat!(
         "usage: opensks worktree create \"<worker label>\"\n",
-        "       opensks worktree isolate \"<worker label>\"\n"
+        "       opensks worktree isolate \"<worker label>\"\n",
+        "       opensks worktree inventory <run-id>\n",
+        "       opensks worktree recover <run-id>\n"
     )
+}
+
+fn require_worktree_run_id<'a>(args: &'a [String], usage: &str) -> Result<&'a str, CliError> {
+    let [run_id] = args else {
+        return Err(CliError::Usage(usage.to_string()));
+    };
+    let run_id = run_id.trim();
+    if run_id.is_empty()
+        || !run_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(CliError::Invalid(format!(
+            "invalid worktree run id `{run_id}`: use ASCII letters, numbers, '-' or '_'"
+        )));
+    }
+    Ok(run_id)
+}
+
+fn worktree_runtime_dir(cwd: &Path, run_id: &str) -> PathBuf {
+    cwd.join(".opensks")
+        .join("runtime")
+        .join("worktrees")
+        .join(run_id)
 }
 
 pub fn run_provider_route_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
@@ -969,7 +842,15 @@ pub fn provider_usage() -> &'static str {
         "       opensks provider probe\n",
         "       opensks provider usage\n",
         "       opensks provider adapter-check\n",
-        "       opensks provider route code|text|image\n"
+        "       opensks provider route code|text|image\n",
+        "       opensks provider registry-list --workspace <path>\n",
+        "       opensks provider registry-upsert --workspace <path> --connection <json> [--expected-revision <n>]\n",
+        "       opensks provider registry-delete --workspace <path> --provider <id> --expected-revision <n>\n",
+        "       opensks provider registry-set-enabled --workspace <path> --provider <id> --enabled true|false --expected-revision <n>\n",
+        "       opensks provider registry-probe --workspace <path> --provider <id>\n",
+        "       opensks provider registry-sync-models --workspace <path> --provider <id> --models <json-array>\n",
+        "       opensks provider registry-set-model-enabled --workspace <path> --model <id> --enabled true|false\n",
+        "       opensks provider registry-record-probe --workspace <path> --receipt <json>\n"
     )
 }
 
@@ -984,17 +865,21 @@ pub fn run_image_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliEr
     );
     let mut runtime = opensks_image::ImageRuntime::new();
     let asset = runtime
-        .generate_placeholder(
+        .generate_asset_file(
             &registry,
-            "cli-image-asset",
-            512,
-            512,
-            vec![opensks_contracts::VisualAnchor {
-                x: 32,
-                y: 32,
-                width: 128,
-                height: 128,
-            }],
+            cwd,
+            opensks_image::ImageAssetRequest {
+                id: "cli-image-asset",
+                width: 512,
+                height: 512,
+                anchors: vec![opensks_contracts::VisualAnchor {
+                    x: 32,
+                    y: 32,
+                    width: 128,
+                    height: 128,
+                }],
+                prompt: Some("cli image ledger fixture"),
+            },
         )
         .map_err(|error| CliError::Invalid(format!("image ledger: {error}")))?;
     let dir = cwd.join(".opensks").join("assets").join("candidates");
@@ -1007,9 +892,10 @@ pub fn run_image_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliEr
     )?;
     Ok(CliOutput {
         stdout: format!(
-            "wrote image asset ledger\nasset: {}\nmodel: {}\nartifact: {}\n",
+            "wrote image asset ledger\nasset: {}\nmodel: {}\nasset_file: {}\nartifact: {}\n",
             asset.id,
             asset.model_id,
+            cwd.join(&asset.path).display(),
             dir.join("image-ledger.json").display()
         ),
     })
@@ -1924,6 +1810,8 @@ fn run_scheduler_simulate_command(args: &[String], cwd: &Path) -> Result<CliOutp
             requested_workers: 100,
             project_max_workers: 32,
             provider_max_workers: 28,
+            per_provider_max_workers: 28,
+            per_model_max_workers: 28,
             worktree_max_workers: 30,
             verification_max_workers: 20,
             visible_lane_cap: 12,
@@ -1973,6 +1861,8 @@ fn run_scheduler_dispatch_command(args: &[String], cwd: &Path) -> Result<CliOutp
             requested_workers: 100,
             project_max_workers: 32,
             provider_max_workers: 28,
+            per_provider_max_workers: 28,
+            per_model_max_workers: 28,
             worktree_max_workers: 30,
             verification_max_workers: 20,
             visible_lane_cap: 12,
@@ -2566,6 +2456,7 @@ pub fn run_conversation_command(args: &[String], cwd: &Path) -> Result<CliOutput
                     "assistant_message_id": lease.assistant_message_id,
                     "lease_owner": lease.lease_owner,
                     "lease_expires_at_ms": lease.lease_expires_at_ms,
+                    "fencing_token": lease.fencing_token,
                     "has_model_routing_decision": lease.model_routing_decision_json.is_some(),
                 })
             });
@@ -2637,6 +2528,33 @@ pub fn run_conversation_command(args: &[String], cwd: &Path) -> Result<CliOutput
                 })?,
             )
         }
+        "receipt-event-append" => {
+            let conversation =
+                require_conversation_field(options.conversation.as_deref(), "--conversation")?;
+            let kind = parse_git_receipt_event_kind(options.kind.as_deref())?;
+            let raw_payload = require_conversation_field(options.payload.as_deref(), "--payload")?;
+            let payload =
+                serde_json::from_str::<serde_json::Value>(raw_payload).map_err(|error| {
+                    CliError::Invalid(format!("invalid receipt event payload json: {error}"))
+                })?;
+            let idempotency_key = require_conversation_field(
+                options.idempotency_key.as_deref(),
+                "--idempotency-key",
+            )?;
+            let item = append_git_receipt_event_to_conversation(
+                &repo,
+                &workspace,
+                &project_id,
+                conversation,
+                kind,
+                idempotency_key,
+                payload,
+                now_ms,
+            )?;
+            conversation_output(&serde_json::to_value(&item).map_err(|error| {
+                CliError::Invalid(format!("serialize receipt event timeline item: {error}"))
+            })?)
+        }
         "settings-get" => {
             let conversation =
                 require_conversation_field(options.conversation.as_deref(), "--conversation")?;
@@ -2686,6 +2604,104 @@ pub fn run_conversation_command(args: &[String], cwd: &Path) -> Result<CliOutput
             conversation_usage()
         ))),
     }
+}
+
+fn parse_git_receipt_event_kind(
+    value: Option<&str>,
+) -> Result<opensks_contracts::EventKind, CliError> {
+    let raw = require_conversation_field(value, "--kind")?;
+    let kind = opensks_contracts::EventKind::parse_label(raw);
+    match kind {
+        opensks_contracts::EventKind::GitCommitReceipt
+        | opensks_contracts::EventKind::GitPushReceipt
+        | opensks_contracts::EventKind::GitPushFailed => Ok(kind),
+        _ => Err(CliError::Usage(format!(
+            "receipt-event-append requires a git receipt event kind\n\n{}",
+            conversation_usage()
+        ))),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_git_receipt_event_to_conversation(
+    repo: &opensks_conversation::ConversationRepository,
+    workspace: &Path,
+    project_id: &str,
+    conversation_id: &str,
+    kind: opensks_contracts::EventKind,
+    idempotency_key: &str,
+    payload: serde_json::Value,
+    now_ms: u64,
+) -> Result<opensks_contracts::TimelineItem, CliError> {
+    let fragment = stable_id_fragment(idempotency_key);
+    let run_id = format!("git-receipt-run-{fragment}");
+    let turn_id = format!("git-receipt-turn-{fragment}");
+    let event_id = format!("git-receipt-event-{fragment}");
+    let anchor_message = format!("[OpenSKS git receipt anchor] {}", kind.as_str());
+    repo.ensure_external_execution_event_anchor(
+        project_id,
+        conversation_id,
+        &turn_id,
+        &run_id,
+        &anchor_message,
+        now_ms,
+    )
+    .map_err(|error| CliError::Invalid(format!("create receipt event anchor: {error}")))?;
+
+    let event = opensks_contracts::ExecutionEventEnvelope {
+        schema: opensks_contracts::EXECUTION_EVENT_ENVELOPE_SCHEMA.to_string(),
+        id: event_id.clone(),
+        run_id: run_id.clone(),
+        sequence: 0,
+        occurred_at: event_time_from_ms(now_ms),
+        actor: "opensks-git-studio".to_string(),
+        causation_id: Some(idempotency_key.to_string()),
+        correlation_id: Some(conversation_id.to_string()),
+        kind,
+        payload,
+        sensitivity: opensks_contracts::Sensitivity::Public,
+        evidence_refs: vec![
+            "git:receipt-event".to_string(),
+            "conversation:receipt-event-append".to_string(),
+        ],
+    };
+    let mut store = opensks_event_store::EventStore::open_workspace(workspace)
+        .map_err(|error| CliError::Invalid(format!("open event journal: {error}")))?;
+    let committed = match store.append_event(event) {
+        Ok(committed) => committed,
+        Err(error) => {
+            let replayed = store
+                .replay(&run_id)
+                .map_err(|replay_error| {
+                    CliError::Invalid(format!(
+                        "append receipt event: {error}; replay existing event: {replay_error}"
+                    ))
+                })?
+                .into_iter()
+                .find(|event| event.id == event_id);
+            replayed.ok_or_else(|| CliError::Invalid(format!("append receipt event: {error}")))?
+        }
+    };
+    repo.project_execution_events_into_timeline(&run_id, std::slice::from_ref(&committed), now_ms)
+        .map_err(|error| CliError::Invalid(format!("project receipt event timeline: {error}")))?;
+    let timeline_id = format!("timeline-event-{event_id}");
+    repo.timeline_items_for_conversation(conversation_id, usize::MAX)
+        .map_err(|error| CliError::Invalid(error.to_string()))?
+        .into_iter()
+        .find(|item| item.id == timeline_id)
+        .ok_or_else(|| {
+            CliError::Invalid(format!("projected receipt event {timeline_id} not found"))
+        })
+}
+
+fn stable_id_fragment(value: &str) -> String {
+    sha256_v1(value)
+        .rsplit(':')
+        .next()
+        .unwrap_or("unknown")
+        .chars()
+        .take(32)
+        .collect()
 }
 
 /// Persist a user message and an assistant placeholder, start one deterministic
@@ -2791,6 +2807,8 @@ fn run_conversation_turn_start(
         turn_id: turn_id.clone(),
         run_id: run_id.clone(),
         stream_id: stream_id.clone(),
+        patch_lease: None,
+        cancellation_token: None,
         now_ms,
         prompt: text.to_string(),
     };
@@ -2800,10 +2818,13 @@ fn run_conversation_turn_start(
     let journal_sink = DurableAgentEventSink::open(workspace)?;
     journal_sink.emit_run_started(&request)?;
     let model = model_routing_decision
-        .selected_model_id
-        .clone()
+        .status
+        .has_resolved_model()
+        .then(|| model_routing_decision.selected_model_id.clone())
+        .flatten()
         .map(opensks_adapter::OpenRouterAdapter::new);
     let explicit_local_test = opensks_adapter::LocalTestInstruction::from_prompt(text).is_some();
+    let agentic_config = opensks_adapter::AgenticConfig::for_turn_settings(&effective_settings);
     let outcome = if let Some(model) = model.filter(opensks_adapter::OpenRouterAdapter::is_configured) {
         let completer = opensks_adapter::NativeHttpChatCompleter::new(model.clone());
         let mut driver = opensks_adapter::OpenRouterToolDriver::new(
@@ -2816,11 +2837,29 @@ fn run_conversation_turn_start(
         opensks_adapter::run_agentic_loop(
             &request,
             &mut driver,
-            &opensks_adapter::AgenticConfig::default(),
+            &agentic_config,
             &journal_sink,
         )
     } else if explicit_local_test {
-        run_explicit_local_test_turn(&request, &journal_sink)
+        if matches!(
+            effective_settings.execution_mode,
+            opensks_contracts::ExecutionMode::ReadOnly
+        ) {
+            opensks_adapter::AgentEventSink::emit(
+                &journal_sink,
+                read_only_execution_mode_agent_event(&request),
+            );
+            Ok(opensks_adapter::AgentRunOutcome {
+                assistant_text:
+                    "Read-only execution mode blocked workspace writes for this turn."
+                        .to_string(),
+                patches: vec![],
+                apply_results: vec![],
+                final_state: opensks_contracts::projection::RunProjectionState::Failed,
+            })
+        } else {
+            run_explicit_local_test_turn(&request, &journal_sink)
+        }
     } else {
         opensks_adapter::AgentEventSink::emit(
             &journal_sink,
@@ -3113,6 +3152,7 @@ fn execution_kind_for_agent_event(
         AgentEventKind::Error => opensks_contracts::EventKind::VerificationFailed,
         AgentEventKind::ApprovalRequested => opensks_contracts::EventKind::ApprovalRequested,
         AgentEventKind::ApprovalResolved => opensks_contracts::EventKind::ApprovalApproved,
+        AgentEventKind::ImageArtifactCreated => opensks_contracts::EventKind::ImageArtifactCreated,
         AgentEventKind::PlanUpdated
         | AgentEventKind::AssistantTextDelta
         | AgentEventKind::ToolCallStarted
@@ -3121,7 +3161,6 @@ fn execution_kind_for_agent_event(
         | AgentEventKind::VerificationStarted
         | AgentEventKind::WorkerSpawned
         | AgentEventKind::WorkerProgress
-        | AgentEventKind::ImageArtifactCreated
         | AgentEventKind::Warning => opensks_contracts::EventKind::WorkItemRunning,
     }
 }
@@ -3147,6 +3186,30 @@ fn setup_required_agent_event(
         }),
         sensitivity: opensks_contracts::Sensitivity::Public,
         evidence_refs: vec!["provider:no-code-capable-model".to_string()],
+    }
+}
+
+fn read_only_execution_mode_agent_event(
+    request: &opensks_adapter::AgentRunRequest,
+) -> opensks_contracts::AgentEventEnvelope {
+    opensks_contracts::AgentEventEnvelope {
+        schema: opensks_contracts::AGENT_EVENT_ENVELOPE_SCHEMA.to_string(),
+        stream_id: request.stream_id.clone(),
+        project_id: request.project_id.clone(),
+        conversation_id: request.conversation_id.clone(),
+        turn_id: request.turn_id.clone(),
+        run_id: request.run_id.clone(),
+        worker_id: Some("execution-mode-policy".to_string()),
+        node_id: None,
+        sequence: 0,
+        occurred_at_ms: request.now_ms,
+        kind: opensks_contracts::AgentEventKind::Error,
+        payload: serde_json::json!({
+            "code": "read_only_execution_mode",
+            "message": "Read-only execution mode blocked workspace writes for this turn."
+        }),
+        sensitivity: opensks_contracts::Sensitivity::Public,
+        evidence_refs: vec!["settings:execution_mode:read_only".to_string()],
     }
 }
 
@@ -3699,120 +3762,12 @@ fn vault_output(value: &serde_json::Value) -> Result<CliOutput, CliError> {
     Ok(CliOutput { stdout })
 }
 
-/// Options for the `file` verb. `path` is workspace-relative; `workspace`
-/// defaults to the process `cwd`.
-#[derive(Debug, Default)]
-struct FileCommandOptions {
-    workspace: Option<PathBuf>,
-    path: Option<String>,
-    expected_hash: Option<String>,
-    expected_mtime: Option<u64>,
-    stdin: bool,
-}
-
 /// `opensks file open|save|stat` — the sanctioned editor read/write path over a
 /// canonical workspace (PR-032). Every success serializes a typed JSON document;
 /// every guard failure emits a content-free `opensks.file-error.v1` JSON and
 /// returns `CliError::Invalid` so the process exits nonzero.
 pub fn run_file_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
-    // The save subcommand reads its new content from stdin; the read is injected
-    // here so the command logic stays testable without a live stdin.
-    run_file_command_with_input(args, cwd, read_stdin_to_string)
-}
-
-/// Inner implementation of [`run_file_command`] with the stdin read injected as
-/// `read_input`, invoked only on the `save` path after its flags validate.
-fn run_file_command_with_input<F>(
-    args: &[String],
-    cwd: &Path,
-    read_input: F,
-) -> Result<CliOutput, CliError>
-where
-    F: FnOnce() -> Result<String, CliError>,
-{
-    let Some(subcommand) = args.first() else {
-        return Ok(CliOutput {
-            stdout: file_usage().to_string(),
-        });
-    };
-    if subcommand == "--help" || subcommand == "-h" || subcommand == "help" {
-        return Ok(CliOutput {
-            stdout: file_usage().to_string(),
-        });
-    }
-
-    let options = parse_file_options(&args[1..])?;
-    let workspace = options
-        .workspace
-        .clone()
-        .unwrap_or_else(|| cwd.to_path_buf());
-    let relative = require_file_field(options.path.as_deref(), "--path")?;
-
-    // Open the service over the canonical workspace. A bad workspace root is a
-    // configuration error, not a per-file guard verdict, so it is reported as a
-    // usage/invalid error rather than a `file-error.v1` payload.
-    let service = match opensks_file_service::WorkspaceFileService::open(&workspace) {
-        Ok(service) => service,
-        Err(error) => {
-            return Err(CliError::Invalid(format!(
-                "open workspace `{}`: {}",
-                workspace.display(),
-                error.reason_code()
-            )));
-        }
-    };
-
-    match subcommand.as_str() {
-        "open" => match service.open_text(relative) {
-            Ok(document) => file_output(&file_document_json(&document)),
-            Err(error) => Err(file_error(&error)),
-        },
-        "stat" => match service.stat(relative) {
-            Ok(entry) => file_output(&file_entry_json(&entry)),
-            Err(error) => Err(file_error(&error)),
-        },
-        "save" => {
-            let expected_hash =
-                require_file_field(options.expected_hash.as_deref(), "--expected-hash")?;
-            if !options.stdin {
-                return Err(CliError::Usage(format!(
-                    "file save requires `--stdin` (new content is read from stdin)\n\n{}",
-                    file_usage()
-                )));
-            }
-            let content = read_input()?;
-            let mut request =
-                opensks_contracts::SaveTextRequest::new(relative, content, expected_hash);
-            request.expected_mtime_ms = options.expected_mtime;
-            match service.save_text(&request) {
-                Ok(result) => file_output(&file_save_json(&result)),
-                Err(error) => Err(file_error(&error)),
-            }
-        }
-        "diff" => {
-            if !options.stdin {
-                return Err(CliError::Usage(format!(
-                    "file diff requires `--stdin` (the editor buffer is read from stdin)\n\n{}",
-                    file_usage()
-                )));
-            }
-            // Read the on-disk file through the hardened service so the diff
-            // honors the same guards (escape/secret/binary) as open/save.
-            let document = match service.open_text(relative) {
-                Ok(document) => document,
-                Err(error) => return Err(file_error(&error)),
-            };
-            let buffer = read_input()?;
-            let diff = compute_text_diff(relative, &document.content, &buffer);
-            let value = serde_json::to_value(&diff)
-                .map_err(|error| CliError::Invalid(format!("serialize text diff: {error}")))?;
-            file_output(&value)
-        }
-        other => Err(CliError::Usage(format!(
-            "unknown file subcommand `{other}`\n\n{}",
-            file_usage()
-        ))),
-    }
+    file_command::run_file_command(args, cwd)
 }
 
 pub fn file_usage() -> &'static str {
@@ -3824,316 +3779,12 @@ pub fn file_usage() -> &'static str {
     )
 }
 
-/// Line-level diff of the editor's `buffer` against the `on_disk` content.
-///
-/// A simple longest-common-subsequence (LCS) walk over lines groups runs of
-/// `-`/`+` lines into [`opensks_contracts::DiffHunk`]s. Pure deletions are
-/// `Removed`, pure insertions are `Added`, and any block touching both is
-/// `Changed`. The result never carries unchanged lines, only the changed ones.
-fn compute_text_diff(path: &str, on_disk: &str, buffer: &str) -> opensks_contracts::TextDiff {
-    let old_lines: Vec<&str> = split_diff_lines(on_disk);
-    let new_lines: Vec<&str> = split_diff_lines(buffer);
-    let ops = lcs_diff(&old_lines, &new_lines);
-    let hunks = group_diff_hunks(&ops, &old_lines, &new_lines);
-    opensks_contracts::TextDiff::new(path, hunks)
-}
-
-/// Split text into lines for diffing. A single trailing newline is treated as a
-/// terminator (not a spurious trailing empty line); empty input is zero lines.
-/// Interior blank lines are preserved.
-fn split_diff_lines(text: &str) -> Vec<&str> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let mut lines: Vec<&str> = text.split('\n').collect();
-    // `"a\n".split('\n')` yields ["a", ""]; drop that one terminator artifact.
-    if text.ends_with('\n') {
-        lines.pop();
-    }
-    lines
-}
-
-/// A single line-level edit operation produced by the LCS walk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DiffOp {
-    /// Line present in both files (advances both cursors).
-    Equal,
-    /// Line only on disk (advances the old cursor).
-    Remove,
-    /// Line only in the buffer (advances the new cursor).
-    Add,
-}
-
-/// Classic dynamic-programming LCS over lines, emitting an ordered op list.
-fn lcs_diff(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffOp> {
-    let rows = old_lines.len();
-    let cols = new_lines.len();
-    // table[i][j] = LCS length of old_lines[i..] and new_lines[j..].
-    let mut table = vec![vec![0usize; cols + 1]; rows + 1];
-    for i in (0..rows).rev() {
-        for j in (0..cols).rev() {
-            table[i][j] = if old_lines[i] == new_lines[j] {
-                table[i + 1][j + 1] + 1
-            } else {
-                table[i + 1][j].max(table[i][j + 1])
-            };
-        }
-    }
-    let mut ops = Vec::new();
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < rows && j < cols {
-        if old_lines[i] == new_lines[j] {
-            ops.push(DiffOp::Equal);
-            i += 1;
-            j += 1;
-        } else if table[i + 1][j] >= table[i][j + 1] {
-            ops.push(DiffOp::Remove);
-            i += 1;
-        } else {
-            ops.push(DiffOp::Add);
-            j += 1;
-        }
-    }
-    while i < rows {
-        ops.push(DiffOp::Remove);
-        i += 1;
-    }
-    while j < cols {
-        ops.push(DiffOp::Add);
-        j += 1;
-    }
-    ops
-}
-
-/// Collapse the flat op list into contiguous hunks of change, tracking 1-based
-/// line numbers in both the old and new files.
-fn group_diff_hunks(
-    ops: &[DiffOp],
-    old_lines: &[&str],
-    new_lines: &[&str],
-) -> Vec<opensks_contracts::DiffHunk> {
-    let mut hunks = Vec::new();
-    let mut old_index = 0usize; // 0-based cursor into old_lines
-    let mut new_index = 0usize; // 0-based cursor into new_lines
-    let mut pending: Vec<DiffOp> = Vec::new();
-    let mut hunk_old_start = 0usize;
-    let mut hunk_new_start = 0usize;
-
-    let flush = |pending: &mut Vec<DiffOp>,
-                 hunk_old_start: usize,
-                 hunk_new_start: usize,
-                 old_lines: &[&str],
-                 new_lines: &[&str],
-                 old_cursor: usize,
-                 new_cursor: usize,
-                 hunks: &mut Vec<opensks_contracts::DiffHunk>| {
-        if pending.is_empty() {
-            return;
-        }
-        let removed = pending.iter().filter(|op| **op == DiffOp::Remove).count();
-        let added = pending.iter().filter(|op| **op == DiffOp::Add).count();
-        let kind = match (removed > 0, added > 0) {
-            (true, true) => opensks_contracts::DiffHunkKind::Changed,
-            (true, false) => opensks_contracts::DiffHunkKind::Removed,
-            (false, true) => opensks_contracts::DiffHunkKind::Added,
-            (false, false) => return,
-        };
-        let mut lines = Vec::with_capacity(removed + added);
-        for line in &old_lines[hunk_old_start..old_cursor] {
-            lines.push(format!("-{line}"));
-        }
-        for line in &new_lines[hunk_new_start..new_cursor] {
-            lines.push(format!("+{line}"));
-        }
-        hunks.push(opensks_contracts::DiffHunk {
-            kind,
-            old_start: hunk_old_start + 1,
-            old_lines: removed,
-            new_start: hunk_new_start + 1,
-            new_lines: added,
-            lines,
-        });
-        pending.clear();
-    };
-
-    for op in ops {
-        match op {
-            DiffOp::Equal => {
-                flush(
-                    &mut pending,
-                    hunk_old_start,
-                    hunk_new_start,
-                    old_lines,
-                    new_lines,
-                    old_index,
-                    new_index,
-                    &mut hunks,
-                );
-                old_index += 1;
-                new_index += 1;
-            }
-            DiffOp::Remove => {
-                if pending.is_empty() {
-                    hunk_old_start = old_index;
-                    hunk_new_start = new_index;
-                }
-                pending.push(DiffOp::Remove);
-                old_index += 1;
-            }
-            DiffOp::Add => {
-                if pending.is_empty() {
-                    hunk_old_start = old_index;
-                    hunk_new_start = new_index;
-                }
-                pending.push(DiffOp::Add);
-                new_index += 1;
-            }
-        }
-    }
-    flush(
-        &mut pending,
-        hunk_old_start,
-        hunk_new_start,
-        old_lines,
-        new_lines,
-        old_index,
-        new_index,
-        &mut hunks,
-    );
-    hunks
-}
-
-fn parse_file_options(args: &[String]) -> Result<FileCommandOptions, CliError> {
-    let mut options = FileCommandOptions::default();
-    let mut idx = 0;
-    while idx < args.len() {
-        let flag = args[idx].as_str();
-        match flag {
-            "--workspace" => {
-                options.workspace = Some(PathBuf::from(file_flag_value(args, idx, flag)?));
-                idx += 2;
-            }
-            "--path" => {
-                options.path = Some(file_flag_value(args, idx, flag)?.to_string());
-                idx += 2;
-            }
-            "--expected-hash" => {
-                options.expected_hash = Some(file_flag_value(args, idx, flag)?.to_string());
-                idx += 2;
-            }
-            "--expected-mtime" => {
-                options.expected_mtime = Some(file_parse_u64(args, idx, flag)?);
-                idx += 2;
-            }
-            "--stdin" => {
-                options.stdin = true;
-                idx += 1;
-            }
-            other => {
-                return Err(CliError::Usage(format!(
-                    "unknown file argument `{other}`\n\n{}",
-                    file_usage()
-                )));
-            }
-        }
-    }
-    Ok(options)
-}
-
-fn file_flag_value<'a>(args: &'a [String], idx: usize, flag: &str) -> Result<&'a str, CliError> {
-    args.get(idx + 1).map(String::as_str).ok_or_else(|| {
-        CliError::Usage(format!(
-            "file flag `{flag}` requires a value\n\n{}",
-            file_usage()
-        ))
-    })
-}
-
-fn file_parse_u64(args: &[String], idx: usize, flag: &str) -> Result<u64, CliError> {
-    file_flag_value(args, idx, flag)?
-        .parse::<u64>()
-        .map_err(|_| {
-            CliError::Usage(format!(
-                "file flag `{flag}` expects a non-negative integer\n\n{}",
-                file_usage()
-            ))
-        })
-}
-
-fn require_file_field<'a>(value: Option<&'a str>, flag: &str) -> Result<&'a str, CliError> {
-    value.ok_or_else(|| {
-        CliError::Usage(format!(
-            "file command requires `{flag}`\n\n{}",
-            file_usage()
-        ))
-    })
-}
-
-/// Read the full save payload from stdin. The bytes are the new file content and
-/// are never echoed into an error message.
+/// Read a stdin JSON payload without echoing bytes into errors.
 fn read_stdin_to_string() -> Result<String, CliError> {
     let mut input = String::new();
-    io::stdin().read_to_string(&mut input)?;
+    let mut stdin = io::stdin();
+    io::Read::read_to_string(&mut stdin, &mut input)?;
     Ok(input)
-}
-
-/// Serialize an opened document to the `opensks.text-document.v1` wire shape with
-/// the contract's explicit field names (`encoding:"utf-8"`, string `line_ending`,
-/// `is_binary:false`).
-fn file_document_json(document: &opensks_contracts::TextDocument) -> serde_json::Value {
-    serde_json::json!({
-        "schema": document.schema,
-        "workspace_relative_path": document.workspace_relative_path,
-        "content": document.content,
-        "content_hash": document.content_hash,
-        "encoding": "utf-8",
-        "line_ending": document.line_ending.as_str(),
-        "byte_size": document.byte_size,
-        "is_secret_restricted": document.is_secret_restricted,
-        "is_binary": false,
-        "on_disk_modification_ms": document.on_disk_modification_ms,
-        "permissions_mode": document.permissions_mode,
-    })
-}
-
-/// Serialize a successful save to the `opensks.save-result.v1` wire shape.
-fn file_save_json(result: &opensks_contracts::SaveTextResult) -> serde_json::Value {
-    serde_json::json!({
-        "schema": "opensks.save-result.v1",
-        "workspace_relative_path": result.workspace_relative_path,
-        "new_hash": result.new_hash,
-        "new_mtime_ms": result.new_mtime_ms,
-    })
-}
-
-/// Serialize a stat to the `opensks.workspace-entry.v1` wire shape.
-fn file_entry_json(entry: &opensks_contracts::WorkspaceEntry) -> serde_json::Value {
-    serde_json::json!({
-        "schema": entry.schema,
-        "workspace_relative_path": entry.workspace_relative_path,
-        "byte_size": entry.byte_size,
-        "modification_ms": entry.modification_ms,
-        "permissions_mode": entry.permissions_mode,
-        "content_hash": entry.content_hash,
-        "is_secret_restricted": entry.is_secret_restricted,
-    })
-}
-
-/// Map a `FileServiceError` to the `opensks.file-error.v1` envelope and wrap it
-/// in `CliError::Invalid` so the binary prints the JSON and exits nonzero. The
-/// message is derived solely from the stable reason code and the
-/// workspace-relative path — never from file contents.
-fn file_error(error: &opensks_contracts::FileServiceError) -> CliError {
-    let body = serde_json::json!({
-        "schema": "opensks.file-error.v1",
-        "error": {
-            "code": error.reason_code(),
-            "message": error.to_string(),
-        },
-    });
-    let payload = serde_json::to_string(&body)
-        .unwrap_or_else(|_| "{\"schema\":\"opensks.file-error.v1\"}".to_string());
-    CliError::Invalid(payload)
 }
 
 fn file_output(value: &serde_json::Value) -> Result<CliOutput, CliError> {
@@ -5108,6 +4759,9 @@ mod capability_tests;
 mod conversation_supervisor_tests;
 
 #[cfg(test)]
+mod conversation_turn_tests;
+
+#[cfg(test)]
 mod security_tests;
 
 #[cfg(test)]
@@ -5116,6 +4770,14 @@ mod tests {
 
     type CliCommandFn = fn(&[String], &Path) -> Result<CliOutput, CliError>;
     type UsageCase = (CliCommandFn, &'static str, &'static str);
+
+    #[test]
+    fn image_agent_events_keep_image_artifact_execution_kind() {
+        assert_eq!(
+            execution_kind_for_agent_event(opensks_contracts::AgentEventKind::ImageArtifactCreated),
+            opensks_contracts::EventKind::ImageArtifactCreated
+        );
+    }
 
     #[test]
     fn daemon_stdio_detection_requires_daemon_command_and_stdio_flag() {
@@ -5219,6 +4881,53 @@ mod tests {
                 .join("single-model-safe.plan.json")
                 .exists()
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn graph_plan_writes_objective_graph_plan_and_receipt() {
+        let root = temp_workspace("opensks-cli-graph-plan");
+        let output = run_graph_command(
+            &[
+                "plan".to_string(),
+                "--max-parallelism".to_string(),
+                "6".to_string(),
+                "--roles".to_string(),
+                "4".to_string(),
+                "--image".to_string(),
+                "Implement provider UI with image proof".to_string(),
+            ],
+            &root,
+        )
+        .expect("plan");
+        assert!(output.stdout.contains("planned objective pipeline graph"));
+        assert!(output.stdout.contains("diagnostics_errors: 0"));
+        let objective_dir = root.join(".opensks").join("pipelines").join("objective");
+        let compiled_dir = root.join(".opensks").join("pipelines").join("compiled");
+        let receipts = fs::read_dir(&objective_dir)
+            .expect("objective dir")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".objective-plan-receipt.json")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(receipts.len(), 1);
+        let receipt: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(receipts[0].path()).expect("receipt"))
+                .expect("decode receipt");
+        assert_eq!(receipt["schema"], "opensks.objective-plan-receipt.v1");
+        assert_eq!(receipt["source"], "objective_planner");
+        assert_eq!(receipt["repair_action_count"], 0);
+        assert!(
+            receipt["evidence_refs"]
+                .as_array()
+                .expect("evidence refs")
+                .contains(&serde_json::json!("cli:graph-plan"))
+        );
+        assert!(compiled_dir.exists());
         fs::remove_dir_all(root).ok();
     }
 
@@ -5396,12 +5105,20 @@ mod tests {
     #[test]
     fn context_pack_writes_generated_artifact() {
         let root = temp_workspace("opensks-cli-context");
+        fs::create_dir_all(root.join("src")).expect("src dir");
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn context_symbol() {}\n#[test]\nfn context_symbol_test() {}\n",
+        )
+        .expect("source");
         run_triwiki_command(&["seed".to_string()], &root).expect("seed");
 
         let output =
             run_context_command(&["pack".to_string(), "120".to_string()], &root).expect("pack");
         assert!(output.stdout.contains("built context pack"));
         assert!(output.stdout.contains("records:"));
+        assert!(output.stdout.contains("codegraph_records:"));
+        assert!(output.stdout.contains("test_targets:"));
         let artifact = root
             .join(".opensks")
             .join("wiki")
@@ -5412,6 +5129,8 @@ mod tests {
         let pack = fs::read_to_string(artifact).expect("context pack");
         assert!(pack.contains("\"schema\": \"opensks.context-pack.v1\""));
         assert!(pack.contains("\"id\": \"cli-context-pack\""));
+        assert!(pack.contains("\"codegraph_record_ids\""));
+        assert!(pack.contains("\"freshness\""));
         fs::remove_dir_all(root).ok();
     }
 
@@ -5767,6 +5486,24 @@ mod tests {
             missing_create.to_string(),
             "usage: opensks worktree create \"<worker label>\""
         );
+
+        let missing_inventory =
+            run_worktree_command(&["inventory".to_string()], Path::new(".")).expect_err("run id");
+        assert_eq!(
+            missing_inventory.to_string(),
+            "usage: opensks worktree inventory <run-id>"
+        );
+
+        let invalid_inventory = run_worktree_command(
+            &["inventory".to_string(), "../escape".to_string()],
+            Path::new("."),
+        )
+        .expect_err("invalid run id");
+        assert!(
+            invalid_inventory
+                .to_string()
+                .contains("invalid worktree run id")
+        );
     }
 
     #[test]
@@ -5856,6 +5593,115 @@ mod tests {
     }
 
     #[test]
+    fn worktree_inventory_writes_redacted_runtime_receipt() {
+        let root = temp_workspace("opensks-cli-worktree-inventory");
+        fs::write(root.join("README.md"), "fixture\n").expect("fixture");
+        opensks_git::create_isolation(&root, "run-cli-inventory", "worker-one").expect("isolation");
+
+        let output = run_worktree_command(
+            &["inventory".to_string(), "run-cli-inventory".to_string()],
+            &root,
+        )
+        .expect("worktree inventory");
+        assert!(output.stdout.contains("inventoried runtime isolations"));
+        assert!(output.stdout.contains("run_id: run-cli-inventory"));
+        assert!(output.stdout.contains("isolation_count: 1"));
+
+        let artifact_path = root
+            .join(".opensks")
+            .join("runtime")
+            .join("worktrees")
+            .join("run-cli-inventory")
+            .join("inventory.json");
+        let artifact = fs::read_to_string(&artifact_path).expect("inventory artifact");
+        assert!(artifact.ends_with('\n'));
+        assert!(!artifact.contains(root.to_string_lossy().as_ref()));
+
+        let receipt: serde_json::Value = serde_json::from_str(&artifact).expect("inventory json");
+        assert_eq!(
+            receipt["schema"],
+            opensks_contracts::WORKTREE_ISOLATION_INVENTORY_RECEIPT_SCHEMA
+        );
+        assert_eq!(receipt["run_id"], "run-cli-inventory");
+        assert_eq!(receipt["state"], "present");
+        assert_eq!(receipt["isolation_count"], 1);
+        assert_eq!(receipt["path_redacted"], true);
+        assert_eq!(receipt["content_redacted"], true);
+        assert_eq!(receipt["isolations"][0]["worker_id"], "worker-one");
+        assert_eq!(receipt["isolations"][0]["path_redacted"], true);
+        assert_eq!(receipt["isolations"][0]["content_redacted"], true);
+        assert_eq!(
+            receipt["isolations"][0]["artifact_ref"],
+            "artifact://.opensks/runtime/worktrees/run-cli-inventory/worker-one"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn worktree_recover_writes_receipts_and_removes_snapshot_isolation() {
+        let root = temp_workspace("opensks-cli-worktree-recover");
+        fs::write(root.join("README.md"), "fixture\n").expect("fixture");
+        let report = opensks_git::create_isolation(&root, "run-cli-recover", "worker-one")
+            .expect("isolation");
+        let isolated_workspace = PathBuf::from(&report.worktree_path);
+        assert!(isolated_workspace.exists());
+
+        let output = run_worktree_command(
+            &["recover".to_string(), "run-cli-recover".to_string()],
+            &root,
+        )
+        .expect("worktree recover");
+        assert!(output.stdout.contains("recovered runtime isolations"));
+        assert!(output.stdout.contains("run_id: run-cli-recover"));
+        assert!(output.stdout.contains("target_count: 1"));
+        assert!(output.stdout.contains("recovered_count: 1"));
+        assert!(!isolated_workspace.exists());
+
+        let runtime_dir = root
+            .join(".opensks")
+            .join("runtime")
+            .join("worktrees")
+            .join("run-cli-recover");
+        let inventory_text =
+            fs::read_to_string(runtime_dir.join("inventory.json")).expect("inventory artifact");
+        let recovery_text =
+            fs::read_to_string(runtime_dir.join("recovery.json")).expect("recovery artifact");
+        assert!(inventory_text.ends_with('\n'));
+        assert!(recovery_text.ends_with('\n'));
+        assert!(!inventory_text.contains(root.to_string_lossy().as_ref()));
+        assert!(!recovery_text.contains(root.to_string_lossy().as_ref()));
+
+        let inventory: serde_json::Value =
+            serde_json::from_str(&inventory_text).expect("inventory json");
+        assert_eq!(inventory["state"], "present");
+        assert_eq!(inventory["isolation_count"], 1);
+
+        let recovery: serde_json::Value =
+            serde_json::from_str(&recovery_text).expect("recovery json");
+        assert_eq!(
+            recovery["schema"],
+            opensks_contracts::WORKTREE_ISOLATION_RECOVERY_RECEIPT_SCHEMA
+        );
+        assert_eq!(recovery["run_id"], "run-cli-recover");
+        assert_eq!(recovery["state"], "recovered");
+        assert_eq!(recovery["target_count"], 1);
+        assert_eq!(recovery["recovered_count"], 1);
+        assert_eq!(recovery["path_redacted"], true);
+        assert_eq!(recovery["content_redacted"], true);
+        assert_eq!(recovery["targets"][0]["worker_id"], "worker-one");
+        assert_eq!(recovery["targets"][0]["removed"], true);
+        assert_eq!(
+            recovery["inventory_ref"],
+            "artifact://.opensks/runtime/worktrees/run-cli-recover/inventory.json"
+        );
+        assert_eq!(
+            recovery["recovery_ref"],
+            "artifact://.opensks/runtime/worktrees/run-cli-recover/recovery.json"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn provider_route_writes_typed_routing_decision() {
         let root = temp_workspace("opensks-cli-provider-route");
         let default_output = run_provider_route_command(&[], &root).expect("provider route");
@@ -5876,7 +5722,7 @@ mod tests {
             .expect("provider image route");
         assert!(output.stdout.contains("routed provider capability"));
         assert!(output.stdout.contains("capability: image"));
-        assert!(output.stdout.contains("status: Routed"));
+        assert!(output.stdout.contains("status: Resolved"));
         assert!(output.stdout.contains("selected_model: fake-image"));
 
         let artifact_path = root
@@ -5885,7 +5731,7 @@ mod tests {
             .join("routing-decision.json");
         let artifact = fs::read_to_string(&artifact_path).expect("routing decision");
         assert!(artifact.contains("\"schema\": \"opensks.routing-decision.v1\""));
-        assert!(artifact.contains("\"status\": \"routed\""));
+        assert!(artifact.contains("\"status\": \"resolved\""));
         assert!(artifact.contains("\"selected_model_id\": \"fake-image\""));
         assert!(artifact.contains("\"route_receipt\""));
         assert!(artifact.contains("\"provider_id\": \"fake-local\""));
@@ -5950,6 +5796,33 @@ mod tests {
         );
         assert_eq!(image_ledger["schema"], "opensks.image-ledger.v1");
         assert_eq!(image_ledger["assets"][0]["model_id"], "enabled-image");
+        assert_eq!(image_ledger["assets"][0]["provider_id"], "fake-local");
+        let asset_path = root.join(
+            image_ledger["assets"][0]["path"]
+                .as_str()
+                .expect("asset path"),
+        );
+        let asset_bytes = fs::read(&asset_path).expect("image asset bytes");
+        assert!(asset_bytes.starts_with(b"P6\n512 512\n255\n"));
+        assert_eq!(
+            image_ledger["assets"][0]["content_hash"],
+            sha256_bytes_v1(&asset_bytes)
+        );
+        assert_eq!(
+            image_ledger["assets"][0]["evidence_refs"][0],
+            "opensks-image:image.generate"
+        );
+        assert!(
+            image_ledger["assets"][0]["evidence_refs"]
+                .as_array()
+                .expect("asset evidence")
+                .iter()
+                .any(|value| value == "opensks-image:asset-file-verified")
+        );
+        assert_eq!(
+            image_ledger["provenance_receipts"][0]["route_receipt"]["model_id"],
+            "enabled-image"
+        );
         assert_eq!(image_ledger["gc_candidate_ids"][0], "cli-image-asset");
 
         let reasoning =
@@ -6229,120 +6102,6 @@ mod tests {
     }
 
     #[test]
-    fn turn_start_persists_user_and_assistant_messages() {
-        let root = temp_workspace("opensks-cli-turn-start");
-        let cid = create_conversation_id(&root);
-
-        let turn = conversation_json(
-            &[
-                "turn-start",
-                "--conversation",
-                &cid,
-                "--text",
-                "ship the vertical slice",
-            ],
-            &root,
-        );
-        assert_eq!(turn["schema"], "opensks.conversation-turn.v1");
-        assert_eq!(turn["reused"], false);
-        assert_eq!(turn["run_state"], "failed");
-        assert!(
-            turn["settings_digest"]
-                .as_str()
-                .expect("settings digest")
-                .starts_with("sha256:v1:")
-        );
-        assert_eq!(
-            turn["model_routing_decision"]["schema"],
-            "opensks.routing-decision.v1"
-        );
-        assert_eq!(
-            turn["model_routing_decision"]["status"],
-            "blocked_missing_capability"
-        );
-        assert_eq!(
-            turn["model_routing_decision"]["reason_code"],
-            "thread_settings_model_not_selected"
-        );
-        assert_eq!(
-            turn["model_routing_decision"]["route_receipt"]["reason_code"],
-            "thread_settings_model_not_selected"
-        );
-        assert_eq!(
-            turn["model_routing_decision"]["route_receipt"]["requested_capabilities"]["code"],
-            true
-        );
-        assert_eq!(
-            turn["model_routing_decision"]["route_receipt"]["registry_revision"],
-            turn["model_routing_decision"]["model_snapshot_hash"]
-        );
-        let user_message_id = turn["user_message_id"].as_str().expect("user id");
-        let assistant_message_id = turn["assistant_message_id"].as_str().expect("assistant id");
-        assert_ne!(user_message_id, assistant_message_id);
-        assert!(
-            turn["run_id"]
-                .as_str()
-                .expect("run id")
-                .starts_with("turn-")
-        );
-
-        let messages = conversation_json(&["messages", "--conversation", &cid], &root);
-        let listed = messages["messages"].as_array().expect("messages array");
-        assert_eq!(listed.len(), 2, "user + assistant message persisted");
-        assert_eq!(listed[0]["role"], "user");
-        assert_eq!(listed[1]["role"], "assistant");
-        assert_eq!(listed[1]["state"], "failed");
-        let assistant_content = listed[1]["content_redacted"]
-            .as_str()
-            .expect("assistant content");
-        assert!(assistant_content.contains("Needs setup"));
-        assert!(
-            !assistant_content.contains("work items"),
-            "leftover fake summary: {assistant_content}"
-        );
-        let timeline = conversation_json(&["timeline", "--conversation", &cid], &root);
-        assert_eq!(timeline["schema"], "opensks.conversation-timeline.v1");
-        let timeline_items = timeline["items"].as_array().expect("timeline items");
-        assert!(
-            timeline_items.len() >= 4,
-            "message items plus event journal items are replayed"
-        );
-        assert_eq!(timeline_items[0]["kind"], "user_message");
-        assert_eq!(timeline_items[0]["payload"]["role"], "user");
-        assert_eq!(timeline_items[1]["kind"], "assistant_message");
-        assert_eq!(timeline_items[1]["run_id"], turn["run_id"]);
-        assert_eq!(timeline_items[1]["state"], "failed");
-        assert!(
-            timeline_items.iter().any(|item| {
-                item["kind"] == "error"
-                    && item["payload"]["event_kind"] == "verification_failed"
-                    && item["payload"]["payload_redacted"]["agent_event_kind"] == "error"
-                    && item["payload"]["content_redacted"]
-                        .as_str()
-                        .is_some_and(|text| text.contains("Needs setup"))
-            }),
-            "setup-required event must be replayed as a durable timeline error: {timeline_items:#?}"
-        );
-        let run_id = turn["run_id"].as_str().expect("run id");
-        let store = opensks_event_store::EventStore::open_workspace(&root).expect("event store");
-        let events = store.replay(run_id).expect("replay setup events");
-        assert_eq!(
-            events.first().map(|event| &event.kind),
-            Some(&opensks_contracts::EventKind::RunStarted)
-        );
-        assert!(
-            events.iter().any(|event| {
-                event.kind == opensks_contracts::EventKind::VerificationFailed
-                    && event.payload["agent_event_kind"] == "error"
-                    && event.payload["payload"]["code"] == "setup_required"
-            }),
-            "setup-required failure must be journaled: {events:#?}"
-        );
-
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
     fn turn_start_idempotency_key_replays_without_a_second_run() {
         let root = temp_workspace("opensks-cli-turn-idempotency");
         let cid = create_conversation_id(&root);
@@ -6417,6 +6176,100 @@ mod tests {
                 && item["state"] == "committed"
                 && item["payload"]["paths"][0] == "a.rs"
         }));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn receipt_event_append_persists_event_journal_and_projects_git_timeline() {
+        let root = temp_workspace("opensks-cli-receipt-event-append");
+        let cid = create_conversation_id(&root);
+        let idempotency = "git-commit:deadbeefcafef00d";
+        let payload = serde_json::json!({
+            "content_redacted": "Commit deadbeef recorded.",
+            "commit": "deadbeefcafef00d",
+            "paths": ["a.rs"],
+            "message": "ship it",
+            "committed": true,
+            "reviewed_staged_diff_hash": "fnv1a64:revieweddiff",
+            "reviewed_staged_diff_ref": "git-staged-diff://fnv1a64:revieweddiff",
+            "integration_final_diff_hash": "fnv1a64:finaldiff",
+            "integration_final_diff_ref": "artifact://.opensks/runtime/integration-candidates/run-1/final.diff",
+            "integration_run_id": "run-1",
+            "integration_candidate_id": "candidate-1",
+            "source_schema": "opensks.git-commit.v1"
+        })
+        .to_string();
+
+        let receipt = conversation_json(
+            &[
+                "receipt-event-append",
+                "--conversation",
+                &cid,
+                "--kind",
+                "git_commit_receipt",
+                "--idempotency-key",
+                idempotency,
+                "--payload",
+                &payload,
+            ],
+            &root,
+        );
+        assert_eq!(receipt["kind"], "commit_receipt");
+        assert_eq!(receipt["state"], "committed");
+        assert_eq!(receipt["payload"]["projection"], "git_receipt_event");
+        assert_eq!(receipt["payload"]["commit"], "deadbeefcafef00d");
+        assert_eq!(
+            receipt["payload"]["reviewed_staged_diff_hash"],
+            "fnv1a64:revieweddiff"
+        );
+        assert_eq!(
+            receipt["payload"]["integration_final_diff_ref"],
+            "artifact://.opensks/runtime/integration-candidates/run-1/final.diff"
+        );
+
+        let timeline = conversation_json(&["timeline", "--conversation", &cid], &root);
+        let items = timeline["items"].as_array().expect("timeline items");
+        assert_eq!(
+            items.len(),
+            1,
+            "synthetic git receipt anchor message stays hidden from the timeline"
+        );
+        assert_eq!(items[0]["id"], receipt["id"]);
+        assert_eq!(items[0]["kind"], "commit_receipt");
+
+        let run_id = format!("git-receipt-run-{}", stable_id_fragment(idempotency));
+        let store = opensks_event_store::EventStore::open_workspace(&root).expect("event store");
+        let events = store.replay(&run_id).expect("receipt event replay");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].kind,
+            opensks_contracts::EventKind::GitCommitReceipt
+        );
+        assert_eq!(events[0].payload["commit"], "deadbeefcafef00d");
+
+        let repeat = conversation_json(
+            &[
+                "receipt-event-append",
+                "--conversation",
+                &cid,
+                "--kind",
+                "git_commit_receipt",
+                "--idempotency-key",
+                idempotency,
+                "--payload",
+                &payload,
+            ],
+            &root,
+        );
+        assert_eq!(
+            repeat["id"], receipt["id"],
+            "repeat receipt command is idempotent"
+        );
+        let events = store
+            .replay(&run_id)
+            .expect("receipt event replay after repeat");
+        assert_eq!(events.len(), 1);
 
         fs::remove_dir_all(root).ok();
     }
@@ -6551,6 +6404,58 @@ mod tests {
     }
 
     #[test]
+    fn turn_start_read_only_thread_settings_block_local_workspace_write() {
+        let root = temp_workspace("opensks-cli-read-only-agent-edit");
+        let cid = create_conversation_id(&root);
+        let settings = serde_json::json!({
+            "schema": "opensks.thread-settings.v1",
+            "conversation_id": cid,
+            "model_selection": {"mode": "auto", "model_id": null, "fallback_model_ids": []},
+            "reasoning_effort": "standard",
+            "execution_mode": "read_only",
+            "pipeline_id": "read-only-cli",
+            "max_parallelism": 1,
+            "verifier_count": 1,
+            "tool_policy_id": "project-default",
+            "approval_policy_id": "safe-interactive",
+            "updated_at_ms": 0
+        })
+        .to_string();
+        conversation_json(
+            &[
+                "settings-set",
+                "--conversation",
+                &cid,
+                "--settings",
+                &settings,
+            ],
+            &root,
+        );
+
+        let instruction =
+            r#"{"local_test":{"op":"create_file","path":"READ_ONLY.md","value":"blocked"}}"#;
+        let turn = conversation_json(
+            &["turn-start", "--conversation", &cid, "--text", instruction],
+            &root,
+        );
+        assert_eq!(turn["run_state"], "failed");
+        assert!(!root.join("READ_ONLY.md").exists());
+        let timeline = conversation_json(&["timeline", "--conversation", &cid], &root);
+        let timeline_items = timeline["items"].as_array().expect("timeline items");
+        assert!(
+            timeline_items.iter().any(|item| {
+                item["kind"] == "error"
+                    && item["payload"]["payload_redacted"]["agent_event_kind"] == "error"
+                    && item["payload"]["payload_redacted"]["payload"]["code"]
+                        == "read_only_execution_mode"
+            }),
+            "read-only execution policy failure must replay into timeline: {timeline_items:#?}"
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn thread_settings_default_then_persist_and_survive_relaunch() {
         let root = temp_workspace("opensks-cli-settings");
         let cid = create_conversation_id(&root);
@@ -6604,8 +6509,8 @@ mod tests {
             &root,
         );
         assert_eq!(
-            turn["model_routing_decision"]["status"], "routed",
-            "pinned model should be recorded as the route decision"
+            turn["model_routing_decision"]["status"], "requested",
+            "pinned model should be recorded only as a request before registry resolution"
         );
         assert_eq!(
             turn["model_routing_decision"]["selected_model_id"],
@@ -6613,12 +6518,9 @@ mod tests {
         );
         assert_eq!(
             turn["model_routing_decision"]["reason_code"],
-            "explicit_thread_settings_model"
+            "explicit_thread_settings_model_requested"
         );
-        assert_eq!(
-            turn["model_routing_decision"]["route_receipt"]["provider_id"],
-            "openai"
-        );
+        assert!(turn["model_routing_decision"]["route_receipt"]["provider_id"].is_null());
         assert_eq!(
             turn["model_routing_decision"]["route_receipt"]["model_id"],
             "openai/gpt-4o-mini"
@@ -6678,7 +6580,7 @@ mod tests {
         let ws = root.to_string_lossy().into_owned();
         let mut owned = vec![args[0].to_string(), "--workspace".to_string(), ws];
         owned.extend(args[1..].iter().map(|value| value.to_string()));
-        run_file_command_with_input(&owned, root, input)
+        file_command::run_file_command_with_input(&owned, root, input)
     }
 
     /// Extract the `file-error.v1` payload from a failed `file` command. The
@@ -7721,6 +7623,78 @@ mod tests {
         );
         assert_eq!(receipt["pushed"], true);
         assert!(bare_has_ref(&bare, "main"), "acked protected ref is pushed");
+
+        fs::remove_dir_all(source.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn push_cli_failed_execute_is_durable_diagnostic_in_status() {
+        let (source, bare) = init_push_fixture("opensks-cli-push-failure", "feature");
+        let ws = source.to_string_lossy().into_owned();
+
+        let intent = push_ok(
+            &source,
+            &[
+                "push-enqueue",
+                "--workspace",
+                &ws,
+                "--remote",
+                "origin",
+                "--ref",
+                "feature",
+                "--intent",
+                "intent-fail",
+            ],
+        );
+        let digest = intent["effect_digest"].as_str().expect("digest");
+        push_ok(
+            &source,
+            &[
+                "push-approve",
+                "--workspace",
+                &ws,
+                "--intent",
+                "intent-fail",
+                "--effect-digest",
+                digest,
+            ],
+        );
+
+        let bogus = source.join("does-not-exist.git");
+        run_repo_git(
+            &source,
+            &["remote", "set-url", "origin", bogus.to_str().unwrap()],
+        );
+        let refused = push_err(
+            &source,
+            &[
+                "push-execute",
+                "--workspace",
+                &ws,
+                "--intent",
+                "intent-fail",
+            ],
+        );
+        assert_eq!(refused["error"]["code"], "push_failed");
+        assert!(
+            !bare_has_ref(&bare, "feature"),
+            "failed push did not create the remote ref"
+        );
+
+        let status = push_ok(&source, &["push-status", "--workspace", &ws]);
+        assert_eq!(status["schema"], "opensks.push-status.v1");
+        assert_eq!(status["completed"].as_array().expect("completed").len(), 0);
+        assert_eq!(status["approved"].as_array().expect("approved").len(), 1);
+        let failures = status["failures"].as_array().expect("failures");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0]["schema"], "opensks.push-failure-diagnostic.v1");
+        assert_eq!(failures[0]["intent_id"], "intent-fail");
+        assert_eq!(failures[0]["reason_code"], "push_failed");
+        assert_eq!(failures[0]["attempts"], 1);
+        assert_eq!(
+            failures[0]["remote_url_redacted"],
+            bare.to_string_lossy().as_ref()
+        );
 
         fs::remove_dir_all(source.parent().unwrap()).ok();
     }

@@ -8,6 +8,7 @@ import SwiftUI
 
 struct ConversationThreadView: View {
     @ObservedObject var store: ConversationStore
+    @ObservedObject var providers: ProviderStore
     /// Live node-level projections keyed by run id (PR-029/PR-030). When a run
     /// has a projection, the thread renders a `PipelineRunCard` (node-count
     /// summary + mini graph + controls) alongside the PR-027 `RunCard`. Optional
@@ -51,7 +52,7 @@ struct ConversationThreadView: View {
             } else {
                 messageList(for: summary.id)
             }
-            ConversationComposer(store: store, conversationID: summary.id)
+            ConversationComposer(store: store, providers: providers, conversationID: summary.id)
         }
     }
 
@@ -173,6 +174,9 @@ struct ConversationThreadView: View {
                         } else if let card = item.pushCard {
                             PushReceiptCard(card: card)
                                 .id(item.id)
+                        } else if item.kind == .assistantMessage {
+                            AssistantTimelineEventCell(item: item)
+                                .id(item.id)
                         } else {
                             TimelineItemCell(item: item)
                                 .id(item.id)
@@ -201,6 +205,121 @@ struct ConversationThreadView: View {
                 .id("pipeline-run-\(run.runId)")
             }
         }
+    }
+}
+
+// MARK: - Assistant timeline event cell
+
+struct AssistantTimelineEventCell: View {
+    let item: ConversationTimelineItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.s6) {
+            HStack(spacing: Theme.s6) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.violet)
+                Text("Assistant")
+                    .font(Theme.ui(11, .semibold))
+                    .foregroundStyle(Theme.violet)
+                Text(stateLabel)
+                    .font(Theme.mono(10))
+                    .foregroundStyle(Theme.faint)
+                if let model = item.payload.modelId {
+                    Text(model)
+                        .font(Theme.mono(10))
+                        .foregroundStyle(Theme.faint)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+                Text(RelativeTime.string(from: item.createdAtDate))
+                    .font(Theme.ui(10))
+                    .foregroundStyle(Theme.faint)
+            }
+            Text(bodyText)
+                .font(Theme.ui(13))
+                .foregroundStyle(Theme.textSoft)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+            if !detailRows.isEmpty {
+                VStack(alignment: .leading, spacing: Theme.s4) {
+                    ForEach(detailRows) { row in
+                        HStack(alignment: .firstTextBaseline, spacing: Theme.s6) {
+                            Text(row.label)
+                                .font(Theme.mono(9.5, .semibold))
+                                .foregroundStyle(Theme.faint)
+                                .frame(width: 86, alignment: .leading)
+                            Text(row.value)
+                                .font(Theme.ui(10.5))
+                                .foregroundStyle(Theme.textSoft)
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+                .padding(.top, Theme.s4)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: 720, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous)
+                .fill(Theme.panel)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous)
+                .strokeBorder(Theme.stroke, lineWidth: 1)
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("conversation.timeline.assistantEvent")
+        .accessibilityLabel("Assistant \(stateLabel): \(bodyText)")
+    }
+
+    private var stateLabel: String {
+        switch item.state {
+        case "streaming": return "Streaming"
+        case "completed": return "Completed"
+        default: return item.state
+        }
+    }
+
+    private var bodyText: String {
+        item.payload.assistantDelta
+            ?? item.payload.assistantText
+            ?? item.payload.contentRedacted
+            ?? "Assistant event"
+    }
+
+    private var detailRows: [TimelineDetailRow] {
+        var rows: [TimelineDetailRow] = []
+        append("Message", item.payload.assistantMessageId, to: &rows)
+        append("Provider", item.payload.providerId, to: &rows)
+        append("Model", item.payload.modelId, to: &rows)
+        append("Response", responseSummary, to: &rows)
+        append("Reason", item.payload.completionReason, to: &rows)
+        append("Event", item.payload.eventId, to: &rows)
+        return Array(rows.prefix(6))
+    }
+
+    private var responseSummary: String? {
+        var parts: [String] = []
+        if let bytes = item.payload.responseBytes {
+            parts.append("\(bytes) bytes")
+        }
+        if let hash = item.payload.responseHash {
+            parts.append(hash)
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func append(_ label: String, _ value: String?, to rows: inout [TimelineDetailRow]) {
+        guard let value, !value.isEmpty else { return }
+        rows.append(TimelineDetailRow(label: label, value: value))
     }
 }
 
@@ -309,6 +428,26 @@ struct TimelineItemCell: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
+            if !detailRows.isEmpty {
+                VStack(alignment: .leading, spacing: Theme.s4) {
+                    ForEach(detailRows) { row in
+                        HStack(alignment: .firstTextBaseline, spacing: Theme.s6) {
+                            Text(row.label)
+                                .font(Theme.mono(9.5, .semibold))
+                                .foregroundStyle(Theme.faint)
+                                .frame(width: 74, alignment: .leading)
+                            Text(row.value)
+                                .font(Theme.ui(10.5))
+                                .foregroundStyle(Theme.textSoft)
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+                .padding(.top, Theme.s4)
+            }
         }
         .padding(12)
         .frame(maxWidth: 720, alignment: .leading)
@@ -354,4 +493,68 @@ struct TimelineItemCell: View {
         default: return Theme.muted
         }
     }
+
+    private var detailRows: [TimelineDetailRow] {
+        var rows: [TimelineDetailRow] = []
+        append("Tool", item.payload.tool, to: &rows)
+        append("Worker", item.payload.workerId, to: &rows)
+        append("Work item", item.payload.workItemId, to: &rows)
+        append("Role", item.payload.roleLabel, to: &rows)
+        append("Model", item.payload.modelId, to: &rows)
+        append("Command", item.payload.commandRedacted, to: &rows)
+        if let exit = item.payload.exitCode {
+            let timeout = item.payload.timedOut == true ? " · timed out" : ""
+            append("Exit", "\(exit)\(timeout)", to: &rows)
+        }
+        if let duration = item.payload.durationMs {
+            append("Duration", "\(duration) ms", to: &rows)
+        }
+        append("Files", pathSummary(item.payload.appliedFiles ?? item.payload.targetPaths ?? item.payload.touchedPaths), to: &rows)
+        append("Tests", pathSummary(item.payload.testTargets), to: &rows)
+        if let patchCount = item.payload.patchCount, let applyCount = item.payload.applyResultCount {
+            append("Patch", "\(patchCount) patches · \(applyCount) results", to: &rows)
+        } else if let patchCount = item.payload.patchCount {
+            append("Patch", "\(patchCount) patches", to: &rows)
+        }
+        append("Code", item.payload.code ?? item.payload.reasonCode, to: &rows)
+        append("Batch", batchSummary, to: &rows)
+        append("Receipt", item.payload.receiptRef ?? item.payload.verificationRef ?? item.payload.repairRef, to: &rows)
+        return Array(rows.prefix(8))
+    }
+
+    private var batchSummary: String? {
+        guard item.payload.parallelBatch == true || item.payload.batchId != nil else { return nil }
+        var parts: [String] = []
+        if let batchId = item.payload.batchId {
+            parts.append(batchId)
+        }
+        if let lane = item.payload.parallelLaneIndex {
+            parts.append("lane \(lane)")
+        }
+        if let size = item.payload.parallelBatchSize {
+            parts.append("size \(size)")
+        }
+        return parts.isEmpty ? "parallel batch" : parts.joined(separator: " · ")
+    }
+
+    private func pathSummary(_ values: [String]?) -> String? {
+        guard let values, !values.isEmpty else { return nil }
+        let visible = values.prefix(3).joined(separator: ", ")
+        if values.count > 3 {
+            return "\(visible) +\(values.count - 3)"
+        }
+        return visible
+    }
+
+    private func append(_ label: String, _ value: String?, to rows: inout [TimelineDetailRow]) {
+        guard let value, !value.isEmpty else { return }
+        rows.append(TimelineDetailRow(label: label, value: value))
+    }
+}
+
+private struct TimelineDetailRow: Identifiable {
+    let label: String
+    let value: String
+
+    var id: String { label }
 }

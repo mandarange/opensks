@@ -1,0 +1,226 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IntegrationCandidateSelectionReceipt",
+  "type": "object",
+  "required": [
+    "content_redacted",
+    "generated_at_ms",
+    "id",
+    "path_redacted",
+    "reason_code",
+    "run_id",
+    "schema",
+    "selected_candidate_id",
+    "selected_candidate_ref",
+    "selected_patch_ref",
+    "selection_policy",
+    "selection_ref"
+  ],
+  "properties": {
+    "aggregate_candidate_count": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "aggregate_target_count": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "candidate_pool": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/IntegrationSourceCandidateRef"
+      }
+    },
+    "content_redacted": {
+      "type": "boolean"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "generated_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "id": {
+      "type": "string"
+    },
+    "path_redacted": {
+      "type": "boolean"
+    },
+    "planned_verifier_count": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "planner_required_source_candidate_count": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "planner_required_verifier_count": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "planner_selected_source_candidate_count": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "required_verification_gates": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "selected_candidate_id": {
+      "type": "string"
+    },
+    "selected_candidate_ref": {
+      "type": "string"
+    },
+    "selected_patch_ref": {
+      "type": "string"
+    },
+    "selected_source_candidate_ids": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "selection_policy": {
+      "type": "string"
+    },
+    "selection_ref": {
+      "type": "string"
+    },
+    "shard_policy_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "shard_policy_selection_policy": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "target_paths": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "definitions": {
+    "IntegrationSourceCandidateRef": {
+      "type": "object",
+      "required": [
+        "id",
+        "patch_ref",
+        "receipt_ref",
+        "source",
+        "worker_id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "patch_ref": {
+          "type": "string"
+        },
+        "planner_required_source_candidate_count": {
+          "default": 0,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "planner_required_verifier_count": {
+          "default": 0,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "receipt_ref": {
+          "type": "string"
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "shard_policy_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "shard_policy_selection_policy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "source_isolation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_isolation_mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target_paths": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "work_item_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "worker_id": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

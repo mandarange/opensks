@@ -70,6 +70,25 @@ final class PushOutboxTests: XCTestCase {
         )
     }
 
+    private func failure(
+        id: String = "failure-1",
+        ref: String = "feature",
+        attempts: Int = 1
+    ) -> GitPushFailureDiagnostic {
+        GitPushFailureDiagnostic(
+            intentId: id,
+            idempotencyKey: "push:\(id):feedface",
+            effectDigest: "digest-\(id)",
+            remote: "origin",
+            remoteUrlRedacted: "https://github.example/<redacted>.git",
+            ref: ref,
+            localOid: "feedface00000000feedface00000000feedface",
+            remoteExpectedOid: nil,
+            reasonCode: "push_failed",
+            attempts: attempts
+        )
+    }
+
     // MARK: - Decode parity (snake_case wire contract)
 
     func testPushIntentDecodes() throws {
@@ -113,6 +132,7 @@ final class PushOutboxTests: XCTestCase {
         {"schema":"opensks.push-status.v1",
          "pending":[{"intent_id":"p1","effect_digest":"d","remote":"origin","remote_url_redacted":"u","ref":"feature","local_oid":"a","remote_expected_oid":null,"protected":false}],
          "approved":[{"intent_id":"a1","effect_digest":"d","remote":"origin","remote_url_redacted":"u","ref":"main","local_oid":"b","remote_expected_oid":"c","protected":true}],
+         "failures":[{"schema":"opensks.push-failure-diagnostic.v1","intent_id":"f1","idempotency_key":"push:f1:b","effect_digest":"d","remote":"origin","remote_url_redacted":"u","ref":"feature","local_oid":"b","remote_expected_oid":"c","code":"push_failed","reason_code":"push_failed","attempts":2}],
          "completed":[{"intent_id":"c1","ref":"feature","remote":"origin","remote_oid":"cafebabe"}]}
         """
         let status = try JSONDecoder().decode(GitPushStatus.self, from: Data(json.utf8))
@@ -120,6 +140,10 @@ final class PushOutboxTests: XCTestCase {
         XCTAssertEqual(status.pending.first?.intentId, "p1")
         XCTAssertEqual(status.approved.count, 1)
         XCTAssertTrue(status.approved.first?.protected ?? false)
+        XCTAssertEqual(status.failures.count, 1)
+        XCTAssertEqual(status.failures.first?.intentId, "f1")
+        XCTAssertEqual(status.failures.first?.reasonCode, "push_failed")
+        XCTAssertEqual(status.failures.first?.attempts, 2)
         XCTAssertEqual(status.completed.count, 1)
         XCTAssertEqual(status.completed.first?.remoteOid, "cafebabe")
     }
@@ -342,6 +366,7 @@ final class PushOutboxTests: XCTestCase {
         service.setPushStatus(GitPushStatus(
             pending: [intent(id: "p1")],
             approved: [intent(id: "a1", ref: "main", protected: true)],
+            failures: [failure(id: "f1")],
             completed: [GitPushCompleted(intentId: "c1", ref: "feature", remote: "origin", remoteOid: "cafebabe0000")]
         ))
         let store = GitStudioStore(service: service)
@@ -350,9 +375,63 @@ final class PushOutboxTests: XCTestCase {
 
         XCTAssertEqual(store.push.status.pending.count, 1, "pending recovered after relaunch")
         XCTAssertEqual(store.push.status.approved.count, 1, "approved recovered after relaunch")
+        XCTAssertEqual(store.push.status.failures.count, 1, "failed push diagnostic recovered after relaunch")
         XCTAssertEqual(store.push.status.completed.count, 1, "completed recovered after relaunch")
         XCTAssertEqual(store.push.status.completed.first?.remoteOid, "cafebabe0000")
         XCTAssertTrue(store.push.hasOutbox, "the recovered outbox is surfaced")
+    }
+
+    func testPushOutboxSummaryRendersRecoveredFailureDiagnostics() throws {
+        let status = GitPushStatus(
+            pending: [intent(id: "p1")],
+            approved: [intent(id: "a1")],
+            failures: [failure(id: "f1", attempts: 2)],
+            completed: [GitPushCompleted(intentId: "c1", ref: "feature", remote: "origin", remoteOid: "cafebabe0000")]
+        )
+        XCTAssertFalse(status.isEmpty, "failure diagnostics make the outbox visible")
+        for width in [1024.0, 1440.0] {
+            let view = PushOutboxSummary(status: status).frame(width: width, height: 220)
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 1
+            let image = try XCTUnwrap(renderer.nsImage, "push outbox summary rendered at width \(width)")
+            XCTAssertEqual(image.size.width, width, accuracy: 1.0,
+                           "the push outbox failure summary must fill the width at \(width)")
+        }
+    }
+
+    func testPushFailureDiagnosticsPanelRendersRecoveredFailureDetails() throws {
+        let failures = [
+            failure(id: "f1", attempts: 2),
+            failure(id: "f2", ref: "main", attempts: 3)
+        ]
+        for width in [1024.0, 1440.0] {
+            let view = PushFailureDiagnosticsPanel(failures: failures, onReview: {})
+                .frame(width: width, height: 260)
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 1
+            let image = try XCTUnwrap(renderer.nsImage, "failure diagnostics panel rendered at width \(width)")
+            XCTAssertEqual(image.size.width, width, accuracy: 1.0,
+                           "the recovered failed-push diagnostics panel must fill the width at \(width)")
+        }
+    }
+
+    func testGitStudioCompactRendersRecoveredFailureDiagnosticsOutsideCommitPane() async throws {
+        let service = MockGitService(
+            status: GitStatus(inRepo: true, branch: "feature"),
+            branches: GitBranches(current: "feature", branches: []),
+            diff: .empty
+        )
+        service.setPushStatus(GitPushStatus(failures: [failure(id: "f1", attempts: 2)]))
+        let store = GitStudioStore(service: service)
+        await store.refreshPushStatus()
+        XCTAssertEqual(store.push.status.failures.count, 1)
+
+        let view = GitStatusView(store: store).frame(width: 1024, height: 760)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 1
+        let image = try XCTUnwrap(renderer.nsImage, "compact git studio rendered with recovered push failure")
+        XCTAssertEqual(image.size.width, 1024, accuracy: 1.0,
+                       "the compact Git studio must fill the width while showing recovered push diagnostics")
     }
 
     // MARK: - Commit & Push posts a SEPARATE push card into the conversation
@@ -377,6 +456,7 @@ final class PushOutboxTests: XCTestCase {
         // The commit card is posted immediately; the push card only after approval.
         XCTAssertEqual(convStore.commitCards(for: "conv-1").count, 1, "the commit card posts on commit")
         XCTAssertTrue(convStore.pushCards(for: "conv-1").isEmpty, "no push card before approval")
+        let commitReceipt = try XCTUnwrap(gitStore.commit.receipt)
 
         await gitStore.approveAndExecutePush()
         let pushCards = convStore.pushCards(for: "conv-1")
@@ -394,6 +474,21 @@ final class PushOutboxTests: XCTestCase {
         XCTAssertEqual(timeline.last?.payload.idempotencyKey, receipt.idempotencyKey)
         XCTAssertEqual(timeline.last?.payload.approvalMatched, true)
         XCTAssertFalse(timeline.last?.payload.protected ?? true)
+        let durableCommit = await waitForTimelineItem(
+            convStore,
+            conversationID: "conv-1",
+            id: "timeline-event-git-commit:\(commitReceipt.commit)"
+        )
+        XCTAssertEqual(durableCommit?.kind, .commitReceipt)
+        XCTAssertEqual(durableCommit?.commitCard?.commit, commitReceipt.commit)
+        let durablePush = await waitForTimelineItem(
+            convStore,
+            conversationID: "conv-1",
+            id: "timeline-event-git-push:\(receipt.idempotencyKey)"
+        )
+        XCTAssertEqual(durablePush?.kind, .pushReceipt)
+        XCTAssertEqual(durablePush?.pushCard?.remoteOid, receipt.remoteOid)
+        XCTAssertEqual(durablePush?.payload.projection, "git_receipt")
     }
 
     // MARK: - Rendering: approval prompt + both receipts non-nil + fill width
@@ -501,4 +596,22 @@ final class PushOutboxTests: XCTestCase {
             }
         }
     }
+}
+
+@MainActor
+private func waitForTimelineItem(
+    _ store: ConversationStore,
+    conversationID: String,
+    id: String,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async -> ConversationTimelineItem? {
+    for _ in 0..<50 {
+        if let item = store.timelineItems(for: conversationID).first(where: { $0.id == id }) {
+            return item
+        }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    XCTFail("timed out waiting for timeline item \(id)", file: file, line: line)
+    return nil
 }

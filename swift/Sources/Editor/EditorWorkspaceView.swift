@@ -14,6 +14,8 @@ import AppKit
 
 struct EditorWorkspaceView: View {
     @ObservedObject var store: EditorWorkspaceStore
+    var onAttachContext: ((EditorContextRef, String) -> Void)? = nil
+    var onDocumentTextChanged: ((String, String) -> Void)? = nil
     /// The dirty document a close was attempted on; drives the Save/Discard/
     /// Cancel dialog so closing is never a silent no-op (EDIT-004).
     @State private var pendingCloseDoc: EditorDocumentState?
@@ -87,7 +89,11 @@ struct EditorWorkspaceView: View {
     @ViewBuilder
     private var center: some View {
         if let doc = store.activeDocument {
-            EditorDocumentPane(store: store, document: doc)
+            EditorDocumentPane(
+                store: store,
+                document: doc,
+                onDocumentTextChanged: onDocumentTextChanged
+            )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityIdentifier("editor.center.\(doc.id.raw.uuidString)")
         } else {
@@ -106,7 +112,10 @@ struct EditorWorkspaceView: View {
     private var statusBar: some View {
         Group {
             if let doc = store.activeDocument {
-                EditorStatusBar(document: doc)
+                EditorStatusBar(
+                    document: doc,
+                    onAttachContext: onAttachContext
+                )
             } else {
                 HStack {
                     Text("Ready")
@@ -187,6 +196,7 @@ private struct EditorTabView: View {
 private struct EditorDocumentPane: View {
     @ObservedObject var store: EditorWorkspaceStore
     @ObservedObject var document: EditorDocumentState
+    var onDocumentTextChanged: ((String, String) -> Void)? = nil
 
     private var gutterMarkers: [Int: DiffGutterMarker] {
         guard let response = store.diff(for: document.id) else { return [:] }
@@ -206,7 +216,11 @@ private struct EditorDocumentPane: View {
             } else {
                 CodeEditorRepresentable(document: document, diffMarkers: gutterMarkers)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .onAppear {
+                        onDocumentTextChanged?(document.workspaceRelativePath, document.text)
+                    }
                     .task(id: document.currentContentHash) {
+                        onDocumentTextChanged?(document.workspaceRelativePath, document.text)
                         // Debounce: each content change cancels the prior task, so
                         // a burst of keystrokes collapses to ONE diff after a quiet
                         // pause instead of spawning a CLI child per keystroke
@@ -253,6 +267,19 @@ private struct EditorDocumentPane: View {
 
 private struct EditorStatusBar: View {
     @ObservedObject var document: EditorDocumentState
+    var onAttachContext: ((EditorContextRef, String) -> Void)? = nil
+
+    private var currentContextRef: EditorContextRef? {
+        guard document.isEditable,
+              let lineRange = document.selectedLineRange
+        else { return nil }
+        return EditorContextRef.capture(
+            workspaceRelativePath: document.workspaceRelativePath,
+            displayName: document.displayName,
+            fullText: document.text,
+            lineRange: lineRange
+        )
+    }
 
     var body: some View {
         HStack(spacing: Theme.s12) {
@@ -261,6 +288,21 @@ private struct EditorStatusBar: View {
                 .foregroundStyle(Theme.faint)
                 .lineLimit(1)
                 .truncationMode(.middle)
+            if let ref = currentContextRef, let onAttachContext {
+                Button {
+                    onAttachContext(ref, document.text)
+                } label: {
+                    Image(systemName: "text.badge.plus")
+                        .font(.system(size: 10, weight: .semibold))
+                        .frame(width: 22, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.accent)
+                .help("Attach selected lines to chat")
+                .accessibilityLabel("Attach selected lines to chat")
+                .accessibilityIdentifier("editor.status.attach-context")
+            }
             Spacer(minLength: Theme.s12)
             Text(saveLabel)
                 .font(Theme.ui(10.5, .medium))

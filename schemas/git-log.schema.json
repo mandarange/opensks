@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GitLog",
+  "description": "The result of a read-only `git log` inspection.",
+  "type": "object",
+  "required": [
+    "in_repo",
+    "schema"
+  ],
+  "properties": {
+    "entries": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/GitLogEntry"
+      }
+    },
+    "in_repo": {
+      "type": "boolean"
+    },
+    "max_count": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "schema": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "GitLogEntry": {
+      "description": "One commit from read-only `git log` inspection.",
+      "type": "object",
+      "required": [
+        "abbreviated_commit",
+        "author_email_redacted",
+        "author_name",
+        "authored_at",
+        "commit",
+        "subject"
+      ],
+      "properties": {
+        "abbreviated_commit": {
+          "type": "string"
+        },
+        "author_email_redacted": {
+          "type": "string"
+        },
+        "author_name": {
+          "type": "string"
+        },
+        "authored_at": {
+          "type": "string"
+        },
+        "commit": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -13,6 +13,40 @@
     "body": {
       "type": "string"
     },
+    "branch_freshness": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ContextPackBranchFreshness"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "changed_paths": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "codegraph_record_ids": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "conversation_summary": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ContextPackConversationSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "estimated_tokens": {
       "type": "integer",
       "format": "uint32",
@@ -24,6 +58,16 @@
       "items": {
         "type": "string"
       }
+    },
+    "freshness": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/FreshnessStamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "id": {
       "type": "string"
@@ -38,10 +82,247 @@
     "schema": {
       "type": "string"
     },
+    "selected_test_targets": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "token_budget": {
       "type": "integer",
       "format": "uint32",
       "minimum": 0.0
+    },
+    "turn_context_items": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/TurnContextItem"
+      }
+    },
+    "turn_context_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "definitions": {
+    "ContextPackBranchFreshness": {
+      "type": "object",
+      "required": [
+        "reason_code"
+      ],
+      "properties": {
+        "ahead_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "base_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "behind_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "changed_paths_since_base": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "head_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "merge_base": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason_code": {
+          "type": "string"
+        }
+      }
+    },
+    "ContextPackConversationSummary": {
+      "type": "object",
+      "required": [
+        "conversation_id",
+        "generated_at_ms",
+        "reason_code",
+        "redacted",
+        "source_message_sequence",
+        "summary_redacted"
+      ],
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "generated_at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "redacted": {
+          "type": "boolean"
+        },
+        "source_message_sequence": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "summary_redacted": {
+          "type": "string"
+        }
+      }
+    },
+    "FreshnessStamp": {
+      "description": "A deterministic freshness stamp for a workspace at one instant.\n\n- `head_hash` is the committed `HEAD` object id, or `None` when the workspace is not a Git repository (or has an unborn HEAD). - `worktree_hash` is a content-addressed digest over the tracked working-tree state, so any in-place edit flips it. - `index_hash` is a digest of the codegraph index (the staged knowledge of symbols), so a re-index flips it.",
+      "type": "object",
+      "required": [
+        "in_repo",
+        "index_hash",
+        "schema",
+        "worktree_hash"
+      ],
+      "properties": {
+        "head_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "in_repo": {
+          "type": "boolean"
+        },
+        "index_hash": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "worktree_hash": {
+          "type": "string"
+        }
+      }
+    },
+    "TurnContextItem": {
+      "type": "object",
+      "required": [
+        "kind",
+        "reason_code",
+        "redacted",
+        "ref_id",
+        "resolved",
+        "stale"
+      ],
+      "properties": {
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "captured_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "current_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "end_line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "evidence_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "kind": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "redacted": {
+          "type": "boolean"
+        },
+        "ref_id": {
+          "type": "string"
+        },
+        "resolved": {
+          "type": "boolean"
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "start_line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
     }
   }
 }

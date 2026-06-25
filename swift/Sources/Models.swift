@@ -154,6 +154,10 @@ enum ExecutionEventKind: OpenSKSStringEnum {
     case leaseExpired
     case verificationPassed
     case verificationFailed
+    case gitCommitReceipt
+    case gitPushReceipt
+    case gitPushFailed
+    case imageArtifactCreated
     case snapshotWritten
     case queueActionRequested
     case unknown
@@ -177,6 +181,10 @@ enum ExecutionEventKind: OpenSKSStringEnum {
         case .leaseExpired: return "lease_expired"
         case .verificationPassed: return "verification_passed"
         case .verificationFailed: return "verification_failed"
+        case .gitCommitReceipt: return "git_commit_receipt"
+        case .gitPushReceipt: return "git_push_receipt"
+        case .gitPushFailed: return "git_push_failed"
+        case .imageArtifactCreated: return "image_artifact_created"
         case .snapshotWritten: return "snapshot_written"
         case .queueActionRequested: return "queue_action_requested"
         case .unknown: return "unknown"
@@ -202,6 +210,10 @@ enum ExecutionEventKind: OpenSKSStringEnum {
         case "lease_expired": self = .leaseExpired
         case "verification_passed": self = .verificationPassed
         case "verification_failed": self = .verificationFailed
+        case "git_commit_receipt": self = .gitCommitReceipt
+        case "git_push_receipt": self = .gitPushReceipt
+        case "git_push_failed": self = .gitPushFailed
+        case "image_artifact_created": self = .imageArtifactCreated
         case "snapshot_written": self = .snapshotWritten
         case "queue_action_requested": self = .queueActionRequested
         case "unknown": self = .unknown

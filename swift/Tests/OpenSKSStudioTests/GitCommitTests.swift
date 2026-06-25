@@ -73,10 +73,16 @@ final class GitCommitTests: XCTestCase {
 
     func testCommitPreviewDecodes() throws {
         let json = """
-        {"schema":"opensks.git-commit-preview.v1","index_hash":"abc123","staged_paths":["a.rs","b.rs"],"has_staged":true}
+        {"schema":"opensks.git-commit-preview.v1","index_hash":"abc123","staged_diff_hash":"fnv1a64:1111222233334444","staged_diff_ref":"git-staged-diff://fnv1a64:1111222233334444","integration_final_diff_hash":"fnv1a64:finaldiff","integration_final_diff_ref":"artifact://.opensks/runtime/integration-candidates/run-1/final.diff","integration_run_id":"run-1","integration_candidate_id":"candidate-1","staged_paths":["a.rs","b.rs"],"has_staged":true}
         """
         let preview = try JSONDecoder().decode(GitCommitPreview.self, from: Data(json.utf8))
         XCTAssertEqual(preview.indexHash, "abc123")
+        XCTAssertEqual(preview.stagedDiffHash, "fnv1a64:1111222233334444")
+        XCTAssertEqual(preview.stagedDiffRef, "git-staged-diff://fnv1a64:1111222233334444")
+        XCTAssertEqual(preview.integrationFinalDiffHash, "fnv1a64:finaldiff")
+        XCTAssertEqual(preview.integrationFinalDiffRef, "artifact://.opensks/runtime/integration-candidates/run-1/final.diff")
+        XCTAssertEqual(preview.integrationRunId, "run-1")
+        XCTAssertEqual(preview.integrationCandidateId, "candidate-1")
         XCTAssertEqual(preview.stagedPaths, ["a.rs", "b.rs"])
         XCTAssertTrue(preview.hasStaged)
     }
@@ -250,17 +256,29 @@ final class GitCommitTests: XCTestCase {
     func testCommitSendsReviewedIndexHashAsExpected() async throws {
         let (store, service) = makeGitStore()
         service.setCommitPreview(GitCommitPreview(
-            indexHash: "reviewed-hash", stagedPaths: ["a.rs"], hasStaged: true
+            indexHash: "reviewed-hash",
+            stagedPaths: ["a.rs"],
+            hasStaged: true,
+            stagedDiffHash: "fnv1a64:reviewed",
+            stagedDiffRef: "git-staged-diff://fnv1a64:reviewed",
+            integrationFinalDiffHash: "fnv1a64:final",
+            integrationFinalDiffRef: "artifact://.opensks/runtime/integration-candidates/run-commit/final.diff",
+            integrationRunId: "run-commit",
+            integrationCandidateId: "candidate-commit"
         ))
         await store.refreshCommitPreview()
         store.setCommitMessage("ship it")
 
-        _ = await store.performCommit()
+        let result = await store.performCommit()
 
         let lastCommit = try XCTUnwrap(service.commitCalls.last)
         XCTAssertEqual(lastCommit.expectedIndexHash, "reviewed-hash",
                        "the commit sends the preview's index_hash as expected-index-hash")
         XCTAssertEqual(lastCommit.message, "ship it")
+        XCTAssertEqual(result?.reviewedStagedDiffHash, "fnv1a64:reviewed")
+        XCTAssertEqual(result?.reviewedStagedDiffRef, "git-staged-diff://fnv1a64:reviewed")
+        XCTAssertEqual(result?.integrationFinalDiffRef, "artifact://.opensks/runtime/integration-candidates/run-commit/final.diff")
+        XCTAssertEqual(result?.integrationRunId, "run-commit")
     }
 
     func testCommitDisabledWithoutStagedOrMessage() async throws {
@@ -297,7 +315,15 @@ final class GitCommitTests: XCTestCase {
         }
 
         service.setCommitPreview(GitCommitPreview(
-            indexHash: "h1", stagedPaths: ["a.rs", "b.rs"], hasStaged: true
+            indexHash: "h1",
+            stagedPaths: ["a.rs", "b.rs"],
+            hasStaged: true,
+            stagedDiffHash: "fnv1a64:diffabcd1234",
+            stagedDiffRef: "git-staged-diff://fnv1a64:diffabcd1234",
+            integrationFinalDiffHash: "fnv1a64:finalabcd1234",
+            integrationFinalDiffRef: "artifact://.opensks/runtime/integration-candidates/run-commit-card/final.diff",
+            integrationRunId: "run-commit-card",
+            integrationCandidateId: "candidate-commit-card"
         ))
         await gitStore.refreshCommitPreview()
         gitStore.setCommitMessage("local commit")
@@ -316,6 +342,20 @@ final class GitCommitTests: XCTestCase {
         XCTAssertEqual(timeline.last?.payload.sourceSchema, "opensks.git-commit.v1")
         XCTAssertEqual(timeline.last?.payload.projection, "git_receipt")
         XCTAssertEqual(timeline.last?.payload.committed, true)
+        XCTAssertEqual(timeline.last?.payload.reviewedStagedDiffHash, "fnv1a64:diffabcd1234")
+        XCTAssertEqual(timeline.last?.payload.reviewedStagedDiffRef, "git-staged-diff://fnv1a64:diffabcd1234")
+        XCTAssertEqual(timeline.last?.payload.integrationFinalDiffRef, "artifact://.opensks/runtime/integration-candidates/run-commit-card/final.diff")
+        XCTAssertEqual(timeline.last?.payload.integrationRunId, "run-commit-card")
+        let durable = await waitForTimelineItem(
+            convStore,
+            conversationID: "conv-1",
+            id: "timeline-event-git-commit:\(result.commit)"
+        )
+        XCTAssertEqual(durable?.kind, .commitReceipt)
+        XCTAssertEqual(durable?.commitCard?.commit, result.commit)
+        XCTAssertEqual(durable?.commitCard?.reviewedStagedDiffHash, "fnv1a64:diffabcd1234")
+        XCTAssertEqual(durable?.commitCard?.integrationFinalDiffRef, "artifact://.opensks/runtime/integration-candidates/run-commit-card/final.diff")
+        XCTAssertEqual(durable?.payload.projection, "git_receipt")
     }
 
     // MARK: - Rendering: non-nil + fills width (no letterbox)
@@ -458,4 +498,22 @@ final class GitCommitTests: XCTestCase {
         let ei = try XCTUnwrap(executeIndex, "the push was executed")
         XCTAssertLessThan(ai, ei, "execute must follow approve — no silent push")
     }
+}
+
+@MainActor
+private func waitForTimelineItem(
+    _ store: ConversationStore,
+    conversationID: String,
+    id: String,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async -> ConversationTimelineItem? {
+    for _ in 0..<50 {
+        if let item = store.timelineItems(for: conversationID).first(where: { $0.id == id }) {
+            return item
+        }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    XCTFail("timed out waiting for timeline item \(id)", file: file, line: line)
+    return nil
 }

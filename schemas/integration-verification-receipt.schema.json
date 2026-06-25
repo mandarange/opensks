@@ -1,0 +1,188 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IntegrationVerificationReceipt",
+  "type": "object",
+  "required": [
+    "candidate_id",
+    "candidate_ref",
+    "content_redacted",
+    "generated_at_ms",
+    "id",
+    "patch_ref",
+    "path_redacted",
+    "reason_code",
+    "run_id",
+    "schema",
+    "state",
+    "verification_ref"
+  ],
+  "properties": {
+    "candidate_id": {
+      "type": "string"
+    },
+    "candidate_ref": {
+      "type": "string"
+    },
+    "content_redacted": {
+      "type": "boolean"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "failed_gates": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "failed_verifier_count": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "generated_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "id": {
+      "type": "string"
+    },
+    "passed_gates": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "passed_verifier_count": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "patch_ref": {
+      "type": "string"
+    },
+    "path_redacted": {
+      "type": "boolean"
+    },
+    "planned_verifier_count": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "repair_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "state": {
+      "type": "string"
+    },
+    "target_paths": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "verification_ref": {
+      "type": "string"
+    },
+    "verifier_lanes": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/IntegrationVerifierLaneReceipt"
+      }
+    }
+  },
+  "definitions": {
+    "IntegrationVerifierLaneReceipt": {
+      "type": "object",
+      "required": [
+        "content_redacted",
+        "generated_at_ms",
+        "id",
+        "lane_index",
+        "path_redacted",
+        "reason_code",
+        "state",
+        "verifier_kind",
+        "worker_id"
+      ],
+      "properties": {
+        "content_redacted": {
+          "type": "boolean"
+        },
+        "evidence_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "failed_gates": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "generated_at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "id": {
+          "type": "string"
+        },
+        "lane_index": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "passed_gates": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "path_redacted": {
+          "type": "boolean"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "verifier_kind": {
+          "type": "string"
+        },
+        "worker_id": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -1,8 +1,9 @@
 //! Read-only Git inspection service (PR-034).
 //!
 //! This crate shells `git` in **read-only mode only** to report repository
-//! state: working-tree status, the local branch list, and parsed diffs. It is
-//! the production counterpart of the wire shapes in [`opensks_contracts::git`].
+//! state: working-tree status, the local branch list, recent commit log, and
+//! parsed diffs. It is the production counterpart of the wire shapes in
+//! [`opensks_contracts::git`].
 //!
 //! # Read-only invariant
 //!
@@ -27,8 +28,8 @@ use std::path::Path;
 use std::process::Command;
 
 use opensks_contracts::{
-    GitBranchInfo, GitBranches, GitDiff, GitDiffFile, GitDiffHunk, GitStatus, GitStatusEntry,
-    GitStatusKind,
+    GIT_LOG_SCHEMA, GitBranchInfo, GitBranches, GitDiff, GitDiffFile, GitDiffHunk, GitLog,
+    GitLogEntry, GitStatus, GitStatusEntry, GitStatusKind,
 };
 use thiserror::Error;
 
@@ -60,6 +61,18 @@ pub struct DiffOptions {
     /// Diff the index against HEAD (`git diff --staged`) instead of the
     /// worktree against the index (`git diff`).
     pub staged: bool,
+}
+
+/// Options for read-only [`log`].
+#[derive(Debug, Clone)]
+pub struct LogOptions {
+    pub max_count: u32,
+}
+
+impl Default for LogOptions {
+    fn default() -> Self {
+        Self { max_count: 20 }
+    }
 }
 
 /// True when `workspace` resolves to a Git repository.
@@ -180,6 +193,33 @@ pub fn diff(workspace: &Path, options: &DiffOptions) -> Result<GitDiff, GitServi
     }
     let raw = git(workspace, &args)?;
     Ok(GitDiff::new(parse_unified_diff(&raw)))
+}
+
+/// Read-only `git log` with a bounded, stable output format. Returns an empty
+/// listing when the workspace is not a repository.
+pub fn log(workspace: &Path, options: &LogOptions) -> Result<GitLog, GitServiceError> {
+    let max_count = options.max_count.clamp(1, 200);
+    if !in_repo(workspace) {
+        return Ok(GitLog::not_in_repo(max_count));
+    }
+    let max_count_arg = format!("--max-count={max_count}");
+    let raw = git(
+        workspace,
+        &[
+            "log",
+            "--no-color",
+            "--no-ext-diff",
+            &max_count_arg,
+            "--date=iso-strict",
+            "--pretty=format:%H%x1f%h%x1f%an%x1f%ae%x1f%aI%x1f%s",
+        ],
+    )?;
+    Ok(GitLog {
+        schema: GIT_LOG_SCHEMA.to_string(),
+        in_repo: true,
+        max_count,
+        entries: parse_log_entries(&raw)?,
+    })
 }
 
 // --- porcelain v2 parsing ---------------------------------------------------
@@ -620,6 +660,41 @@ fn parse_unified_diff(raw: &str) -> Vec<GitDiffFile> {
     files
 }
 
+fn parse_log_entries(raw: &str) -> Result<Vec<GitLogEntry>, GitServiceError> {
+    let mut entries = Vec::new();
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields = line.splitn(6, '\x1f').collect::<Vec<_>>();
+        if fields.len() != 6 {
+            return Err(GitServiceError::Parse(format!(
+                "git log entry had {} fields",
+                fields.len()
+            )));
+        }
+        entries.push(GitLogEntry {
+            commit: fields[0].to_string(),
+            abbreviated_commit: fields[1].to_string(),
+            author_name: fields[2].to_string(),
+            author_email_redacted: redact_email(fields[3]),
+            authored_at: fields[4].to_string(),
+            subject: fields[5].to_string(),
+        });
+    }
+    Ok(entries)
+}
+
+fn redact_email(value: &str) -> String {
+    if let Some((_, domain)) = value.split_once('@') {
+        format!("[redacted]@{domain}")
+    } else if value.is_empty() {
+        String::new()
+    } else {
+        "[redacted]".to_string()
+    }
+}
+
 /// Parse the `diff --git a/<old> b/<new>` header into (new_path, orig_path).
 /// Quoted/space paths in this line are best-effort; the authoritative paths come
 /// from the `---`/`+++`/`rename` lines that follow.
@@ -719,7 +794,8 @@ pub fn redact_remote(value: &str) -> String {
 // --- shell helper -----------------------------------------------------------
 
 /// Run a read-only git command in `cwd`. All call sites in this crate pass only
-/// inspection verbs (`status`, `branch`, `worktree list`, `diff`, `rev-parse`).
+/// inspection verbs (`status`, `branch`, `worktree list`, `diff`, `log`,
+/// `rev-parse`).
 fn git(cwd: &Path, args: &[&str]) -> Result<String, GitServiceError> {
     let output = Command::new("git").args(args).current_dir(cwd).output()?;
     if !output.status.success() {
@@ -1031,6 +1107,34 @@ mod tests {
         fs::write(dir.join("plain.txt"), "hi\n").expect("write");
         let diff = diff(&dir, &DiffOptions::default()).expect("diff");
         assert!(diff.files.is_empty());
+    }
+
+    #[test]
+    fn log_reports_recent_commits_with_redacted_author_email() {
+        let dir = init_repo("log");
+        commit_file(&dir, "one.txt", "one\n", "first");
+        commit_file(&dir, "two.txt", "two\n", "second");
+
+        let history = log(&dir, &LogOptions { max_count: 1 }).expect("log");
+        assert!(history.in_repo);
+        assert_eq!(history.max_count, 1);
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].subject, "second");
+        assert_eq!(
+            history.entries[0].author_email_redacted,
+            "[redacted]@example.test"
+        );
+        assert!(!history.entries[0].commit.is_empty());
+        assert!(!history.entries[0].abbreviated_commit.is_empty());
+    }
+
+    #[test]
+    fn log_outside_repo_is_empty() {
+        let dir = temp_dir("log-no-repo");
+        let history = log(&dir, &LogOptions { max_count: 5 }).expect("log");
+        assert!(!history.in_repo);
+        assert_eq!(history.max_count, 5);
+        assert!(history.entries.is_empty());
     }
 
     // --- redaction -----------------------------------------------------------

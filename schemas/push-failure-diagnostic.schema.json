@@ -1,0 +1,104 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PushFailureDiagnostic",
+  "description": "A durable diagnostic for a remote push attempt that failed after approval. It deliberately stores only the reviewed push effect and a machine-readable code, never the raw remote URL, stderr, credentials, or argv.",
+  "type": "object",
+  "required": [
+    "attempts",
+    "code",
+    "effect_digest",
+    "idempotency_key",
+    "intent_id",
+    "local_oid",
+    "reason_code",
+    "ref",
+    "remote",
+    "remote_url_redacted",
+    "schema"
+  ],
+  "properties": {
+    "attempts": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "code": {
+      "$ref": "#/definitions/PushErrorCode"
+    },
+    "effect_digest": {
+      "type": "string"
+    },
+    "idempotency_key": {
+      "type": "string"
+    },
+    "intent_id": {
+      "type": "string"
+    },
+    "local_oid": {
+      "type": "string"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "ref": {
+      "type": "string"
+    },
+    "remote": {
+      "type": "string"
+    },
+    "remote_expected_oid": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "remote_url_redacted": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "PushErrorCode": {
+      "description": "A machine-readable code for a refused push operation, serialized as the shared `opensks.git-error.v1` contract.",
+      "oneOf": [
+        {
+          "description": "The supplied `--effect-digest` did not match the intent's current digest (the oid or ref moved). No usable approval is recorded; execution is refused.",
+          "type": "string",
+          "enum": [
+            "digest_mismatch"
+          ]
+        },
+        {
+          "description": "No still-valid approval exists for the intent; execution is refused.",
+          "type": "string",
+          "enum": [
+            "no_matching_approval"
+          ]
+        },
+        {
+          "description": "The ref is protected and no approval acknowledged it (`--ack-protected`).",
+          "type": "string",
+          "enum": [
+            "protected_branch"
+          ]
+        },
+        {
+          "description": "The remote push itself failed (e.g. an unreachable remote). The local commit and the pending intent are preserved for retry.",
+          "type": "string",
+          "enum": [
+            "push_failed"
+          ]
+        },
+        {
+          "description": "The referenced intent does not exist in the durable store.",
+          "type": "string",
+          "enum": [
+            "unknown_intent"
+          ]
+        }
+      ]
+    }
+  }
+}

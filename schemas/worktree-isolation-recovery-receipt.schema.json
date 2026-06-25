@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WorktreeIsolationRecoveryReceipt",
+  "type": "object",
+  "required": [
+    "content_redacted",
+    "generated_at_ms",
+    "id",
+    "inventory_ref",
+    "path_redacted",
+    "prune_attempted",
+    "prune_succeeded",
+    "reason_code",
+    "recovered_count",
+    "recovery_ref",
+    "run_id",
+    "schema",
+    "state",
+    "target_count"
+  ],
+  "properties": {
+    "content_redacted": {
+      "type": "boolean"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "generated_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "id": {
+      "type": "string"
+    },
+    "inventory_ref": {
+      "type": "string"
+    },
+    "path_redacted": {
+      "type": "boolean"
+    },
+    "prune_attempted": {
+      "type": "boolean"
+    },
+    "prune_succeeded": {
+      "type": "boolean"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "recovered_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "recovery_ref": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "state": {
+      "type": "string"
+    },
+    "target_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "targets": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/WorktreeIsolationRecoveryTarget"
+      }
+    }
+  },
+  "definitions": {
+    "IsolationMode": {
+      "type": "string",
+      "enum": [
+        "git_worktree",
+        "snapshot"
+      ]
+    },
+    "WorktreeIsolationRecoveryTarget": {
+      "type": "object",
+      "required": [
+        "artifact_ref",
+        "existed",
+        "isolation_id",
+        "mode",
+        "reason_code",
+        "removed",
+        "run_id",
+        "worker_id"
+      ],
+      "properties": {
+        "artifact_ref": {
+          "type": "string"
+        },
+        "existed": {
+          "type": "boolean"
+        },
+        "isolation_id": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/definitions/IsolationMode"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "removed": {
+          "type": "boolean"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "worker_id": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

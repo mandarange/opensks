@@ -23,6 +23,12 @@
     "capability_requirements": {
       "$ref": "#/definitions/CapabilityRequirements"
     },
+    "context_pack_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "dependencies": {
       "default": [],
       "type": "array",
@@ -78,6 +84,12 @@
       "type": "integer",
       "format": "int32"
     },
+    "provider_selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "requirement_ids": {
       "default": [],
       "type": "array",
@@ -94,8 +106,42 @@
     "schema": {
       "type": "string"
     },
+    "shard_policy_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "shard_policy_required_source_count": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "shard_policy_required_verifier_count": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "shard_policy_selection_policy": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "state": {
       "$ref": "#/definitions/WorkState"
+    },
+    "worker_context_pack_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "definitions": {

@@ -753,7 +753,13 @@ final class MockGitService: GitService, @unchecked Sendable {
         return GitCommitResult(
             committed: true,
             commit: "deadbeefcafef00d",
-            paths: cannedPreview.stagedPaths
+            paths: cannedPreview.stagedPaths,
+            reviewedStagedDiffHash: cannedPreview.stagedDiffHash,
+            reviewedStagedDiffRef: cannedPreview.stagedDiffRef,
+            integrationFinalDiffHash: cannedPreview.integrationFinalDiffHash,
+            integrationFinalDiffRef: cannedPreview.integrationFinalDiffRef,
+            integrationRunId: cannedPreview.integrationRunId,
+            integrationCandidateId: cannedPreview.integrationCandidateId
         )
     }
 

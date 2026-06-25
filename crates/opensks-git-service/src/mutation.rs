@@ -29,15 +29,18 @@
 //! content — changes the set of (oid, path) pairs and therefore the hash.
 //! [`commit`] recomputes the live hash and refuses with `index_changed` when it
 //! does not match the caller's `expected_index_hash`, so a commit can never be
-//! built from a stale preview.
+//! built from a stale preview. Preview and commit receipts also carry a reviewed
+//! staged-diff hash/ref, binding the operator-visible diff evidence to the
+//! committed receipt.
 
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 
 use opensks_contracts::{
     GitCommit, GitCommitPreview, GitCreateBranch, GitMutationError, GitStageRejectReason,
     GitStageRejection, GitStageResult, GitSwitch, GitSwitchBlocker, GitSwitchBlockerKind,
-    GitSwitchPreflight, GitUnstageResult,
+    GitSwitchPreflight, GitUnstageResult, IntegrationApplyReceipt,
 };
 
 use crate::GitServiceError;
@@ -46,6 +49,21 @@ use crate::GitServiceError;
 /// variant carries a [`GitMutationError`] so callers can serialize the
 /// `opensks.git-error.v1` contract and exit nonzero.
 pub type MutationOutcome<T> = Result<Result<T, GitMutationError>, GitServiceError>;
+
+#[derive(Debug, Clone)]
+struct StagedDiffEvidence {
+    hash: String,
+    diff_ref: String,
+    integration: Option<IntegrationFinalDiffEvidence>,
+}
+
+#[derive(Debug, Clone)]
+struct IntegrationFinalDiffEvidence {
+    hash: String,
+    final_diff_ref: String,
+    run_id: String,
+    candidate_id: String,
+}
 
 // --- switch preflight -------------------------------------------------------
 
@@ -197,7 +215,11 @@ pub fn unstage(workspace: &Path, paths: &[String]) -> Result<GitUnstageResult, G
 /// [`commit`] to detect a stale preview.
 pub fn commit_preview(workspace: &Path) -> Result<GitCommitPreview, GitServiceError> {
     let (index_hash, staged_paths) = index_state(workspace)?;
-    Ok(GitCommitPreview::new(index_hash, staged_paths))
+    let preview = GitCommitPreview::new(index_hash, staged_paths);
+    Ok(match staged_diff_evidence(workspace)? {
+        Some(evidence) => apply_preview_diff_evidence(preview, evidence),
+        None => preview,
+    })
 }
 
 /// Commit the current index with `message`, gated on `expected_index_hash`.
@@ -215,6 +237,7 @@ pub fn commit(
     expected_index_hash: &str,
 ) -> MutationOutcome<GitCommit> {
     let (index_hash, staged_paths) = index_state(workspace)?;
+    let staged_diff_evidence = staged_diff_evidence(workspace)?;
     if staged_paths.is_empty() {
         return Ok(Err(GitMutationError::nothing_staged()));
     }
@@ -236,7 +259,11 @@ pub fn commit(
     // only reviewed/staged paths are included.
     git(workspace, &["commit", "--message", message])?;
     let sha = rev_parse(workspace, "HEAD")?;
-    Ok(Ok(GitCommit::new(sha, staged_paths)))
+    let commit = GitCommit::new(sha, staged_paths);
+    Ok(Ok(match staged_diff_evidence {
+        Some(evidence) => apply_commit_diff_evidence(commit, evidence),
+        None => commit,
+    }))
 }
 
 // --- restricted-path policy -------------------------------------------------
@@ -337,6 +364,145 @@ fn index_state(workspace: &Path) -> Result<(String, Vec<String>), GitServiceErro
     }
     let paths: Vec<String> = entries.into_iter().map(|(_, path)| path).collect();
     Ok((format!("fnv1a64:{hash:016x}"), paths))
+}
+
+fn staged_diff_evidence(workspace: &Path) -> Result<Option<StagedDiffEvidence>, GitServiceError> {
+    let diff = git(
+        workspace,
+        &["diff", "--cached", "--no-color", "--binary", "--"],
+    )?;
+    if diff.is_empty() {
+        return Ok(None);
+    }
+    let hash = fnv1a64_text(&diff);
+    let diff_ref = format!("git-staged-diff://{hash}");
+    let plain_diff = git(workspace, &["diff", "--cached", "--no-color", "--"])?;
+    let integration = if plain_diff.is_empty() {
+        None
+    } else {
+        matching_integration_final_diff(workspace, &fnv1a64_text(&plain_diff))?
+    };
+    Ok(Some(StagedDiffEvidence {
+        hash,
+        diff_ref,
+        integration,
+    }))
+}
+
+fn apply_preview_diff_evidence(
+    preview: GitCommitPreview,
+    evidence: StagedDiffEvidence,
+) -> GitCommitPreview {
+    let preview = preview.with_staged_diff_evidence(evidence.hash, evidence.diff_ref);
+    match evidence.integration {
+        Some(integration) => preview.with_integration_final_diff_evidence(
+            integration.hash,
+            integration.final_diff_ref,
+            integration.run_id,
+            integration.candidate_id,
+        ),
+        None => preview,
+    }
+}
+
+fn apply_commit_diff_evidence(commit: GitCommit, evidence: StagedDiffEvidence) -> GitCommit {
+    let commit = commit.with_reviewed_staged_diff_evidence(evidence.hash, evidence.diff_ref);
+    match evidence.integration {
+        Some(integration) => commit.with_integration_final_diff_evidence(
+            integration.hash,
+            integration.final_diff_ref,
+            integration.run_id,
+            integration.candidate_id,
+        ),
+        None => commit,
+    }
+}
+
+fn matching_integration_final_diff(
+    workspace: &Path,
+    staged_plain_diff_hash: &str,
+) -> Result<Option<IntegrationFinalDiffEvidence>, GitServiceError> {
+    let root = workspace
+        .join(".opensks")
+        .join("runtime")
+        .join("integration-candidates");
+    if !root.exists() {
+        return Ok(None);
+    }
+    let mut matches = Vec::new();
+    for entry in fs::read_dir(&root)? {
+        let entry = entry?;
+        let candidate_dir = entry.path();
+        if !candidate_dir.is_dir() {
+            continue;
+        }
+        let Some(match_) = integration_final_diff_match(&candidate_dir, staged_plain_diff_hash)?
+        else {
+            continue;
+        };
+        matches.push(match_);
+    }
+    matches.sort_by(|lhs, rhs| {
+        lhs.generated_at_ms
+            .cmp(&rhs.generated_at_ms)
+            .then_with(|| lhs.run_id.cmp(&rhs.run_id))
+    });
+    Ok(matches.pop().map(|match_| match_.evidence))
+}
+
+struct IntegrationFinalDiffMatch {
+    generated_at_ms: u64,
+    run_id: String,
+    evidence: IntegrationFinalDiffEvidence,
+}
+
+fn integration_final_diff_match(
+    candidate_dir: &Path,
+    staged_plain_diff_hash: &str,
+) -> Result<Option<IntegrationFinalDiffMatch>, GitServiceError> {
+    let integration_path = candidate_dir.join("integration.json");
+    let raw = match fs::read_to_string(&integration_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let receipt: IntegrationApplyReceipt = serde_json::from_str(&raw)
+        .map_err(|error| GitServiceError::Parse(format!("integration receipt json: {error}")))?;
+    if receipt.state != "integrated"
+        || !receipt.main_workspace_modified
+        || !receipt.verifier_passed
+        || receipt.seal_ref.is_none()
+    {
+        return Ok(None);
+    }
+    let final_diff = match fs::read_to_string(candidate_dir.join("final.diff")) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let final_diff_hash = fnv1a64_text(&final_diff);
+    if final_diff_hash != staged_plain_diff_hash {
+        return Ok(None);
+    }
+    Ok(Some(IntegrationFinalDiffMatch {
+        generated_at_ms: receipt.generated_at_ms,
+        run_id: receipt.run_id.clone(),
+        evidence: IntegrationFinalDiffEvidence {
+            hash: final_diff_hash,
+            final_diff_ref: receipt.final_diff_ref,
+            run_id: receipt.run_id,
+            candidate_id: receipt.candidate_id,
+        },
+    }))
+}
+
+fn fnv1a64_text(value: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in value.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}")
 }
 
 /// Parse `git diff --cached --raw -z` records into `(dst_oid, path)` pairs.
@@ -589,6 +755,19 @@ mod tests {
         assert!(preview.has_staged);
         assert_eq!(preview.staged_paths, vec!["a.rs".to_string()]);
         let old_hash = preview.index_hash.clone();
+        let old_diff_hash = preview
+            .staged_diff_hash
+            .clone()
+            .expect("preview carries reviewed staged diff hash");
+        assert!(
+            old_diff_hash.starts_with("fnv1a64:"),
+            "diff hash is content-addressed"
+        );
+        let old_diff_ref = format!("git-staged-diff://{old_diff_hash}");
+        assert_eq!(
+            preview.staged_diff_ref.as_deref(),
+            Some(old_diff_ref.as_str())
+        );
 
         // Staging another file changes the index hash.
         write(&dir, "b.rs", "fn b() {}\n");
@@ -597,6 +776,10 @@ mod tests {
         assert_ne!(
             preview2.index_hash, old_hash,
             "staging another file must change the index hash"
+        );
+        assert_ne!(
+            preview2.staged_diff_hash, preview.staged_diff_hash,
+            "staging another file must change the reviewed staged diff evidence"
         );
 
         // Commit with the OLD (stale) hash is refused with index_changed.
@@ -610,6 +793,14 @@ mod tests {
             .expect("fresh commit should succeed");
         assert!(ok.committed);
         assert!(!ok.commit.is_empty());
+        assert_eq!(
+            ok.reviewed_staged_diff_hash, preview2.staged_diff_hash,
+            "commit receipt echoes the reviewed staged diff hash"
+        );
+        assert_eq!(
+            ok.reviewed_staged_diff_ref, preview2.staged_diff_ref,
+            "commit receipt echoes the reviewed staged diff ref"
+        );
         let mut returned = ok.paths.clone();
         returned.sort();
         assert_eq!(returned, vec!["a.rs".to_string(), "b.rs".to_string()]);
@@ -627,6 +818,102 @@ mod tests {
             names_sorted,
             vec!["a.rs".to_string(), "b.rs".to_string()],
             "commit must contain only the reviewed paths: {names:?}"
+        );
+    }
+
+    #[test]
+    fn commit_preview_and_receipt_link_matching_integration_final_diff() {
+        let dir = init_repo("commit-integration-final-diff");
+        commit_file(&dir, "seed.txt", "seed\n", "init");
+        write(&dir, "a.rs", "fn a() {}\n");
+        stage(&dir, &["a.rs".to_string()]).expect("stage a");
+        let final_diff =
+            git(&dir, &["diff", "--cached", "--no-color", "--"]).expect("plain staged diff");
+        let final_diff_hash = fnv1a64_text(&final_diff);
+        let run_id = "run-final-diff-link";
+        let candidate_dir = dir
+            .join(".opensks")
+            .join("runtime")
+            .join("integration-candidates")
+            .join(run_id);
+        fs::create_dir_all(&candidate_dir).expect("candidate dir");
+        fs::write(candidate_dir.join("final.diff"), &final_diff).expect("final diff");
+        let final_diff_ref =
+            format!("artifact://.opensks/runtime/integration-candidates/{run_id}/final.diff");
+        let receipt = IntegrationApplyReceipt {
+            schema: opensks_contracts::INTEGRATION_APPLY_RECEIPT_SCHEMA.to_string(),
+            id: format!("integration-apply-{run_id}"),
+            run_id: run_id.to_string(),
+            candidate_id: "candidate-final-diff-link".to_string(),
+            state: "integrated".to_string(),
+            reason_code: "candidate_applied_to_main_workspace".to_string(),
+            target_paths: vec!["a.rs".to_string()],
+            approval_required: true,
+            approval_id: Some(format!("approval-integration-{run_id}")),
+            candidate_ref: format!(
+                "artifact://.opensks/runtime/integration-candidates/{run_id}/candidate.json"
+            ),
+            patch_ref: format!(
+                "artifact://.opensks/runtime/integration-candidates/{run_id}/candidate.patch"
+            ),
+            verification_ref: Some(format!(
+                "artifact://.opensks/runtime/integration-candidates/{run_id}/verification.json"
+            )),
+            receipt_ref: format!(
+                "artifact://.opensks/runtime/integration-candidates/{run_id}/integration.json"
+            ),
+            integration_ref: format!(
+                "artifact://.opensks/runtime/integration-candidates/{run_id}/integration.json"
+            ),
+            final_diff_ref: final_diff_ref.clone(),
+            seal_ref: Some(format!(
+                "artifact://.opensks/runtime/integration-candidates/{run_id}/seal.json"
+            )),
+            repair_ref: None,
+            cleanup_ref: None,
+            main_workspace_modified: true,
+            verifier_passed: true,
+            path_redacted: true,
+            content_redacted: true,
+            evidence_refs: vec!["integration:coordinator-apply".to_string()],
+            generated_at_ms: 12_345,
+        };
+        fs::write(
+            candidate_dir.join("integration.json"),
+            serde_json::to_string(&receipt).expect("receipt json"),
+        )
+        .expect("integration json");
+
+        let preview = commit_preview(&dir).expect("preview");
+        assert_eq!(
+            preview.integration_final_diff_hash.as_deref(),
+            Some(final_diff_hash.as_str())
+        );
+        assert_eq!(
+            preview.integration_final_diff_ref.as_deref(),
+            Some(final_diff_ref.as_str())
+        );
+        assert_eq!(preview.integration_run_id.as_deref(), Some(run_id));
+        assert_eq!(
+            preview.integration_candidate_id.as_deref(),
+            Some("candidate-final-diff-link")
+        );
+
+        let committed = commit(&dir, "integrated commit", &preview.index_hash)
+            .expect("commit result")
+            .expect("commit succeeds");
+        assert_eq!(
+            committed.integration_final_diff_hash.as_deref(),
+            Some(final_diff_hash.as_str())
+        );
+        assert_eq!(
+            committed.integration_final_diff_ref.as_deref(),
+            Some(final_diff_ref.as_str())
+        );
+        assert_eq!(committed.integration_run_id.as_deref(), Some(run_id));
+        assert_eq!(
+            committed.integration_candidate_id.as_deref(),
+            Some("candidate-final-diff-link")
         );
     }
 

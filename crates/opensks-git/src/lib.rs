@@ -15,7 +15,10 @@ pub use push::{
 use opensks_contracts::{
     GIT_ISOLATION_SCHEMA, GateResult, GateStatus, GitIsolationReport, IsolationMode,
     OUTBOX_DISPATCH_REPORT_SCHEMA, OUTBOX_ITEM_SCHEMA, OutboxAction, OutboxItem,
-    PATCH_ENVELOPE_SCHEMA, PatchEnvelope, ProducerRef,
+    PATCH_ENVELOPE_SCHEMA, PatchEnvelope, ProducerRef, WORKTREE_ISOLATION_INVENTORY_RECEIPT_SCHEMA,
+    WORKTREE_ISOLATION_RECOVERY_RECEIPT_SCHEMA, WorktreeIsolationInventoryEntry,
+    WorktreeIsolationInventoryReceipt, WorktreeIsolationRecoveryReceipt,
+    WorktreeIsolationRecoveryTarget,
 };
 use thiserror::Error;
 
@@ -59,6 +62,13 @@ pub struct RepositoryInfo {
     pub lfs_detected: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsolationCleanupResult {
+    pub existed: bool,
+    pub removed: bool,
+    pub reason_code: String,
+}
+
 pub fn discover_repository(workspace: &Path) -> Option<RepositoryInfo> {
     let root_output = git(workspace, ["rev-parse", "--show-toplevel"]).ok()?;
     let root = PathBuf::from(root_output.trim());
@@ -81,12 +91,7 @@ pub fn create_isolation(
     run_id: &str,
     worker_id: &str,
 ) -> Result<GitIsolationReport, GitError> {
-    let worktree_path = workspace
-        .join(".opensks")
-        .join("runtime")
-        .join("worktrees")
-        .join(run_id)
-        .join(worker_id);
+    let worktree_path = isolation_path(workspace, run_id, worker_id);
     if let Some(repo) = discover_repository(workspace) {
         if worktree_path.exists() {
             fs::remove_dir_all(&worktree_path)?;
@@ -133,6 +138,162 @@ pub fn create_isolation(
     })
 }
 
+pub fn cleanup_isolation(
+    workspace: &Path,
+    run_id: &str,
+    worker_id: &str,
+) -> Result<IsolationCleanupResult, GitError> {
+    let worktree_path = isolation_path(workspace, run_id, worker_id);
+    if !worktree_path.exists() {
+        return Ok(IsolationCleanupResult {
+            existed: false,
+            removed: false,
+            reason_code: "source_isolation_already_absent".to_string(),
+        });
+    }
+    if let Some(repo) = discover_repository(workspace) {
+        if worktree_path.join(".git").exists() {
+            run_git(
+                &repo.root,
+                ["worktree", "remove", "--force", path_str(&worktree_path)?],
+            )?;
+        } else {
+            fs::remove_dir_all(&worktree_path)?;
+        }
+    } else {
+        fs::remove_dir_all(&worktree_path)?;
+    }
+    Ok(IsolationCleanupResult {
+        existed: true,
+        removed: !worktree_path.exists(),
+        reason_code: "source_isolation_removed".to_string(),
+    })
+}
+
+pub fn inventory_isolations(
+    workspace: &Path,
+    run_id: &str,
+    generated_at_ms: u64,
+) -> Result<WorktreeIsolationInventoryReceipt, GitError> {
+    let root = isolation_run_path(workspace, run_id);
+    let mut isolations = Vec::new();
+    if root.exists() {
+        let mut entries = fs::read_dir(&root)?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let worker_id = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            let has_git_metadata = path.join(".git").exists();
+            let mode = if has_git_metadata {
+                IsolationMode::GitWorktree
+            } else {
+                IsolationMode::Snapshot
+            };
+            isolations.push(WorktreeIsolationInventoryEntry {
+                isolation_id: format!("isolation-{run_id}-{worker_id}"),
+                run_id: run_id.to_string(),
+                worker_id,
+                mode,
+                artifact_ref: isolation_artifact_ref(run_id, entry.file_name().to_string_lossy()),
+                exists: true,
+                has_git_metadata,
+                path_redacted: true,
+                content_redacted: true,
+                reason_code: "runtime_isolation_present".to_string(),
+            });
+        }
+    }
+    let isolation_count = isolations.len();
+    let (state, reason_code) = if isolation_count == 0 {
+        ("empty", "no_runtime_isolations_found")
+    } else {
+        ("present", "runtime_isolations_discovered")
+    };
+    Ok(WorktreeIsolationInventoryReceipt {
+        schema: WORKTREE_ISOLATION_INVENTORY_RECEIPT_SCHEMA.to_string(),
+        id: format!("worktree-inventory-{run_id}"),
+        run_id: run_id.to_string(),
+        state: state.to_string(),
+        reason_code: reason_code.to_string(),
+        inventory_ref: format!("artifact://.opensks/runtime/worktrees/{run_id}/inventory.json"),
+        isolations,
+        isolation_count,
+        git_available: discover_repository(workspace).is_some(),
+        path_redacted: true,
+        content_redacted: true,
+        evidence_refs: vec!["git:worktree-inventory".to_string()],
+        generated_at_ms,
+    })
+}
+
+pub fn recover_isolations(
+    workspace: &Path,
+    run_id: &str,
+    generated_at_ms: u64,
+) -> Result<WorktreeIsolationRecoveryReceipt, GitError> {
+    let inventory = inventory_isolations(workspace, run_id, generated_at_ms)?;
+    let mut targets = Vec::new();
+    for isolation in &inventory.isolations {
+        let cleanup_result = cleanup_isolation(workspace, run_id, &isolation.worker_id);
+        let (existed, removed, reason_code) = match cleanup_result {
+            Ok(result) => (result.existed, result.removed, result.reason_code),
+            Err(_) => (true, false, "source_isolation_recovery_failed".to_string()),
+        };
+        targets.push(WorktreeIsolationRecoveryTarget {
+            isolation_id: isolation.isolation_id.clone(),
+            run_id: run_id.to_string(),
+            worker_id: isolation.worker_id.clone(),
+            mode: isolation.mode.clone(),
+            artifact_ref: isolation.artifact_ref.clone(),
+            existed,
+            removed,
+            reason_code,
+        });
+    }
+    let (prune_attempted, prune_succeeded) = if let Some(repo) = discover_repository(workspace) {
+        (true, run_git(&repo.root, ["worktree", "prune"]).is_ok())
+    } else {
+        (false, false)
+    };
+    let target_count = targets.len();
+    let recovered_count = targets
+        .iter()
+        .filter(|target| target.removed || !target.existed)
+        .count();
+    let (state, reason_code) = if target_count == 0 {
+        ("empty", "no_runtime_isolations_to_recover")
+    } else if recovered_count == target_count && (!prune_attempted || prune_succeeded) {
+        ("recovered", "runtime_isolations_recovered")
+    } else {
+        ("partial", "runtime_isolation_recovery_partial")
+    };
+    Ok(WorktreeIsolationRecoveryReceipt {
+        schema: WORKTREE_ISOLATION_RECOVERY_RECEIPT_SCHEMA.to_string(),
+        id: format!("worktree-recovery-{run_id}"),
+        run_id: run_id.to_string(),
+        state: state.to_string(),
+        reason_code: reason_code.to_string(),
+        inventory_ref: inventory.inventory_ref,
+        recovery_ref: format!("artifact://.opensks/runtime/worktrees/{run_id}/recovery.json"),
+        targets,
+        target_count,
+        recovered_count,
+        prune_attempted,
+        prune_succeeded,
+        path_redacted: true,
+        content_redacted: true,
+        evidence_refs: vec![
+            "git:worktree-inventory".to_string(),
+            "git:worktree-recovery".to_string(),
+        ],
+        generated_at_ms,
+    })
+}
+
 pub fn new_patch_envelope(
     id: impl Into<String>,
     work_item_id: impl Into<String>,
@@ -164,6 +325,26 @@ pub fn new_patch_envelope(
     }
 }
 
+fn isolation_path(workspace: &Path, run_id: &str, worker_id: &str) -> PathBuf {
+    isolation_run_path(workspace, run_id).join(worker_id)
+}
+
+fn isolation_run_path(workspace: &Path, run_id: &str) -> PathBuf {
+    workspace
+        .join(".opensks")
+        .join("runtime")
+        .join("worktrees")
+        .join(run_id)
+}
+
+fn isolation_artifact_ref(run_id: &str, worker_id: impl AsRef<str>) -> String {
+    format!(
+        "artifact://.opensks/runtime/worktrees/{}/{}",
+        run_id,
+        worker_id.as_ref()
+    )
+}
+
 pub fn check_patch_envelope(workspace: &Path, envelope: &PatchEnvelope) -> Result<(), GitError> {
     for target in &envelope.target_paths {
         let path = resolve_repo_path(workspace, target)?;
@@ -188,6 +369,18 @@ pub fn check_patch_envelope(workspace: &Path, envelope: &PatchEnvelope) -> Resul
     Ok(())
 }
 
+pub fn check_unified_diff_apply(
+    workspace: &Path,
+    envelope: &PatchEnvelope,
+    unified_diff: &str,
+) -> Result<(), GitError> {
+    if discover_repository(workspace).is_none() {
+        return Err(GitError::GitRequired);
+    }
+    check_patch_envelope(workspace, envelope)?;
+    run_git_with_stdin(workspace, ["apply", "--check"], unified_diff)
+}
+
 pub fn apply_unified_diff_with_rollback<F>(
     workspace: &Path,
     envelope: &PatchEnvelope,
@@ -209,6 +402,60 @@ where
     }
     restore_rollback(workspace, rollback)?;
     Err(GitError::VerificationFailedRolledBack)
+}
+
+pub fn working_tree_diff(workspace: &Path, target_paths: &[String]) -> Result<String, GitError> {
+    if discover_repository(workspace).is_none() {
+        return Err(GitError::GitRequired);
+    }
+    for target in target_paths {
+        let _ = resolve_repo_path(workspace, target)?;
+    }
+    let output = Command::new("git")
+        .arg("diff")
+        .arg("--")
+        .args(target_paths)
+        .current_dir(workspace)
+        .output()?;
+    if !output.status.success() {
+        return Err(GitError::GitCommand(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+pub fn target_paths_changed_since_base(
+    workspace: &Path,
+    base_commit: &str,
+    target_paths: &[String],
+) -> Result<bool, GitError> {
+    if target_paths.is_empty() {
+        return Ok(false);
+    }
+    if discover_repository(workspace).is_none() {
+        return Err(GitError::GitRequired);
+    }
+    for target in target_paths {
+        let _ = resolve_repo_path(workspace, target)?;
+    }
+    let output = Command::new("git")
+        .arg("diff")
+        .arg("--quiet")
+        .arg("--exit-code")
+        .arg(base_commit)
+        .arg("HEAD")
+        .arg("--")
+        .args(target_paths)
+        .current_dir(workspace)
+        .output()?;
+    match output.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => Err(GitError::GitCommand(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        )),
+    }
 }
 
 pub fn content_hash(path: &Path) -> Result<String, GitError> {
@@ -651,6 +898,135 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_isolation_removes_snapshot_workspace() {
+        let root = temp_dir("snapshot-cleanup");
+        fs::write(root.join("plain.txt"), "hello").expect("write file");
+        let report = create_isolation(&root, "run1", "worker1").expect("isolation");
+        assert!(Path::new(&report.worktree_path).exists());
+
+        let cleanup = cleanup_isolation(&root, "run1", "worker1").expect("cleanup");
+
+        assert!(cleanup.existed);
+        assert!(cleanup.removed);
+        assert_eq!(cleanup.reason_code, "source_isolation_removed");
+        assert!(!Path::new(&report.worktree_path).exists());
+    }
+
+    #[test]
+    fn cleanup_isolation_removes_git_worktree() {
+        let repo = init_repo("worktree-cleanup");
+        let report = create_isolation(&repo, "run1", "worker1").expect("isolation");
+        assert_eq!(report.mode, IsolationMode::GitWorktree);
+        assert!(Path::new(&report.worktree_path).join(".git").exists());
+
+        let cleanup = cleanup_isolation(&repo, "run1", "worker1").expect("cleanup");
+
+        assert!(cleanup.existed);
+        assert!(cleanup.removed);
+        assert_eq!(cleanup.reason_code, "source_isolation_removed");
+        assert!(!Path::new(&report.worktree_path).exists());
+        let worktree_list = git(&repo, ["worktree", "list"]).expect("worktree list");
+        assert!(!worktree_list.contains("worker1"));
+    }
+
+    #[test]
+    fn cleanup_isolation_reports_already_absent() {
+        let root = temp_dir("cleanup-absent");
+
+        let cleanup = cleanup_isolation(&root, "run1", "worker1").expect("cleanup absent");
+
+        assert!(!cleanup.existed);
+        assert!(!cleanup.removed);
+        assert_eq!(cleanup.reason_code, "source_isolation_already_absent");
+    }
+
+    #[test]
+    fn inventory_isolations_reports_git_worktrees_without_absolute_paths() {
+        let repo = init_repo("worktree-inventory");
+        let report = create_isolation(&repo, "run1", "worker1").expect("isolation");
+
+        let inventory = inventory_isolations(&repo, "run1", 1_000).expect("inventory");
+        let json = serde_json::to_string(&inventory).expect("inventory json");
+
+        assert_eq!(
+            inventory.schema,
+            opensks_contracts::WORKTREE_ISOLATION_INVENTORY_RECEIPT_SCHEMA
+        );
+        assert_eq!(inventory.state, "present");
+        assert_eq!(inventory.isolation_count, 1);
+        assert!(inventory.git_available);
+        assert_eq!(inventory.isolations[0].worker_id, "worker1");
+        assert_eq!(inventory.isolations[0].mode, IsolationMode::GitWorktree);
+        assert!(inventory.isolations[0].has_git_metadata);
+        assert_eq!(
+            inventory.isolations[0].artifact_ref,
+            "artifact://.opensks/runtime/worktrees/run1/worker1"
+        );
+        assert!(!json.contains(repo.to_string_lossy().as_ref()));
+        assert!(!json.contains(&report.worktree_path));
+    }
+
+    #[test]
+    fn inventory_isolations_reports_snapshot_workspaces() {
+        let root = temp_dir("snapshot-inventory");
+        fs::write(root.join("plain.txt"), "hello").expect("write file");
+        create_isolation(&root, "run1", "worker1").expect("isolation");
+
+        let inventory = inventory_isolations(&root, "run1", 1_000).expect("inventory");
+
+        assert_eq!(inventory.state, "present");
+        assert_eq!(inventory.isolation_count, 1);
+        assert!(!inventory.git_available);
+        assert_eq!(inventory.isolations[0].mode, IsolationMode::Snapshot);
+        assert!(!inventory.isolations[0].has_git_metadata);
+        assert!(inventory.path_redacted);
+        assert!(inventory.content_redacted);
+    }
+
+    #[test]
+    fn recover_isolations_removes_git_worktrees_and_prunes_metadata() {
+        let repo = init_repo("worktree-recovery");
+        let first = create_isolation(&repo, "run1", "worker1").expect("first isolation");
+        let second = create_isolation(&repo, "run1", "worker2").expect("second isolation");
+
+        let recovery = recover_isolations(&repo, "run1", 1_000).expect("recovery");
+
+        assert_eq!(
+            recovery.schema,
+            opensks_contracts::WORKTREE_ISOLATION_RECOVERY_RECEIPT_SCHEMA
+        );
+        assert_eq!(recovery.state, "recovered");
+        assert_eq!(recovery.target_count, 2);
+        assert_eq!(recovery.recovered_count, 2);
+        assert!(recovery.prune_attempted);
+        assert!(recovery.prune_succeeded);
+        assert!(!Path::new(&first.worktree_path).exists());
+        assert!(!Path::new(&second.worktree_path).exists());
+        let worktree_list = git(&repo, ["worktree", "list"]).expect("worktree list");
+        assert!(!worktree_list.contains("worker1"));
+        assert!(!worktree_list.contains("worker2"));
+        let json = serde_json::to_string(&recovery).expect("recovery json");
+        assert!(!json.contains(repo.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn recover_isolations_removes_snapshot_workspaces() {
+        let root = temp_dir("snapshot-recovery");
+        fs::write(root.join("plain.txt"), "hello").expect("write file");
+        let report = create_isolation(&root, "run1", "worker1").expect("isolation");
+
+        let recovery = recover_isolations(&root, "run1", 1_000).expect("recovery");
+
+        assert_eq!(recovery.state, "recovered");
+        assert_eq!(recovery.target_count, 1);
+        assert_eq!(recovery.recovered_count, 1);
+        assert!(!recovery.prune_attempted);
+        assert!(!Path::new(&report.worktree_path).exists());
+        assert!(recovery.path_redacted);
+        assert!(recovery.content_redacted);
+    }
+
+    #[test]
     fn dirty_path_guard_preserves_user_change() {
         let repo = init_repo("dirty");
         fs::write(repo.join("file.txt"), "user dirty\n").expect("dirty file");
@@ -692,6 +1068,57 @@ index 3b18e51..a5df3c0 100644
             fs::read_to_string(repo.join("file.txt")).expect("file"),
             "before\n"
         );
+    }
+
+    #[test]
+    fn working_tree_diff_returns_path_limited_patch() {
+        let repo = init_repo("working-tree-diff");
+        fs::write(repo.join("file.txt"), "after\n").expect("modify file");
+        fs::write(repo.join("other.txt"), "other\n").expect("write other");
+
+        let diff = working_tree_diff(&repo, &["file.txt".to_string()]).expect("working tree diff");
+
+        assert!(diff.contains("diff --git a/file.txt b/file.txt"));
+        assert!(diff.contains("-before"));
+        assert!(diff.contains("+after"));
+        assert!(!diff.contains("other.txt"));
+    }
+
+    #[test]
+    fn target_paths_changed_since_base_detects_committed_target_drift() {
+        let repo = init_repo("target-drift");
+        let base = git(&repo, ["rev-parse", "HEAD"])
+            .expect("base commit")
+            .trim()
+            .to_string();
+        fs::write(repo.join("file.txt"), "after\n").expect("modify target");
+        run_git(&repo, ["add", "file.txt"]).expect("git add target");
+        run_git(&repo, ["commit", "-m", "target drift"]).expect("git commit target");
+
+        let changed = target_paths_changed_since_base(&repo, &base, &["file.txt".to_string()])
+            .expect("target drift check");
+
+        assert!(changed);
+    }
+
+    #[test]
+    fn target_paths_changed_since_base_ignores_unrelated_commits() {
+        let repo = init_repo("unrelated-drift");
+        let base = git(&repo, ["rev-parse", "HEAD"])
+            .expect("base commit")
+            .trim()
+            .to_string();
+        fs::write(repo.join("other.txt"), "other\n").expect("write unrelated");
+        run_git(&repo, ["add", "other.txt"]).expect("git add unrelated");
+        run_git(&repo, ["commit", "-m", "unrelated drift"]).expect("git commit unrelated");
+
+        let changed = target_paths_changed_since_base(&repo, &base, &["file.txt".to_string()])
+            .expect("target drift check");
+        let empty_changed =
+            target_paths_changed_since_base(&repo, &base, &[]).expect("empty target drift check");
+
+        assert!(!changed);
+        assert!(!empty_changed);
     }
 
     #[test]

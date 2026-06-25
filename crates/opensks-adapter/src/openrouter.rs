@@ -7,12 +7,19 @@
 //! never placed in process argv. Transport is native HTTP over rustls-backed
 //! `reqwest`, so provider dispatch no longer depends on a subprocess.
 
-use std::time::Duration;
+use std::{sync::atomic::Ordering, time::Duration};
 
+use base64::Engine as _;
 use opensks_contracts::projection::RunProjectionState;
 use opensks_contracts::{
     AGENT_ADAPTER_DESCRIPTOR_SCHEMA, AgentAdapterDescriptor, AgentAdapterKind,
+    default_tool_registry,
 };
+use opensks_image::{
+    ImageError, ImageGenerationClient, ImageInspectionClient, ImageInspectionProviderOutput,
+    ImageInspectionProviderRequest, ImageProviderOutput, ImageProviderRequest,
+};
+use reqwest::header::CONTENT_TYPE;
 
 use crate::{
     AgentAdapter, AgentAdapterError, AgentEventKind, AgentEventSink, AgentRunOutcome,
@@ -88,19 +95,27 @@ impl OpenRouterAdapter {
             .map_err(|error| AgentAdapterError::Provider(redact(&error.to_string())))?;
         let response = client
             .post(&self.base_url)
-            .bearer_auth(api_key)
+            .bearer_auth(&api_key)
             .json(body)
             .send()
-            .map_err(|error| AgentAdapterError::Provider(redact(&error.to_string())))?;
+            .map_err(|error| {
+                AgentAdapterError::Provider(redact_with_secrets(
+                    &error.to_string(),
+                    &[api_key.as_str()],
+                ))
+            })?;
         let status = response.status();
-        let response_body = response
-            .text()
-            .map_err(|error| AgentAdapterError::Provider(redact(&error.to_string())))?;
+        let response_body = response.text().map_err(|error| {
+            AgentAdapterError::Provider(redact_with_secrets(
+                &error.to_string(),
+                &[api_key.as_str()],
+            ))
+        })?;
         if !status.is_success() {
             return Err(AgentAdapterError::Provider(format!(
                 "provider HTTP status {}: {}",
                 status.as_u16(),
-                redact(response_body.trim())
+                redact_with_secrets(response_body.trim(), &[api_key.as_str()])
             )));
         }
         serde_json::from_str(&response_body)
@@ -171,8 +186,35 @@ impl AgentAdapter for OpenRouterAdapter {
                 evidence_refs: vec![],
             });
         };
+        let cancelled_outcome = |seq: &mut u64| {
+            emit(
+                AgentEventKind::Warning,
+                serde_json::json!({
+                    "code": "run_cancelled",
+                    "message": "Turn cancelled before the provider response was accepted.",
+                    "reason_code": "cancelled_by_user",
+                }),
+                seq,
+            );
+            AgentRunOutcome {
+                assistant_text: "Turn cancelled before the provider response was accepted."
+                    .to_string(),
+                patches: vec![],
+                apply_results: vec![],
+                final_state: RunProjectionState::Cancelled,
+            }
+        };
 
-        match self.complete(&request.prompt) {
+        if openrouter_request_cancelled(request) {
+            return Ok(cancelled_outcome(&mut sequence));
+        }
+
+        let completion = self.complete(&request.prompt);
+        if openrouter_request_cancelled(request) {
+            return Ok(cancelled_outcome(&mut sequence));
+        }
+
+        match completion {
             Ok(text) => {
                 emit(
                     AgentEventKind::AssistantTextCompleted,
@@ -202,6 +244,13 @@ impl AgentAdapter for OpenRouterAdapter {
             }
         }
     }
+}
+
+fn openrouter_request_cancelled(request: &AgentRunRequest) -> bool {
+    request
+        .cancellation_token
+        .as_ref()
+        .is_some_and(|token| token.load(Ordering::SeqCst))
 }
 
 // ===========================================================================
@@ -240,53 +289,448 @@ impl ChatCompleter for NativeHttpChatCompleter {
     }
 }
 
-/// The function/tool schema advertised to the model — the three workspace edit
-/// tools the agentic loop knows how to execute.
-pub fn tool_definitions() -> serde_json::Value {
-    serde_json::json!([
-        {
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "Read a workspace-relative file's full text.",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "path": { "type": "string" } },
-                    "required": ["path"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "description": "Write (create or replace) a workspace-relative file's full content.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string" },
-                        "content": { "type": "string" }
-                    },
-                    "required": ["path", "content"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "append_line",
-                "description": "Append a line to a workspace-relative file (creating it if absent).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string" },
-                        "value": { "type": "string" }
-                    },
-                    "required": ["path", "value"]
-                }
-            }
+/// Native OpenAI-compatible chat-completions transport for provider-registry
+/// dispatch. The bearer token is accepted as an in-memory value and is scrubbed
+/// from provider diagnostics before anything reaches events, logs, or UI text.
+pub struct OpenAiCompatibleChatCompleter {
+    base_url: String,
+    bearer_token: String,
+    timeout: Duration,
+}
+
+impl OpenAiCompatibleChatCompleter {
+    pub fn new(
+        base_url: impl Into<String>,
+        bearer_token: impl Into<String>,
+    ) -> Result<Self, AgentAdapterError> {
+        let base_url = base_url.into();
+        let bearer_token = bearer_token.into();
+        if bearer_token.trim().is_empty() {
+            return Err(AgentAdapterError::Provider(
+                "provider credential resolved empty".to_string(),
+            ));
         }
-    ])
+        validate_chat_base_url(&base_url)?;
+        Ok(Self {
+            base_url,
+            bearer_token,
+            timeout: Duration::from_secs(120),
+        })
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    fn chat_completions_endpoint(&self) -> Result<String, AgentAdapterError> {
+        validate_chat_base_url(&self.base_url)?;
+        Ok(format!(
+            "{}/chat/completions",
+            self.base_url.trim_end_matches('/')
+        ))
+    }
+}
+
+/// Native OpenAI-compatible image generation transport for provider-registry
+/// dispatch. The key is accepted as an in-memory bearer token and is scrubbed
+/// from every provider diagnostic.
+pub struct OpenAiCompatibleImageGenerator {
+    base_url: String,
+    bearer_token: String,
+    timeout: Duration,
+}
+
+impl OpenAiCompatibleImageGenerator {
+    pub fn new(
+        base_url: impl Into<String>,
+        bearer_token: impl Into<String>,
+    ) -> Result<Self, AgentAdapterError> {
+        let base_url = base_url.into();
+        let bearer_token = bearer_token.into();
+        if bearer_token.trim().is_empty() {
+            return Err(AgentAdapterError::Provider(
+                "provider credential resolved empty".to_string(),
+            ));
+        }
+        validate_chat_base_url(&base_url)?;
+        Ok(Self {
+            base_url,
+            bearer_token,
+            timeout: Duration::from_secs(120),
+        })
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    fn image_generations_endpoint(&self) -> Result<String, AgentAdapterError> {
+        validate_chat_base_url(&self.base_url)?;
+        Ok(format!(
+            "{}/images/generations",
+            self.base_url.trim_end_matches('/')
+        ))
+    }
+
+    fn chat_completions_endpoint(&self) -> Result<String, AgentAdapterError> {
+        validate_chat_base_url(&self.base_url)?;
+        Ok(format!(
+            "{}/chat/completions",
+            self.base_url.trim_end_matches('/')
+        ))
+    }
+
+    fn post_generation(
+        &self,
+        request: &ImageProviderRequest<'_>,
+    ) -> Result<serde_json::Value, ImageError> {
+        let endpoint = self
+            .image_generations_endpoint()
+            .map_err(|error| ImageError::Provider(error.to_string()))?;
+        let body = serde_json::json!({
+            "model": request.remote_model_id,
+            "prompt": request.prompt,
+            "n": 1,
+            "size": format!("{}x{}", request.width, request.height),
+        });
+        let client = reqwest::blocking::Client::builder()
+            .timeout(self.timeout)
+            .user_agent("opensks-adapter/0.1 provider-image")
+            .build()
+            .map_err(|error| ImageError::Provider(error.to_string()))?;
+        let response = client
+            .post(&endpoint)
+            .bearer_auth(&self.bearer_token)
+            .json(&body)
+            .send()
+            .map_err(|error| {
+                ImageError::Provider(redact_with_secrets(
+                    &error.to_string(),
+                    &[self.bearer_token.as_str()],
+                ))
+            })?;
+        let status = response.status();
+        let response_body = response.text().map_err(|error| {
+            ImageError::Provider(redact_with_secrets(
+                &error.to_string(),
+                &[self.bearer_token.as_str()],
+            ))
+        })?;
+        if !status.is_success() {
+            return Err(ImageError::Provider(format!(
+                "provider HTTP status {}: {}",
+                status.as_u16(),
+                redact_with_secrets(response_body.trim(), &[self.bearer_token.as_str()])
+            )));
+        }
+        serde_json::from_str(&response_body)
+            .map_err(|_| ImageError::Provider("provider returned non-JSON".to_string()))
+    }
+
+    fn download_image_url(&self, url: &str) -> Result<(Vec<u8>, Option<String>), ImageError> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(self.timeout)
+            .user_agent("opensks-adapter/0.1 provider-image-download")
+            .build()
+            .map_err(|error| ImageError::Provider(error.to_string()))?;
+        let response = client.get(url).send().map_err(|error| {
+            ImageError::Provider(redact_with_secrets(
+                &error.to_string(),
+                &[self.bearer_token.as_str()],
+            ))
+        })?;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        if !status.is_success() {
+            return Err(ImageError::Provider(format!(
+                "provider image URL download HTTP status {}",
+                status.as_u16()
+            )));
+        }
+        let bytes = response.bytes().map_err(|error| {
+            ImageError::Provider(redact_with_secrets(
+                &error.to_string(),
+                &[self.bearer_token.as_str()],
+            ))
+        })?;
+        Ok((bytes.to_vec(), content_type))
+    }
+}
+
+impl ImageInspectionClient for OpenAiCompatibleImageGenerator {
+    fn inspect_image(
+        &self,
+        request: &ImageInspectionProviderRequest<'_>,
+    ) -> Result<ImageInspectionProviderOutput, ImageError> {
+        let endpoint = self
+            .chat_completions_endpoint()
+            .map_err(|error| ImageError::Provider(error.to_string()))?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(request.bytes);
+        let data_url = format!("data:{};base64,{}", request.mime_type, encoded);
+        let body = serde_json::json!({
+            "model": request.remote_model_id,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": request.prompt },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": data_url
+                        }
+                    }
+                ]
+            }],
+            "max_completion_tokens": 512,
+        });
+        let client = reqwest::blocking::Client::builder()
+            .timeout(self.timeout)
+            .user_agent("opensks-adapter/0.1 provider-vision")
+            .build()
+            .map_err(|error| ImageError::Provider(error.to_string()))?;
+        let response = client
+            .post(&endpoint)
+            .bearer_auth(&self.bearer_token)
+            .json(&body)
+            .send()
+            .map_err(|error| {
+                ImageError::Provider(redact_with_secrets(
+                    &error.to_string(),
+                    &[self.bearer_token.as_str()],
+                ))
+            })?;
+        let status = response.status();
+        let response_body = response.text().map_err(|error| {
+            ImageError::Provider(redact_with_secrets(
+                &error.to_string(),
+                &[self.bearer_token.as_str()],
+            ))
+        })?;
+        if !status.is_success() {
+            return Err(ImageError::Provider(format!(
+                "provider HTTP status {}: {}",
+                status.as_u16(),
+                redact_with_secrets(response_body.trim(), &[self.bearer_token.as_str()])
+            )));
+        }
+        let json: serde_json::Value = serde_json::from_str(&response_body)
+            .map_err(|_| ImageError::Provider("provider returned non-JSON".to_string()))?;
+        if let Some(error) = json.get("error") {
+            let message = error
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown provider error");
+            return Err(ImageError::Provider(redact_with_secrets(
+                message,
+                &[self.bearer_token.as_str()],
+            )));
+        }
+        let text = json
+            .pointer("/choices/0/message/content")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| ImageError::Provider("provider returned no vision text".to_string()))?
+            .to_string();
+        Ok(ImageInspectionProviderOutput {
+            text,
+            evidence_refs: vec!["adapter:openai-compatible-vision:chat-completions".to_string()],
+        })
+    }
+}
+
+impl ImageGenerationClient for OpenAiCompatibleImageGenerator {
+    fn generate_image(
+        &self,
+        request: &ImageProviderRequest<'_>,
+    ) -> Result<ImageProviderOutput, ImageError> {
+        let response = self.post_generation(request)?;
+        if let Some(error) = response.get("error") {
+            let message = error
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown provider error");
+            return Err(ImageError::Provider(redact_with_secrets(
+                message,
+                &[self.bearer_token.as_str()],
+            )));
+        }
+        let image = response
+            .get("data")
+            .and_then(|value| value.as_array())
+            .and_then(|items| items.first())
+            .ok_or_else(|| ImageError::Provider("provider returned no image data".to_string()))?;
+        if let Some(encoded) = image.get("b64_json").and_then(|value| value.as_str()) {
+            let bytes = decode_base64_image(encoded)?;
+            let extension = image_extension_for(&bytes, None);
+            return Ok(ImageProviderOutput {
+                bytes,
+                extension,
+                mime_type: None,
+                evidence_refs: vec!["adapter:openai-compatible-images:b64_json".to_string()],
+            });
+        }
+        if let Some(url) = image.get("url").and_then(|value| value.as_str()) {
+            let (bytes, content_type) = self.download_image_url(url)?;
+            let extension = image_extension_for(&bytes, content_type.as_deref());
+            return Ok(ImageProviderOutput {
+                bytes,
+                extension,
+                mime_type: content_type,
+                evidence_refs: vec!["adapter:openai-compatible-images:url".to_string()],
+            });
+        }
+        Err(ImageError::Provider(
+            "provider image object had no b64_json or url".to_string(),
+        ))
+    }
+}
+
+impl ChatCompleter for OpenAiCompatibleChatCompleter {
+    fn complete(&self, body: &serde_json::Value) -> Result<serde_json::Value, AgentAdapterError> {
+        let endpoint = self.chat_completions_endpoint()?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(self.timeout)
+            .user_agent("opensks-adapter/0.1 provider-chat")
+            .build()
+            .map_err(|error| AgentAdapterError::Provider(error.to_string()))?;
+        let response = client
+            .post(&endpoint)
+            .bearer_auth(&self.bearer_token)
+            .json(body)
+            .send()
+            .map_err(|error| {
+                AgentAdapterError::Provider(redact_with_secrets(
+                    &error.to_string(),
+                    &[self.bearer_token.as_str()],
+                ))
+            })?;
+        let status = response.status();
+        let response_body = response.text().map_err(|error| {
+            AgentAdapterError::Provider(redact_with_secrets(
+                &error.to_string(),
+                &[self.bearer_token.as_str()],
+            ))
+        })?;
+        if !status.is_success() {
+            return Err(AgentAdapterError::Provider(format!(
+                "provider HTTP status {}: {}",
+                status.as_u16(),
+                redact_with_secrets(response_body.trim(), &[self.bearer_token.as_str()])
+            )));
+        }
+        serde_json::from_str(&response_body)
+            .map_err(|_| AgentAdapterError::Provider("provider returned non-JSON".to_string()))
+    }
+}
+
+fn validate_chat_base_url(base_url: &str) -> Result<(), AgentAdapterError> {
+    let parsed = reqwest::Url::parse(base_url).map_err(|error| {
+        AgentAdapterError::Provider(format!("invalid provider endpoint: {error}"))
+    })?;
+    if parsed.scheme() == "http" && !is_loopback_host(parsed.host_str()) {
+        return Err(AgentAdapterError::Provider(
+            "insecure HTTP provider endpoint must be local".to_string(),
+        ));
+    }
+    if base_url.contains('@') {
+        return Err(AgentAdapterError::Provider(
+            "provider endpoint must not contain userinfo credentials".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_loopback_host(host: Option<&str>) -> bool {
+    matches!(host, Some("localhost") | Some("127.0.0.1") | Some("::1"))
+}
+
+fn decode_base64_image(encoded: &str) -> Result<Vec<u8>, ImageError> {
+    let payload = encoded
+        .strip_prefix("data:")
+        .and_then(|_| encoded.split_once(',').map(|(_, payload)| payload))
+        .unwrap_or(encoded);
+    base64::engine::general_purpose::STANDARD
+        .decode(payload.trim())
+        .map_err(|_| ImageError::Provider("provider returned invalid base64 image".to_string()))
+}
+
+fn image_extension_for(bytes: &[u8], content_type: Option<&str>) -> String {
+    match content_type
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("image/png") => return "png".to_string(),
+        Some("image/jpeg") | Some("image/jpg") => return "jpeg".to_string(),
+        Some("image/webp") => return "webp".to_string(),
+        _ => {}
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "png".to_string()
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        "jpeg".to_string()
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        "webp".to_string()
+    } else {
+        "bin".to_string()
+    }
+}
+
+/// The function/tool schema advertised to OpenAI-compatible providers. The
+/// canonical ToolRegistry is the single source; provider function names use a
+/// safe spelling while preserving the dotted tool id in the description.
+pub fn tool_definitions() -> serde_json::Value {
+    tool_definitions_with_extra_available_tools(&[])
+}
+
+pub fn tool_definitions_with_extra_available_tools(extra_tool_names: &[&str]) -> serde_json::Value {
+    serde_json::Value::Array(
+        default_tool_registry()
+            .tools
+            .iter()
+            .filter(|tool| {
+                let explicitly_enabled = extra_tool_names.iter().any(|name| *name == tool.name);
+                explicitly_enabled
+                    || (tool.is_available() && !requires_runtime_executor(&tool.name))
+            })
+            .filter(|tool| !matches!(tool.permission, opensks_contracts::ToolPermission::Deny))
+            .map(provider_tool_definition)
+            .collect(),
+    )
+}
+
+fn requires_runtime_executor(tool_name: &str) -> bool {
+    matches!(tool_name, "image.generate" | "image.inspect")
+}
+
+fn provider_tool_definition(tool: &opensks_contracts::ToolDescriptor) -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": tool.provider_function_name(),
+            "description": format!("{} Canonical tool id: {}.", tool.description, tool.name),
+            "parameters": tool.input_schema.clone(),
+        }
+    })
+}
+
+#[allow(dead_code)]
+fn legacy_tool_definitions() -> serde_json::Value {
+    serde_json::Value::Array(
+        default_tool_registry()
+            .available_provider_tools()
+            .into_iter()
+            .map(provider_tool_definition)
+            .collect(),
+    )
 }
 
 /// Parse an OpenRouter chat-completions response into the loop's next step: tool
@@ -374,25 +818,190 @@ fn parse_tool_call(tc: &serde_json::Value) -> Result<ToolCall, String> {
     let path = args
         .get("path")
         .and_then(|value| value.as_str())
-        .ok_or_else(|| "missing path".to_string())?
+        .unwrap_or(".")
         .to_string();
     match name {
-        "read_file" => Ok(ToolCall::ReadFile { path }),
-        "write_file" => Ok(ToolCall::WriteFile {
+        "workspace__read_file_range" | "workspace.read_file_range" | "read_file" => {
+            Ok(ToolCall::ReadFileRange {
+                path,
+                start_line: args
+                    .get("start_line")
+                    .and_then(|value| value.as_u64())
+                    .map(|value| value as u32),
+                end_line: args
+                    .get("end_line")
+                    .and_then(|value| value.as_u64())
+                    .map(|value| value as u32),
+            })
+        }
+        "workspace__list_directory" | "workspace.list_directory" => {
+            Ok(ToolCall::ListDirectory { path })
+        }
+        "workspace__search_text" | "workspace.search_text" => Ok(ToolCall::SearchText {
+            query: args
+                .get("query")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "missing query".to_string())?
+                .to_string(),
             path,
+            max_results: args
+                .get("max_results")
+                .and_then(|value| value.as_u64())
+                .map(|value| value as usize),
+        }),
+        "workspace__propose_patch" | "workspace.propose_patch" | "write_file" => {
+            Ok(ToolCall::ProposePatch {
+                path,
+                content: args
+                    .get("content")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| "missing content".to_string())?
+                    .to_string(),
+            })
+        }
+        "workspace__diff_patch" | "workspace.diff_patch" | "append_line" => {
+            Ok(ToolCall::DiffPatch {
+                path,
+                value: args
+                    .get("value")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| "missing value".to_string())?
+                    .to_string(),
+            })
+        }
+        "git__status" | "git.status" => Ok(ToolCall::GitStatus),
+        "git__diff" | "git.diff" => Ok(ToolCall::GitDiff {
+            path: args
+                .get("path")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        }),
+        "git__log" | "git.log" => Ok(ToolCall::GitLog {
+            max_count: args
+                .get("max_count")
+                .and_then(|value| value.as_u64())
+                .map(|value| value as u32),
+        }),
+        "codegraph__query_symbol" | "codegraph.query_symbol" => {
+            Ok(ToolCall::CodeGraphQuerySymbol {
+                query: args
+                    .get("query")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| "missing query".to_string())?
+                    .to_string(),
+                max_results: args
+                    .get("max_results")
+                    .and_then(|value| value.as_u64())
+                    .map(|value| value as usize),
+            })
+        }
+        "codegraph__references" | "codegraph.references" => Ok(ToolCall::CodeGraphReferences {
+            symbol_id: args
+                .get("symbol_id")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "missing symbol_id".to_string())?
+                .to_string(),
+        }),
+        "context__build_pack" | "context.build_pack" => Ok(ToolCall::ContextBuildPack {
+            id: args
+                .get("id")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "missing id".to_string())?
+                .to_string(),
+            token_budget: args
+                .get("token_budget")
+                .and_then(|value| value.as_u64())
+                .map(|value| value as u32),
+        }),
+        "command__run" | "command.run" => Ok(ToolCall::CommandRun {
+            command: args
+                .get("command")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "missing command".to_string())?
+                .to_string(),
+            timeout_ms: args.get("timeout_ms").and_then(|value| value.as_u64()),
+        }),
+        "test__run_targeted" | "test.run_targeted" => Ok(ToolCall::TestRunTargeted {
+            target: args
+                .get("target")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "missing target".to_string())?
+                .to_string(),
+            timeout_ms: args.get("timeout_ms").and_then(|value| value.as_u64()),
+        }),
+        "mcp__invoke" | "mcp.invoke" => Ok(ToolCall::McpInvoke {
+            tool_name: args
+                .get("tool")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "missing tool".to_string())?
+                .to_string(),
+            payload: args
+                .get("payload")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        }),
+        "skill__invoke" | "skill.invoke" => Ok(ToolCall::SkillInvoke {
+            skill: args
+                .get("skill")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "missing skill".to_string())?
+                .to_string(),
+            payload: args
+                .get("payload")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        }),
+        "artifact__read" | "artifact.read" => Ok(ToolCall::ArtifactRead {
+            artifact_ref: args
+                .get("artifact_ref")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "missing artifact_ref".to_string())?
+                .to_string(),
+        }),
+        "artifact__write" | "artifact.write" => Ok(ToolCall::ArtifactWrite {
+            artifact_ref: args
+                .get("artifact_ref")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "missing artifact_ref".to_string())?
+                .to_string(),
             content: args
                 .get("content")
                 .and_then(|value| value.as_str())
                 .ok_or_else(|| "missing content".to_string())?
                 .to_string(),
         }),
-        "append_line" => Ok(ToolCall::AppendLine {
-            path,
-            value: args
-                .get("value")
+        "image__generate" | "image.generate" => Ok(ToolCall::ImageGenerate {
+            prompt: args
+                .get("prompt")
                 .and_then(|value| value.as_str())
-                .ok_or_else(|| "missing value".to_string())?
+                .ok_or_else(|| "missing prompt".to_string())?
                 .to_string(),
+            asset_id: args
+                .get("asset_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            width: args
+                .get("width")
+                .and_then(|value| value.as_u64())
+                .map(|value| value as u32),
+            height: args
+                .get("height")
+                .and_then(|value| value.as_u64())
+                .map(|value| value as u32),
+        }),
+        "image__inspect" | "image.inspect" => Ok(ToolCall::ImageInspect {
+            artifact_ref: args
+                .get("artifact_ref")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            asset_id: args
+                .get("asset_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            prompt: args
+                .get("prompt")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
         }),
         _ => Err(format!("unknown tool `{name}`")),
     }
@@ -425,6 +1034,7 @@ fn observations_message(results: &[ToolResult]) -> String {
                 Some(text) => format!("read {path}:\n{text}"),
                 None => format!("read {path}: (file does not exist)"),
             },
+            ToolResult::ToolOutput { tool, content } => format!("{tool}:\n{content}"),
             ToolResult::Wrote {
                 path,
                 applied,
@@ -444,6 +1054,7 @@ pub struct OpenRouterToolDriver<C: ChatCompleter> {
     max_tokens: u32,
     completer: C,
     messages: Vec<serde_json::Value>,
+    tools: serde_json::Value,
 }
 
 impl<C: ChatCompleter> OpenRouterToolDriver<C> {
@@ -463,14 +1074,20 @@ impl<C: ChatCompleter> OpenRouterToolDriver<C> {
                 serde_json::json!({ "role": "system", "content": system.into() }),
                 serde_json::json!({ "role": "user", "content": goal.into() }),
             ],
+            tools: tool_definitions(),
         }
+    }
+
+    pub fn with_tools(mut self, tools: serde_json::Value) -> Self {
+        self.tools = tools;
+        self
     }
 
     fn request_body(&self) -> serde_json::Value {
         serde_json::json!({
             "model": self.model,
             "max_tokens": self.max_tokens,
-            "tools": tool_definitions(),
+            "tools": self.tools.clone(),
             "messages": self.messages,
         })
     }
@@ -517,11 +1134,24 @@ fn redact(s: &str) -> String {
         .join(" ")
 }
 
+fn redact_with_secrets(s: &str, secrets: &[&str]) -> String {
+    let mut redacted = redact(s);
+    for secret in secrets {
+        if !secret.trim().is_empty() {
+            redacted = redacted.replace(secret, "[REDACTED]");
+        }
+    }
+    redacted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::CollectingSink;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::thread;
 
     fn request(prompt: &str) -> AgentRunRequest {
         AgentRunRequest {
@@ -531,6 +1161,8 @@ mod tests {
             turn_id: "t1".to_string(),
             run_id: "r1".to_string(),
             stream_id: "s1".to_string(),
+            patch_lease: None,
+            cancellation_token: None,
             now_ms: 1000,
             prompt: prompt.to_string(),
         }
@@ -560,6 +1192,35 @@ mod tests {
         let outcome = adapter.run(&request("hi"), &sink).unwrap();
         assert_eq!(outcome.final_state, RunProjectionState::Failed);
         assert!(outcome.assistant_text.contains("failed"));
+    }
+
+    #[test]
+    fn cancelled_direct_adapter_request_does_not_start_provider_call() {
+        let adapter = OpenRouterAdapter {
+            model: "openai/gpt-4o-mini".to_string(),
+            api_key_env: "OPENSKS_TEST_CANCELLED_ABSENT_KEY_ENV".to_string(),
+            base_url: DEFAULT_BASE_URL.to_string(),
+            max_tokens: 5,
+        };
+        let cancellation_token = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut request = request("hi");
+        request.cancellation_token = Some(cancellation_token);
+        let sink = CollectingSink::new();
+
+        let outcome = adapter.run(&request, &sink).unwrap();
+
+        assert_eq!(outcome.final_state, RunProjectionState::Cancelled);
+        assert!(outcome.assistant_text.contains("cancelled"));
+        assert!(sink.events().iter().any(|event| {
+            event.kind == AgentEventKind::Warning && event.payload["code"] == "run_cancelled"
+        }));
+        assert!(
+            !sink
+                .events()
+                .iter()
+                .any(|event| event.payload.to_string().contains("MissingApiKey")),
+            "pre-cancelled requests must not read the credential path or attempt provider dispatch"
+        );
     }
 
     /// Live smoke check — ignored by default so `cargo test`/CI never needs a
@@ -646,6 +1307,117 @@ mod tests {
     }
 
     #[test]
+    fn openai_compatible_image_generator_decodes_base64_image_response() {
+        let png = b"\x89PNG\r\n\x1a\nopensks-adapter-image";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+        let (base_url, server) = spawn_single_response_server(format!(
+            r#"{{"created":1,"data":[{{"b64_json":"{encoded}"}}]}}"#
+        ));
+        let generator = OpenAiCompatibleImageGenerator::new(base_url, "sk-test-secret")
+            .expect("image generator");
+        let receipt = opensks_contracts::ModelRouteReceipt {
+            provider_id: Some("provider-1".to_string()),
+            model_id: Some("provider-1/image-model".to_string()),
+            registry_revision: "rev-1".to_string(),
+            reason_code: "route_ok".to_string(),
+            requested_capabilities: opensks_contracts::CapabilityRequirements::image_output(),
+            effective_limits: opensks_contracts::ModelLimits::default(),
+            fallback_index: None,
+        };
+        let output = generator
+            .generate_image(&ImageProviderRequest {
+                provider_id: "provider-1",
+                model_id: "provider-1/image-model",
+                remote_model_id: "gpt-image-1.5",
+                prompt: "render something durable",
+                width: 1024,
+                height: 1024,
+                route_receipt: &receipt,
+            })
+            .expect("generated image");
+
+        assert_eq!(output.bytes, png);
+        assert_eq!(output.extension, "png");
+        assert!(
+            output
+                .evidence_refs
+                .contains(&"adapter:openai-compatible-images:b64_json".to_string())
+        );
+        let request = server.join().expect("server request");
+        assert!(request.starts_with("POST /v1/images/generations "));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer sk-test-secret")
+        );
+        assert!(request.contains(r#""model":"gpt-image-1.5""#));
+        assert!(request.contains(r#""size":"1024x1024""#));
+        assert!(request.contains(r#""prompt":"render something durable""#));
+    }
+
+    #[test]
+    fn openai_compatible_image_generator_sends_vision_data_url_request() {
+        let (base_url, server) = spawn_single_response_server(
+            serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "The image shows a test fixture."
+                    }
+                }]
+            })
+            .to_string(),
+        );
+        let generator = OpenAiCompatibleImageGenerator::new(base_url, "sk-test-secret")
+            .expect("image generator");
+        let receipt = opensks_contracts::ModelRouteReceipt {
+            provider_id: Some("provider-1".to_string()),
+            model_id: Some("provider-1/vision-model".to_string()),
+            registry_revision: "rev-1".to_string(),
+            reason_code: "route_ok".to_string(),
+            requested_capabilities: opensks_contracts::CapabilityRequirements {
+                vision_input: true,
+                ..opensks_contracts::CapabilityRequirements::default()
+            },
+            effective_limits: opensks_contracts::ModelLimits::default(),
+            fallback_index: None,
+        };
+        let output = opensks_image::ImageInspectionClient::inspect_image(
+            &generator,
+            &ImageInspectionProviderRequest {
+                provider_id: "provider-1",
+                model_id: "provider-1/vision-model",
+                remote_model_id: "gpt-vision-1.5",
+                asset_id: "fixture-image",
+                content_hash: "sha256:v1:image",
+                mime_type: "image/png",
+                bytes: b"\x89PNG\r\n\x1a\nopensks-vision",
+                prompt: "Describe the image",
+                route_receipt: &receipt,
+            },
+        )
+        .expect("vision output");
+
+        assert_eq!(output.text, "The image shows a test fixture.");
+        assert!(
+            output
+                .evidence_refs
+                .contains(&"adapter:openai-compatible-vision:chat-completions".to_string())
+        );
+        let request = server.join().expect("server request");
+        assert!(request.starts_with("POST /v1/chat/completions "));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer sk-test-secret")
+        );
+        assert!(request.contains(r#""model":"gpt-vision-1.5""#));
+        assert!(request.contains(r#""type":"image_url""#));
+        assert!(request.contains("data:image/png;base64,"));
+        assert!(request.contains("Describe the image"));
+    }
+
+    #[test]
     fn parse_step_maps_tool_calls_with_string_arguments() {
         let resp = tool_call_response(
             "append_line",
@@ -654,9 +1426,375 @@ mod tests {
         match parse_step(&resp) {
             AgentStep::Tools(calls) => assert_eq!(
                 calls,
-                vec![ToolCall::AppendLine {
+                vec![ToolCall::DiffPatch {
                     path: "NOTES.md".to_string(),
                     value: "two".to_string()
+                }]
+            ),
+            other => panic!("expected tools, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_definitions_are_registry_backed_canonical_tools() {
+        let tools = tool_definitions();
+        let names = tools
+            .as_array()
+            .expect("tool array")
+            .iter()
+            .map(|tool| {
+                tool.pointer("/function/name")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("tool name")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"workspace__list_directory".to_string()));
+        assert!(names.contains(&"workspace__read_file_range".to_string()));
+        assert!(names.contains(&"workspace__search_text".to_string()));
+        assert!(names.contains(&"workspace__propose_patch".to_string()));
+        assert!(names.contains(&"workspace__diff_patch".to_string()));
+        assert!(names.contains(&"git__status".to_string()));
+        assert!(names.contains(&"git__diff".to_string()));
+        assert!(names.contains(&"git__log".to_string()));
+        assert!(names.contains(&"codegraph__query_symbol".to_string()));
+        assert!(names.contains(&"codegraph__references".to_string()));
+        assert!(names.contains(&"context__build_pack".to_string()));
+        assert!(names.contains(&"command__run".to_string()));
+        assert!(names.contains(&"test__run_targeted".to_string()));
+        assert!(names.contains(&"mcp__invoke".to_string()));
+        assert!(names.contains(&"skill__invoke".to_string()));
+        assert!(names.contains(&"artifact__read".to_string()));
+        assert!(names.contains(&"artifact__write".to_string()));
+        assert!(!names.contains(&"append_line".to_string()));
+        assert!(!names.contains(&"image__generate".to_string()));
+        assert!(!names.contains(&"image__inspect".to_string()));
+    }
+
+    #[test]
+    fn tool_definitions_can_selectively_advertise_image_generate() {
+        let tools =
+            tool_definitions_with_extra_available_tools(&["image.generate", "image.inspect"]);
+        let names = tools
+            .as_array()
+            .expect("tool array")
+            .iter()
+            .map(|tool| {
+                tool.pointer("/function/name")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("tool name")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"image__generate".to_string()));
+        assert!(names.contains(&"image__inspect".to_string()));
+        let image = tools
+            .as_array()
+            .expect("tool array")
+            .iter()
+            .find(|tool| {
+                tool.pointer("/function/name")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("image__generate")
+            })
+            .expect("image tool");
+        assert_eq!(
+            image.pointer("/function/parameters/required/0"),
+            Some(&serde_json::Value::String("prompt".to_string()))
+        );
+        let inspect = tools
+            .as_array()
+            .expect("tool array")
+            .iter()
+            .find(|tool| {
+                tool.pointer("/function/name")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("image__inspect")
+            })
+            .expect("inspect tool");
+        assert_eq!(
+            inspect.pointer("/function/parameters/required/0"),
+            Some(&serde_json::Value::String("artifact_ref".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_step_maps_canonical_tool_calls() {
+        let resp = tool_call_response(
+            "workspace__search_text",
+            serde_json::json!({ "query": "needle", "max_results": 3 }),
+        );
+        match parse_step(&resp) {
+            AgentStep::Tools(calls) => assert_eq!(
+                calls,
+                vec![ToolCall::SearchText {
+                    query: "needle".to_string(),
+                    path: ".".to_string(),
+                    max_results: Some(3),
+                }]
+            ),
+            other => panic!("expected tools, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_step_maps_canonical_git_tool_calls() {
+        let resp = tool_call_response("git__log", serde_json::json!({ "max_count": 2 }));
+        match parse_step(&resp) {
+            AgentStep::Tools(calls) => {
+                assert_eq!(calls, vec![ToolCall::GitLog { max_count: Some(2) }])
+            }
+            other => panic!("expected tools, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_step_maps_canonical_codegraph_tool_calls() {
+        let resp = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "codegraph__query_symbol",
+                                "arguments": serde_json::json!({
+                                    "query": "ProviderStore",
+                                    "max_results": 3
+                                }).to_string()
+                            }
+                        },
+                        {
+                            "function": {
+                                "name": "codegraph__references",
+                                "arguments": serde_json::json!({
+                                    "symbol_id": "src/lib.rs:1:ProviderStore"
+                                }).to_string()
+                            }
+                        }
+                    ]
+                }
+            }]
+        });
+        match parse_step(&resp) {
+            AgentStep::Tools(calls) => assert_eq!(
+                calls,
+                vec![
+                    ToolCall::CodeGraphQuerySymbol {
+                        query: "ProviderStore".to_string(),
+                        max_results: Some(3),
+                    },
+                    ToolCall::CodeGraphReferences {
+                        symbol_id: "src/lib.rs:1:ProviderStore".to_string(),
+                    },
+                ]
+            ),
+            other => panic!("expected tools, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_step_maps_canonical_context_tool_calls() {
+        let resp = tool_call_response(
+            "context__build_pack",
+            serde_json::json!({ "id": "worker-a", "token_budget": 128 }),
+        );
+        match parse_step(&resp) {
+            AgentStep::Tools(calls) => assert_eq!(
+                calls,
+                vec![ToolCall::ContextBuildPack {
+                    id: "worker-a".to_string(),
+                    token_budget: Some(128),
+                }]
+            ),
+            other => panic!("expected tools, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_step_maps_canonical_command_tool_calls() {
+        let resp = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "command__run",
+                                "arguments": serde_json::json!({
+                                    "command": "git status --short",
+                                    "timeout_ms": 1000
+                                }).to_string()
+                            }
+                        },
+                        {
+                            "function": {
+                                "name": "test__run_targeted",
+                                "arguments": serde_json::json!({
+                                    "target": "cargo test -p opensks-adapter parse_step --locked",
+                                    "timeout_ms": 30000
+                                }).to_string()
+                            }
+                        }
+                    ]
+                }
+            }]
+        });
+        match parse_step(&resp) {
+            AgentStep::Tools(calls) => assert_eq!(
+                calls,
+                vec![
+                    ToolCall::CommandRun {
+                        command: "git status --short".to_string(),
+                        timeout_ms: Some(1000),
+                    },
+                    ToolCall::TestRunTargeted {
+                        target: "cargo test -p opensks-adapter parse_step --locked".to_string(),
+                        timeout_ms: Some(30000),
+                    },
+                ]
+            ),
+            other => panic!("expected tools, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_step_maps_canonical_mcp_tool_call() {
+        let resp = tool_call_response(
+            "mcp__invoke",
+            serde_json::json!({
+                "tool": "opensks.repo.search",
+                "payload": {
+                    "query": "ProviderStore",
+                    "limit": 5
+                }
+            }),
+        );
+        match parse_step(&resp) {
+            AgentStep::Tools(calls) => assert_eq!(
+                calls,
+                vec![ToolCall::McpInvoke {
+                    tool_name: "opensks.repo.search".to_string(),
+                    payload: serde_json::json!({
+                        "query": "ProviderStore",
+                        "limit": 5
+                    }),
+                }]
+            ),
+            other => panic!("expected tools, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_step_maps_canonical_skill_tool_call() {
+        let resp = tool_call_response(
+            "skill__invoke",
+            serde_json::json!({
+                "skill": "goal",
+                "payload": {
+                    "objective": "continue"
+                }
+            }),
+        );
+        match parse_step(&resp) {
+            AgentStep::Tools(calls) => assert_eq!(
+                calls,
+                vec![ToolCall::SkillInvoke {
+                    skill: "goal".to_string(),
+                    payload: serde_json::json!({
+                        "objective": "continue"
+                    }),
+                }]
+            ),
+            other => panic!("expected tools, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_step_maps_canonical_artifact_tool_calls() {
+        let resp = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "artifact__read",
+                                "arguments": serde_json::json!({
+                                    "artifact_ref": "artifact://.opensks/runtime/report.json"
+                                }).to_string()
+                            }
+                        },
+                        {
+                            "function": {
+                                "name": "artifact__write",
+                                "arguments": serde_json::json!({
+                                    "artifact_ref": "artifact://.opensks/runtime/report.json",
+                                    "content": "{\"ok\":true}"
+                                }).to_string()
+                            }
+                        }
+                    ]
+                }
+            }]
+        });
+        match parse_step(&resp) {
+            AgentStep::Tools(calls) => assert_eq!(
+                calls,
+                vec![
+                    ToolCall::ArtifactRead {
+                        artifact_ref: "artifact://.opensks/runtime/report.json".to_string(),
+                    },
+                    ToolCall::ArtifactWrite {
+                        artifact_ref: "artifact://.opensks/runtime/report.json".to_string(),
+                        content: "{\"ok\":true}".to_string(),
+                    },
+                ]
+            ),
+            other => panic!("expected tools, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_step_maps_canonical_image_generate_tool_call() {
+        let resp = tool_call_response(
+            "image__generate",
+            serde_json::json!({
+                "prompt": "render a product screenshot",
+                "asset_id": "hero",
+                "width": 1536,
+                "height": 864
+            }),
+        );
+        match parse_step(&resp) {
+            AgentStep::Tools(calls) => assert_eq!(
+                calls,
+                vec![ToolCall::ImageGenerate {
+                    prompt: "render a product screenshot".to_string(),
+                    asset_id: Some("hero".to_string()),
+                    width: Some(1536),
+                    height: Some(864),
+                }]
+            ),
+            other => panic!("expected tools, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_step_maps_canonical_image_inspect_tool_call() {
+        let resp = tool_call_response(
+            "image__inspect",
+            serde_json::json!({
+                "artifact_ref": "artifact://.opensks/assets/candidates/hero.png",
+                "prompt": "Describe the product UI"
+            }),
+        );
+        match parse_step(&resp) {
+            AgentStep::Tools(calls) => assert_eq!(
+                calls,
+                vec![ToolCall::ImageInspect {
+                    artifact_ref: Some(
+                        "artifact://.opensks/assets/candidates/hero.png".to_string()
+                    ),
+                    asset_id: None,
+                    prompt: Some("Describe the product UI".to_string()),
                 }]
             ),
             other => panic!("expected tools, got {other:?}"),
@@ -746,6 +1884,8 @@ mod tests {
             turn_id: "t".to_string(),
             run_id: "r".to_string(),
             stream_id: "s".to_string(),
+            patch_lease: None,
+            cancellation_token: None,
             now_ms: 1,
             prompt: String::new(),
         };
@@ -790,6 +1930,8 @@ mod tests {
             turn_id: "t".to_string(),
             run_id: "r".to_string(),
             stream_id: "s".to_string(),
+            patch_lease: None,
+            cancellation_token: None,
             now_ms: 1,
             prompt: String::new(),
         };
@@ -806,5 +1948,51 @@ mod tests {
         assert_eq!(outcome.apply_results.len(), 1);
         assert!(outcome.apply_results[0].applied);
         std::fs::remove_dir_all(&ws).ok();
+    }
+
+    fn spawn_single_response_server(response_body: String) -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let base_url = format!("http://{}/v1", listener.local_addr().expect("addr"));
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut buffer).expect("read request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request_is_complete(&request) {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+            String::from_utf8_lossy(&request).to_string()
+        });
+        (base_url, handle)
+    }
+
+    fn request_is_complete(request: &[u8]) -> bool {
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Content-Length:")
+                    .or_else(|| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        request.len() >= header_end + 4 + content_length
     }
 }

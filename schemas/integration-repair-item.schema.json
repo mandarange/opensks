@@ -1,0 +1,91 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IntegrationRepairItem",
+  "type": "object",
+  "required": [
+    "candidate_id",
+    "candidate_ref",
+    "content_redacted",
+    "generated_at_ms",
+    "id",
+    "integration_ref",
+    "patch_ref",
+    "path_redacted",
+    "reason_code",
+    "repair_ref",
+    "run_id",
+    "schema",
+    "state"
+  ],
+  "properties": {
+    "candidate_id": {
+      "type": "string"
+    },
+    "candidate_ref": {
+      "type": "string"
+    },
+    "conflict_paths": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "content_redacted": {
+      "type": "boolean"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "generated_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "id": {
+      "type": "string"
+    },
+    "integration_ref": {
+      "type": "string"
+    },
+    "patch_ref": {
+      "type": "string"
+    },
+    "path_redacted": {
+      "type": "boolean"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "repair_ref": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "state": {
+      "type": "string"
+    },
+    "suggested_actions": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "target_paths": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

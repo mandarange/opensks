@@ -1,0 +1,117 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IntegrationFinalSeal",
+  "type": "object",
+  "required": [
+    "candidate_id",
+    "candidate_ref",
+    "content_redacted",
+    "final_diff_ref",
+    "generated_at_ms",
+    "id",
+    "integration_ref",
+    "patch_ref",
+    "path_redacted",
+    "reason_code",
+    "run_id",
+    "schema",
+    "seal_ref",
+    "state",
+    "verification_ref"
+  ],
+  "properties": {
+    "approval_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "candidate_id": {
+      "type": "string"
+    },
+    "candidate_ref": {
+      "type": "string"
+    },
+    "cleanup_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "content_redacted": {
+      "type": "boolean"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "failed_gates": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "final_diff_ref": {
+      "type": "string"
+    },
+    "generated_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "id": {
+      "type": "string"
+    },
+    "integration_ref": {
+      "type": "string"
+    },
+    "passed_gates": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "patch_ref": {
+      "type": "string"
+    },
+    "path_redacted": {
+      "type": "boolean"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "repair_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "seal_ref": {
+      "type": "string"
+    },
+    "state": {
+      "type": "string"
+    },
+    "target_paths": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "verification_ref": {
+      "type": "string"
+    }
+  }
+}

@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 pub const GIT_STATUS_SCHEMA: &str = "opensks.git-status.v1";
 pub const GIT_BRANCHES_SCHEMA: &str = "opensks.git-branches.v1";
 pub const GIT_DIFF_SCHEMA: &str = "opensks.git-diff.v1";
+pub const GIT_LOG_SCHEMA: &str = "opensks.git-log.v1";
 
 /// The classification of a single status entry, derived from the porcelain XY
 /// code pair. This is the editor-facing label; the raw `index_status` /
@@ -159,6 +160,39 @@ pub struct GitBranches {
     pub branches: Vec<GitBranchInfo>,
 }
 
+/// One commit from read-only `git log` inspection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GitLogEntry {
+    pub commit: String,
+    pub abbreviated_commit: String,
+    pub author_name: String,
+    pub author_email_redacted: String,
+    pub authored_at: String,
+    pub subject: String,
+}
+
+/// The result of a read-only `git log` inspection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GitLog {
+    pub schema: String,
+    pub in_repo: bool,
+    #[serde(default)]
+    pub max_count: u32,
+    #[serde(default)]
+    pub entries: Vec<GitLogEntry>,
+}
+
+impl GitLog {
+    pub fn not_in_repo(max_count: u32) -> Self {
+        Self {
+            schema: GIT_LOG_SCHEMA.to_string(),
+            in_repo: false,
+            max_count,
+            entries: Vec::new(),
+        }
+    }
+}
+
 impl GitBranches {
     /// An empty branch listing for a workspace that is not a Git repository.
     pub fn not_in_repo() -> Self {
@@ -259,5 +293,30 @@ mod tests {
         assert!(json.contains("\"schema\":\"opensks.git-diff.v1\""));
         let decoded: GitDiff = serde_json::from_str(&json).expect("de");
         assert_eq!(decoded, diff);
+    }
+
+    #[test]
+    fn git_log_roundtrips_and_not_in_repo_is_minimal() {
+        let log = GitLog {
+            schema: GIT_LOG_SCHEMA.to_string(),
+            in_repo: true,
+            max_count: 2,
+            entries: vec![GitLogEntry {
+                commit: "abcdef".to_string(),
+                abbreviated_commit: "abc".to_string(),
+                author_name: "OpenSKS".to_string(),
+                author_email_redacted: "opensks@example.test".to_string(),
+                authored_at: "2026-06-23T00:00:00+00:00".to_string(),
+                subject: "initial".to_string(),
+            }],
+        };
+        let json = serde_json::to_string(&log).expect("ser");
+        let decoded: GitLog = serde_json::from_str(&json).expect("de");
+        assert_eq!(decoded, log);
+
+        let outside = GitLog::not_in_repo(5);
+        assert!(!outside.in_repo);
+        assert_eq!(outside.max_count, 5);
+        assert!(outside.entries.is_empty());
     }
 }

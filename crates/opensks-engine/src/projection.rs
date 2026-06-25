@@ -13,6 +13,7 @@
 //! - `RunResumed`  -> `running`
 //! - `RunPaused`   -> `paused`
 //! - `RunCancelled`-> `cancelled` (terminal)
+//! - `RunCompleted`-> `completed` (terminal)
 //!
 //! Node-level (keyed by `work_item_id`/`node_id` in the payload; terminal node
 //! states are sticky and never downgraded):
@@ -101,6 +102,10 @@ impl ProjectionReducer {
                 self.projection
                     .merge_run_state(RunProjectionState::Cancelled);
             }
+            EventKind::RunCompleted => {
+                self.projection
+                    .merge_run_state(RunProjectionState::Completed);
+            }
 
             EventKind::WorkItemQueued => self.apply_node_state(event, NodeProjectionState::Queued),
             EventKind::WorkItemLeased => {
@@ -130,7 +135,11 @@ impl ProjectionReducer {
             | EventKind::LeaseHeartbeat
             | EventKind::SteeringRequested
             | EventKind::ApprovalApproved
-            | EventKind::ApprovalDenied => {
+            | EventKind::ApprovalDenied
+            | EventKind::GitCommitReceipt
+            | EventKind::GitPushReceipt
+            | EventKind::GitPushFailed
+            | EventKind::ImageArtifactCreated => {
                 self.observe_node_metadata(event);
             }
 
@@ -608,13 +617,19 @@ mod tests {
                 EventKind::WorkItemCompleted,
                 serde_json::json!({"work_item_id": "node-a", "to": "Completed"}),
             ),
+            envelope(
+                run_id,
+                4,
+                EventKind::RunCompleted,
+                serde_json::json!({"message": "run completed"}),
+            ),
         ] {
             store.append_event(event).expect("append");
         }
 
         let projection = project_run_from_store(&store, run_id).expect("project");
         assert_eq!(projection.run_id, run_id);
-        assert_eq!(projection.state, RunProjectionState::Running);
+        assert_eq!(projection.state, RunProjectionState::Completed);
         assert_eq!(
             projection.node("node-a").map(|node| node.state),
             Some(NodeProjectionState::Succeeded)

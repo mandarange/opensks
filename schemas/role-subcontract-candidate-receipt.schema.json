@@ -1,0 +1,150 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RoleSubcontractCandidateReceipt",
+  "type": "object",
+  "required": [
+    "apply_result_count",
+    "approval_required",
+    "content_redacted",
+    "generated_at_ms",
+    "id",
+    "integration_required",
+    "main_workspace_modified",
+    "patch_count",
+    "patch_ref",
+    "path_redacted",
+    "reason_code",
+    "receipt_ref",
+    "role",
+    "run_id",
+    "schema",
+    "source_git_available",
+    "source_isolation_id",
+    "source_isolation_mode",
+    "state",
+    "work_item_id",
+    "worker_id"
+  ],
+  "properties": {
+    "applied_files": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "apply_result_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "approval_required": {
+      "type": "boolean"
+    },
+    "content_redacted": {
+      "type": "boolean"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "generated_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "id": {
+      "type": "string"
+    },
+    "integration_required": {
+      "type": "boolean"
+    },
+    "main_workspace_modified": {
+      "type": "boolean"
+    },
+    "patch_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "patch_ref": {
+      "type": "string"
+    },
+    "path_redacted": {
+      "type": "boolean"
+    },
+    "planner_required_source_candidate_count": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "planner_required_verifier_count": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "receipt_ref": {
+      "type": "string"
+    },
+    "role": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "shard_policy_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "shard_policy_selection_policy": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source_base_commit": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source_git_available": {
+      "type": "boolean"
+    },
+    "source_isolation_id": {
+      "type": "string"
+    },
+    "source_isolation_mode": {
+      "type": "string"
+    },
+    "state": {
+      "type": "string"
+    },
+    "target_paths": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "work_item_id": {
+      "type": "string"
+    },
+    "worker_id": {
+      "type": "string"
+    }
+  }
+}

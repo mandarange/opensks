@@ -26,12 +26,19 @@ impl CodeGraph {
     pub fn index_workspace(workspace: &Path) -> Result<Self, CodeGraphError> {
         let mut graph = Self::default();
         for path in collect_source_files(workspace)? {
-            graph.update_file(workspace, &path)?;
+            graph.update_file_records(workspace, &path)?;
         }
+        graph.refresh_relationship_edges(workspace)?;
         Ok(graph)
     }
 
     pub fn update_file(&mut self, workspace: &Path, path: &Path) -> Result<(), CodeGraphError> {
+        self.update_file_records(workspace, path)?;
+        self.refresh_relationship_edges(workspace)?;
+        Ok(())
+    }
+
+    fn update_file_records(&mut self, workspace: &Path, path: &Path) -> Result<(), CodeGraphError> {
         let relative = relative_path(workspace, path);
         self.delete_path(&relative);
         let content = fs::read_to_string(path)?;
@@ -65,6 +72,120 @@ impl CodeGraph {
         Ok(())
     }
 
+    pub fn refresh_relationship_edges(&mut self, workspace: &Path) -> Result<(), CodeGraphError> {
+        self.edges
+            .retain(|edge| edge.kind == CodeGraphEdgeKind::Contains);
+        let records = self.records.values().cloned().collect::<Vec<_>>();
+        let symbol_records = records
+            .iter()
+            .filter(|record| matches!(record.kind, CodeGraphNodeKind::Symbol))
+            .cloned()
+            .collect::<Vec<_>>();
+        let file_records = records
+            .iter()
+            .filter(|record| record.kind == CodeGraphNodeKind::File)
+            .cloned()
+            .collect::<Vec<_>>();
+        let import_records = records
+            .iter()
+            .filter(|record| record.kind == CodeGraphNodeKind::Import)
+            .cloned()
+            .collect::<Vec<_>>();
+        let test_records = records
+            .iter()
+            .filter(|record| record.kind == CodeGraphNodeKind::Test)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut seen = self
+            .edges
+            .iter()
+            .map(edge_key)
+            .collect::<std::collections::BTreeSet<_>>();
+        for import in &import_records {
+            for symbol in &symbol_records {
+                if import.id == symbol.id {
+                    continue;
+                }
+                if import_mentions_symbol(&import.name, &symbol.name) {
+                    self.push_edge_once(
+                        &mut seen,
+                        import.id.clone(),
+                        symbol.id.clone(),
+                        CodeGraphEdgeKind::Imports,
+                    );
+                }
+            }
+        }
+
+        for file in &file_records {
+            let path = workspace.join(&file.path);
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            for symbol in &symbol_records {
+                if symbol.path == file.path {
+                    continue;
+                }
+                if calls_symbol(&content, &symbol.name) {
+                    self.push_edge_once(
+                        &mut seen,
+                        file.id.clone(),
+                        symbol.id.clone(),
+                        CodeGraphEdgeKind::Calls,
+                    );
+                } else if references_symbol(&content, &symbol.name) {
+                    self.push_edge_once(
+                        &mut seen,
+                        file.id.clone(),
+                        symbol.id.clone(),
+                        CodeGraphEdgeKind::References,
+                    );
+                }
+            }
+        }
+
+        for test in &test_records {
+            for symbol in &symbol_records {
+                if test.id == symbol.id {
+                    continue;
+                }
+                if test.path == symbol.path && test_covers_symbol(&test.name, &symbol.name) {
+                    self.push_edge_once(
+                        &mut seen,
+                        test.id.clone(),
+                        symbol.id.clone(),
+                        CodeGraphEdgeKind::Tests,
+                    );
+                }
+            }
+        }
+        self.edges.sort_by(|left, right| {
+            edge_key(left)
+                .cmp(&edge_key(right))
+                .then_with(|| left.from_id.cmp(&right.from_id))
+                .then_with(|| left.to_id.cmp(&right.to_id))
+        });
+        Ok(())
+    }
+
+    fn push_edge_once(
+        &mut self,
+        seen: &mut std::collections::BTreeSet<String>,
+        from_id: String,
+        to_id: String,
+        kind: CodeGraphEdgeKind,
+    ) {
+        let edge = CodeGraphEdge {
+            from_id,
+            to_id,
+            kind,
+        };
+        if seen.insert(edge_key(&edge)) {
+            self.edges.push(edge);
+        }
+    }
+
     pub fn delete_path(&mut self, relative: &str) {
         let prefix = format!("{relative}:");
         self.records
@@ -84,6 +205,25 @@ impl CodeGraph {
             })
             .cloned()
             .collect()
+    }
+
+    pub fn references(&self, symbol_id: &str) -> Vec<CodeGraphRecord> {
+        let mut refs = self
+            .edges
+            .iter()
+            .filter(|edge| edge.to_id == symbol_id || edge.from_id == symbol_id)
+            .filter_map(|edge| {
+                if edge.to_id == symbol_id {
+                    self.records.get(&edge.from_id)
+                } else {
+                    self.records.get(&edge.to_id)
+                }
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        refs.sort_by(|left, right| left.id.cmp(&right.id));
+        refs.dedup_by(|left, right| left.id == right.id);
+        refs
     }
 
     /// Reconstruct a graph from a previously persisted [`CodeGraphIndex`].
@@ -322,6 +462,56 @@ fn stable_hash(bytes: &[u8]) -> String {
     format!("fnv1a64:{hash:016x}")
 }
 
+fn edge_key(edge: &CodeGraphEdge) -> String {
+    format!(
+        "{}\u{0}{}\u{0}{}",
+        edge.from_id,
+        edge.to_id,
+        edge_kind_label(&edge.kind)
+    )
+}
+
+fn edge_kind_label(kind: &CodeGraphEdgeKind) -> &'static str {
+    match kind {
+        CodeGraphEdgeKind::Contains => "contains",
+        CodeGraphEdgeKind::Imports => "imports",
+        CodeGraphEdgeKind::Calls => "calls",
+        CodeGraphEdgeKind::Tests => "tests",
+        CodeGraphEdgeKind::References => "references",
+        CodeGraphEdgeKind::OwnsRoute => "owns_route",
+    }
+}
+
+fn import_mentions_symbol(import: &str, symbol: &str) -> bool {
+    identifier_tokens(import)
+        .iter()
+        .any(|token| token == symbol)
+}
+
+fn calls_symbol(content: &str, symbol: &str) -> bool {
+    content.contains(&format!("{symbol}("))
+}
+
+fn references_symbol(content: &str, symbol: &str) -> bool {
+    identifier_tokens(content)
+        .iter()
+        .any(|token| token == symbol)
+}
+
+fn test_covers_symbol(test_name: &str, symbol: &str) -> bool {
+    let test_name = test_name.to_ascii_lowercase();
+    let symbol = symbol.to_ascii_lowercase();
+    test_name != symbol && test_name.contains(&symbol)
+}
+
+fn identifier_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'))
+        .filter(|token| !token.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +593,80 @@ mod tests {
     fn read_index_absent_returns_none() {
         let root = temp_workspace("absent");
         assert!(read_index(&root).expect("read").is_none());
+    }
+
+    #[test]
+    fn references_return_adjacent_records() {
+        let root = temp_workspace("references");
+        fs::write(root.join("src/lib.rs"), "pub fn linked() {}\n").expect("file");
+        let graph = CodeGraph::index_workspace(&root).expect("index");
+        let symbol = graph
+            .query("linked")
+            .into_iter()
+            .find(|record| record.name == "linked")
+            .expect("symbol");
+        let refs = graph.references(&symbol.id);
+        assert!(refs.iter().any(|record| record.id == "file:src/lib.rs"));
+    }
+
+    #[test]
+    fn indexes_generated_import_call_and_test_edges() {
+        let root = temp_workspace("semantic-edges");
+        fs::write(
+            root.join("src/helper.rs"),
+            "pub fn helper_dependency() {}\n",
+        )
+        .expect("helper");
+        fs::write(
+            root.join("src/lib.rs"),
+            "use crate::helper::helper_dependency;\n\
+             pub fn caller() { helper_dependency(); }\n\
+             #[test]\n\
+             fn caller_test() { caller(); }\n",
+        )
+        .expect("lib");
+
+        let graph = CodeGraph::index_workspace(&root).expect("index");
+        let index = graph.to_index();
+        let helper = index
+            .records
+            .iter()
+            .find(|record| record.name == "helper_dependency")
+            .expect("helper symbol");
+        let caller = index
+            .records
+            .iter()
+            .find(|record| record.name == "caller")
+            .expect("caller symbol");
+        let caller_test = index
+            .records
+            .iter()
+            .find(|record| record.name == "caller_test")
+            .expect("caller test");
+
+        assert!(
+            index
+                .edges
+                .iter()
+                .any(|edge| { edge.to_id == helper.id && edge.kind == CodeGraphEdgeKind::Imports })
+        );
+        assert!(
+            index
+                .edges
+                .iter()
+                .any(|edge| { edge.to_id == helper.id && edge.kind == CodeGraphEdgeKind::Calls })
+        );
+        assert!(index.edges.iter().any(|edge| {
+            edge.from_id == caller_test.id
+                && edge.to_id == caller.id
+                && edge.kind == CodeGraphEdgeKind::Tests
+        }));
+
+        let refs = graph.references(&helper.id);
+        assert!(
+            refs.iter().any(|record| record.id == "file:src/lib.rs"),
+            "call edge should make the caller file adjacent to helper"
+        );
     }
 
     /// Incremental `update_file` must touch only the one changed file: the other

@@ -378,6 +378,139 @@ fn write_native_cli_session_proof_fixture(root: &Path, mission_id: &str, proof: 
     .expect("write native cli proof");
 }
 
+fn write_codex_app_agent_session_proof_fixture(root: &Path, mission_id: &str, proof: Option<&str>) {
+    let agents_dir = root
+        .join(".sneakoscope")
+        .join("missions")
+        .join(mission_id)
+        .join("agents");
+    let sessions_path = agents_dir.join("agent-sessions.json");
+    let consensus_path = agents_dir.join("agent-consensus.json");
+    let sessions = fs::read_to_string(&sessions_path).expect("agent sessions");
+    let consensus = fs::read_to_string(&consensus_path).expect("agent consensus");
+    let agent_session_ref =
+        format!(".sneakoscope/missions/{mission_id}/agents/agent-sessions.json");
+    let agent_consensus_ref =
+        format!(".sneakoscope/missions/{mission_id}/agents/agent-consensus.json");
+    let agent_proof_evidence_ref =
+        format!(".sneakoscope/missions/{mission_id}/agents/agent-proof-evidence.json");
+    let parallel_runtime_proof_ref =
+        format!(".sneakoscope/missions/{mission_id}/agents/parallel-runtime-proof.json");
+    let codex_app_session_proof_ref =
+        format!(".sneakoscope/missions/{mission_id}/agents/codex-app-agent-session-proof.json");
+    let parallel_runtime_proof = format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"sks.parallel-runtime-proof.v1\",\n",
+            "  \"mission_id\": {},\n",
+            "  \"proof_mode\": \"codex-app-multi-agent-v1\",\n",
+            "  \"codex_app_multi_agent_sessions\": true,\n",
+            "  \"requested_workers\": 3,\n",
+            "  \"max_observed_agent_sessions\": 3,\n",
+            "  \"unique_agent_session_ids\": 3,\n",
+            "  \"completed_agent_sessions\": 3,\n",
+            "  \"utilization_proof_consistency\": {{\"ok\": true}},\n",
+            "  \"passed\": true,\n",
+            "  \"blockers\": []\n",
+            "}}\n"
+        ),
+        json_string(mission_id),
+    );
+    fs::write(
+        agents_dir.join("parallel-runtime-proof.json"),
+        &parallel_runtime_proof,
+    )
+    .expect("write codex app parallel proof");
+    let parallel_runtime_proof_hash = stable_content_hash(&parallel_runtime_proof);
+    let agent_proof = format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"sks.agent-proof-evidence.v1\",\n",
+            "  \"mission_id\": {},\n",
+            "  \"ok\": true,\n",
+            "  \"status\": \"passed\",\n",
+            "  \"backend\": \"codex-app-multi-agent-v1\",\n",
+            "  \"route_blackbox_kind\": \"actual_agent_command\",\n",
+            "  \"real_route_command_used\": true,\n",
+            "  \"real_parallel_claim\": true,\n",
+            "  \"codex_app_agent_session_proof\": \"codex-app-agent-session-proof.json\",\n",
+            "  \"native_session_proof\": \"codex-app-agent-session-proof.json\",\n",
+            "  \"agent_session_ref\": {},\n",
+            "  \"agent_session_hash\": {},\n",
+            "  \"agent_consensus_ref\": {},\n",
+            "  \"agent_consensus_hash\": {},\n",
+            "  \"parallel_runtime_proof_ref\": {},\n",
+            "  \"parallel_runtime_proof_hash\": {},\n",
+            "  \"native_cli_session_proof_ref\": {},\n",
+            "  \"codex_app_agent_session_count\": 3,\n",
+            "  \"codex_app_completed_agent_count\": 3,\n",
+            "  \"codex_app_unique_agent_session_count\": 3,\n",
+            "  \"codex_app_agent_ids_hash_chain_ok\": true,\n",
+            "  \"all_sessions_closed\": true,\n",
+            "  \"terminal_sessions_closed\": true,\n",
+            "  \"ledger_hash_chain_ok\": true,\n",
+            "  \"consensus_ok\": true,\n",
+            "  \"blockers\": []\n",
+            "}}\n"
+        ),
+        json_string(mission_id),
+        json_string(&agent_session_ref),
+        json_string(&stable_content_hash(&sessions)),
+        json_string(&agent_consensus_ref),
+        json_string(&stable_content_hash(&consensus)),
+        json_string(&parallel_runtime_proof_ref),
+        json_string(&parallel_runtime_proof_hash),
+        json_string(&codex_app_session_proof_ref),
+    );
+    fs::write(agents_dir.join("agent-proof-evidence.json"), &agent_proof)
+        .expect("write codex app agent proof evidence");
+    let agent_proof_evidence_hash = stable_content_hash(&agent_proof);
+    let default_proof = format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"sks.codex-app-agent-session-proof.v1\",\n",
+            "  \"mission_id\": {},\n",
+            "  \"ok\": true,\n",
+            "  \"backend\": \"codex-app-multi-agent-v1\",\n",
+            "  \"proof_mode\": \"multi_agent_v1\",\n",
+            "  \"real_parallel_claim\": true,\n",
+            "  \"codex_app_agent_session_proof\": true,\n",
+            "  \"agent_ids\": [\"019-agent-a\", \"019-agent-b\", \"019-agent-c\"],\n",
+            "  \"agent_ids_hash_chain_ok\": true,\n",
+            "  \"agent_session_ref\": {},\n",
+            "  \"agent_session_hash\": {},\n",
+            "  \"agent_consensus_ref\": {},\n",
+            "  \"agent_consensus_hash\": {},\n",
+            "  \"agent_proof_evidence_ref\": {},\n",
+            "  \"agent_proof_evidence_hash\": {},\n",
+            "  \"parallel_runtime_proof_ref\": {},\n",
+            "  \"parallel_runtime_proof_hash\": {},\n",
+            "  \"codex_app_agent_session_count\": 3,\n",
+            "  \"codex_app_completed_agent_count\": 3,\n",
+            "  \"worker_lane_count\": 1,\n",
+            "  \"reviewer_lane_count\": 1,\n",
+            "  \"mapper_lane_count\": 1,\n",
+            "  \"all_sessions_closed\": true,\n",
+            "  \"blockers\": []\n",
+            "}}\n"
+        ),
+        json_string(mission_id),
+        json_string(&agent_session_ref),
+        json_string(&stable_content_hash(&sessions)),
+        json_string(&agent_consensus_ref),
+        json_string(&stable_content_hash(&consensus)),
+        json_string(&agent_proof_evidence_ref),
+        json_string(&agent_proof_evidence_hash),
+        json_string(&parallel_runtime_proof_ref),
+        json_string(&parallel_runtime_proof_hash),
+    );
+    fs::write(
+        agents_dir.join("codex-app-agent-session-proof.json"),
+        proof.unwrap_or(&default_proof),
+    )
+    .expect("write codex app session proof");
+}
+
 fn first_mission_dir(root: &Path) -> PathBuf {
     let missions_dir = root.join(OPEN_SKSDIR).join("missions");
     fs::read_dir(&missions_dir)
@@ -2831,6 +2964,39 @@ fn beta006_passes_with_non_fake_native_cli_session_proof() {
 }
 
 #[test]
+fn beta006_passes_with_hash_bound_codex_app_multi_agent_session_proof() {
+    let root = temp_workspace("beta006-codex-app-multi-agent-proof-pass");
+    let mission_id = "M-20990101-000006-beta006";
+    write_native_collaboration_fixture(&root, mission_id);
+    write_codex_app_agent_session_proof_fixture(&root, mission_id, None);
+
+    run_cli(["bench"], &root).expect("bench with codex app multi-agent proof");
+    run_cli(["acceptance", "audit"], &root).expect("acceptance with codex app multi-agent proof");
+    assert_beta006_status(&root, "passed");
+
+    let execution = fs::read_to_string(
+        root.join(OPEN_SKSDIR)
+            .join("bench")
+            .join("native-collaboration-execution.json"),
+    )
+    .expect("native collaboration execution");
+    assert!(execution.contains("\"native_agent_provenance_verified\": true"));
+    assert!(execution.contains("\"provenance_proof_kind\": \"codex_app_multi_agent_v1\""));
+    assert!(execution.contains("\"codex_app_agent_session_proof_ref\": \".sneakoscope/missions/"));
+    assert!(execution.contains("codex-app-agent-session-proof.json"));
+
+    let diagnostics = fs::read_to_string(
+        root.join(OPEN_SKSDIR)
+            .join("bench")
+            .join("native-proof-diagnostics.json"),
+    )
+    .expect("native proof diagnostics");
+    assert!(diagnostics.contains("\"status\": \"verified\""));
+    assert!(diagnostics.contains("\"provenance_proof_kind\": \"codex_app_multi_agent_v1\""));
+    assert!(diagnostics.contains("codex-app-agent-session-proof.count-fields"));
+}
+
+#[test]
 fn beta006_accepts_object_sessions_with_process_id_native_cli_proof() {
     let root = temp_workspace("beta006-native-object-sessions-proof-pass");
     let mission_id = "M-20990101-000004-beta006";
@@ -2874,6 +3040,44 @@ fn beta006_accepts_object_sessions_with_process_id_native_cli_proof() {
         diagnostics
             .contains("native-cli-session-proof.process_ids-plus-unique_worker_session_count")
     );
+}
+
+#[test]
+fn beta006_rejects_mock_codex_app_multi_agent_session_proof() {
+    let root = temp_workspace("beta006-codex-app-multi-agent-mock-partial");
+    let mission_id = "M-20990101-000007-beta006";
+    write_native_collaboration_fixture(&root, mission_id);
+    let mock_proof = format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"sks.codex-app-agent-session-proof.v1\",\n",
+            "  \"mission_id\": {},\n",
+            "  \"ok\": true,\n",
+            "  \"backend\": \"mock-codex-app\",\n",
+            "  \"proof_mode\": \"multi_agent_v1\",\n",
+            "  \"real_parallel_claim\": true,\n",
+            "  \"codex_app_agent_session_proof\": true,\n",
+            "  \"agent_ids\": [\"a\", \"b\", \"c\"],\n",
+            "  \"agent_ids_hash_chain_ok\": true,\n",
+            "  \"all_sessions_closed\": true,\n",
+            "  \"blockers\": []\n",
+            "}}\n"
+        ),
+        json_string(mission_id)
+    );
+    write_codex_app_agent_session_proof_fixture(&root, mission_id, Some(&mock_proof));
+
+    run_cli(["bench"], &root).expect("bench with mock codex app proof");
+    run_cli(["acceptance", "audit"], &root).expect("acceptance with mock codex app proof");
+    assert_beta006_status(&root, "partial");
+
+    let diagnostics = fs::read_to_string(
+        root.join(OPEN_SKSDIR)
+            .join("bench")
+            .join("native-proof-diagnostics.json"),
+    )
+    .expect("native proof diagnostics");
+    assert!(diagnostics.contains("\"native_agent_provenance_verified\": false"));
 }
 
 #[test]
@@ -3201,6 +3405,19 @@ fn mvp004_passes_with_opt_in_reachable_openrouter_and_openai_adapter_fixture() {
     )
     .expect("acceptance findings");
     assert!(!findings.contains("\"id\":\"mvp-004\""));
+
+    let with_empty_blockers = provider_adapter_check_pass_fixture()
+        .replace(
+            "\"summary\": {\"total\":2,\"attempted\":2,\"reachable\":2},",
+            "\"summary\": {\"total\":2,\"attempted\":2,\"reachable\":2},\n  \"blockers\": [],",
+        )
+        .replace(
+            "\"status\":\"adapter_models_endpoint_reachable\",\"endpoint\":",
+            "\"status\":\"adapter_models_endpoint_reachable\",\"blockers\":[],\"endpoint\":",
+        );
+    write_provider_adapter_check_fixture(&root, &with_empty_blockers);
+    run_cli(["acceptance", "audit"], &root).expect("acceptance with additive blockers");
+    assert_mvp004_status(&root, "passed");
 }
 
 #[test]
@@ -3315,6 +3532,13 @@ fn mvp004_stays_partial_for_missing_or_tampered_provider_adapter_fixture() {
                 ),
             ),
             (
+                "blocker secret marker",
+                good.replace(
+                    "\"summary\": {\"total\":2,\"attempted\":2,\"reachable\":2},",
+                    "\"summary\": {\"total\":2,\"attempted\":2,\"reachable\":2},\n  \"blockers\": [\"Bearer sk-test\"],",
+                ),
+            ),
+            (
                 "duplicate row",
                 good.replace(
                     "    {\"name\":\"OpenAI\",\"configured\":true",
@@ -3364,8 +3588,16 @@ fn provider_commands_write_zero_leak_registry_probe_and_usage() {
     assert!(adapter_report.contains("\"schema\": \"opensks.provider-adapter-check.v1\""));
     assert!(adapter_report.contains("OpenRouter"));
     assert!(adapter_report.contains("OpenAI"));
+    assert!(adapter.stdout.contains("blockers: 3"));
+    assert!(adapter_report.contains(
+        "\"blockers\": [\"set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1\",\"configure_OPENROUTER_API_KEY_credential\",\"configure_OPENAI_API_KEY_credential\"]"
+    ));
+    assert!(adapter_report.contains("\"blockers\":[\"configure_OPENROUTER_API_KEY_credential\"]"));
+    assert!(adapter_report.contains("\"blockers\":[\"configure_OPENAI_API_KEY_credential\"]"));
     assert!(adapter_report.contains("\"transport\":\"native_reqwest_blocking_http\""));
     assert!(adapter_report.contains("\"secret_value_exposed\":false"));
+    assert!(!adapter_report.contains("sk-"));
+    assert!(!adapter_report.contains("bearer"));
     let leftover_secret_configs = fs::read_dir(&dir)
         .expect("provider dir")
         .filter_map(Result::ok)
@@ -3477,6 +3709,7 @@ fn provider_env_source_overrides_keychain_without_serializing_secrets() {
     assert_eq!(adapter_check.credential_source, "env");
     let adapter_json = render_provider_adapter_checks_json(&[adapter_check]);
     assert!(adapter_json.contains("\"credential_source\":\"env\""));
+    assert!(adapter_json.contains("\"blockers\":[\"set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1\"]"));
     assert!(!adapter_json.contains(keychain_secret));
     assert!(!adapter_json.contains(env_secret));
 }

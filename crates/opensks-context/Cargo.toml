@@ -6,7 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+opensks-codegraph = { path = "../opensks-codegraph" }
 opensks-contracts = { path = "../opensks-contracts" }
+opensks-intel = { path = "../opensks-intel" }
 opensks-triwiki = { path = "../opensks-triwiki" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

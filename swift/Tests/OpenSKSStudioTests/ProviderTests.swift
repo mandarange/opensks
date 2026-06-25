@@ -1,0 +1,676 @@
+import SwiftUI
+import XCTest
+
+@testable import OpenSKSStudio
+
+@MainActor
+final class ProviderTests: XCTestCase {
+    func testProviderConnectionFlightGuardRejectsConcurrentOperations() async throws {
+        let guardrail = ProviderConnectionFlightGuard()
+        let started = expectation(description: "first operation started")
+        var releaseFirst: CheckedContinuation<Void, Never>?
+
+        let first = Task {
+            try await guardrail.run {
+                started.fulfill()
+                await withCheckedContinuation { continuation in
+                    releaseFirst = continuation
+                }
+            }
+        }
+
+        await fulfillment(of: [started], timeout: 1)
+        XCTAssertTrue(guardrail.inFlight)
+        let second = try await guardrail.run {
+            XCTFail("second operation should not start while the wizard is already saving or testing")
+        }
+        XCTAssertFalse(second)
+
+        releaseFirst?.resume()
+        let firstResult = try await first.value
+        XCTAssertTrue(firstResult)
+        XCTAssertFalse(guardrail.inFlight)
+    }
+
+    func testProviderStoreRefreshLoadsRegistryStateAndEligibility() async throws {
+        let service = RecordingProviderRegistryService()
+        service.state.providers = [Self.providerRecord(health: "healthy")]
+        service.state.models = [Self.modelRecord(health: "healthy")]
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore(), service: service)
+
+        await store.refresh()
+
+        XCTAssertEqual(store.connections.map(\.id), ["provider-1"])
+        XCTAssertEqual(store.models.map(\.id), ["provider-1/code-model"])
+        XCTAssertTrue(store.hasEligibleTextModel)
+    }
+
+    func testTextModelSelectionCarriesOrderedHealthyFallbacks() async throws {
+        let service = RecordingProviderRegistryService()
+        service.state.providers = [
+            Self.providerRecord(health: "healthy", id: "provider-b"),
+            Self.providerRecord(health: "healthy", id: "provider-a"),
+            Self.providerRecord(health: "degraded", id: "provider-c")
+        ]
+        service.state.models = [
+            Self.modelRecord(health: "healthy", providerID: "provider-b"),
+            Self.modelRecord(health: "healthy", providerID: "provider-a"),
+            Self.modelRecord(health: "healthy", providerID: "provider-c"),
+            Self.imageModelRecord(health: "healthy", providerID: "provider-a")
+        ]
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore(), service: service)
+
+        await store.refresh()
+
+        let selection = store.textModelSelection(pinning: "provider-b/code-model")
+        XCTAssertEqual(selection.mode, .pinned)
+        XCTAssertEqual(selection.modelId, "provider-b/code-model")
+        XCTAssertEqual(selection.fallbackModelIds, ["provider-a/code-model"])
+    }
+
+    func testProviderAdapterCheckReportDecodesOldReportsWithoutBlockers() throws {
+        let json = """
+        {
+          "schema": "opensks.provider-adapter-check.v1",
+          "remote_probe_opt_in": false,
+          "secret_value_exposed": false,
+          "summary": {"total":2,"attempted":0,"reachable":0},
+          "adapters": [
+            {
+              "name":"OpenRouter",
+              "configured":false,
+              "attempted":false,
+              "status":"not_configured",
+              "credential_source":"none",
+              "endpoint":"https://openrouter.ai/api/v1/models",
+              "http_code":null,
+              "secret_value_exposed":false,
+              "stderr":""
+            }
+          ]
+        }
+        """
+
+        let report = try JSONDecoder.opensks.decode(ProviderAdapterCheckReport.self, from: Data(json.utf8))
+
+        XCTAssertEqual(report.blockers, [])
+        XCTAssertEqual(report.adapters.first?.blockers, [])
+    }
+
+    func testProviderStoreSurfacesAdapterCheckReadinessWithoutSecretValues() async throws {
+        let service = RecordingProviderRegistryService()
+        service.state.providers = [Self.providerRecord(health: "unknown")]
+        service.state.adapterCheckReport = ProviderAdapterCheckReport(
+            schema: "opensks.provider-adapter-check.v1",
+            remoteProbeOptIn: false,
+            secretValueExposed: false,
+            summary: ProviderAdapterCheckSummary(total: 2, attempted: 0, reachable: 0),
+            blockers: [
+                "set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1",
+                "configure_OPENROUTER_API_KEY_credential",
+                "Bearer sk-test-secret"
+            ],
+            adapters: [
+                ProviderAdapterCheckRow(
+                    name: "OpenRouter",
+                    configured: false,
+                    attempted: false,
+                    status: "not_configured",
+                    blockers: [
+                        "configure_OPENROUTER_API_KEY_credential",
+                        "Bearer sk-test-secret"
+                    ],
+                    credentialSource: "none",
+                    endpoint: "https://openrouter.ai/api/v1/models",
+                    httpCode: nil,
+                    secretValueExposed: false
+                )
+            ]
+        )
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore(), service: service)
+
+        await store.refresh()
+
+        let provider = try XCTUnwrap(store.connections.first)
+        XCTAssertEqual(
+            provider.adapterBlockers,
+            ["configure_OPENROUTER_API_KEY_credential", "redacted_provider_check_blocker"]
+        )
+        XCTAssertTrue(provider.adapterDiagnostic?.contains("Configure OPENROUTER_API_KEY") == true)
+        XCTAssertFalse(provider.adapterDiagnostic?.contains("sk-test-secret") == true)
+        XCTAssertTrue(store.providerReadinessDetail.contains("OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1"))
+        XCTAssertFalse(store.providerReadinessDetail.contains("sk-test-secret"))
+    }
+
+    func testProviderStoreSurfacesHealthCircuitAndDiagnosticReference() async throws {
+        let service = RecordingProviderRegistryService()
+        service.state.providers = [
+            Self.providerRecord(
+                health: "degraded",
+                circuitOpen: true,
+                checkedAtMs: 1_782_351_000_000,
+                reasonCode: "open_circuit",
+                diagnosticRef: "artifact://provider/provider-1/probe.json"
+            )
+        ]
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore(), service: service)
+
+        await store.refresh()
+
+        let provider = try XCTUnwrap(store.connections.first)
+        XCTAssertEqual(provider.health, .degraded)
+        XCTAssertTrue(provider.circuitOpen)
+        XCTAssertEqual(provider.statusLabel, "Circuit open")
+        XCTAssertEqual(provider.circuitLabel, "Open")
+        XCTAssertEqual(provider.lastCheckedAtMs, 1_782_351_000_000)
+        XCTAssertNotEqual(provider.lastCheckedLabel, "Not checked")
+        XCTAssertEqual(provider.diagnosticRef, "artifact://provider/provider-1/probe.json")
+        XCTAssertEqual(provider.diagnosticReferenceLabel, "artifact://provider/provider-1/probe.json")
+
+        let view = ProviderCenterView(store: store)
+            .frame(width: 360, height: 640)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 1
+        XCTAssertNotNil(renderer.nsImage, "provider center renders circuit and diagnostic reference in narrow width")
+    }
+
+    func testProviderCenterRendersAdapterDiagnostic() async throws {
+        let service = RecordingProviderRegistryService()
+        service.state.providers = [Self.providerRecord(health: "unknown")]
+        service.state.adapterCheckReport = ProviderAdapterCheckReport(
+            schema: "opensks.provider-adapter-check.v1",
+            remoteProbeOptIn: false,
+            secretValueExposed: false,
+            summary: ProviderAdapterCheckSummary(total: 2, attempted: 0, reachable: 0),
+            blockers: ["set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1"],
+            adapters: [
+                ProviderAdapterCheckRow(
+                    name: "OpenRouter",
+                    configured: false,
+                    attempted: false,
+                    status: "not_configured",
+                    blockers: ["configure_OPENROUTER_API_KEY_credential"],
+                    credentialSource: "none",
+                    endpoint: "https://openrouter.ai/api/v1/models",
+                    httpCode: nil,
+                    secretValueExposed: false
+                )
+            ]
+        )
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore(), service: service)
+        await store.refresh()
+
+        XCTAssertNotNil(store.connections.first?.adapterDiagnostic)
+        let view = ProviderCenterView(store: store)
+            .frame(width: 720, height: 560)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 1
+        XCTAssertNotNil(renderer.nsImage, "provider center renders with adapter diagnostic")
+    }
+
+    func testProviderStoreConnectPersistsThroughRegistryServiceWithoutSecretValue() async throws {
+        let secrets = InMemoryProviderSecretStore()
+        let service = RecordingProviderRegistryService()
+        let store = ProviderStore(secretStore: secrets, service: service)
+
+        try await store.connect(
+            ProviderDraft(
+                kind: .openRouter,
+                displayName: "OpenRouter",
+                endpoint: "https://openrouter.ai/api/v1",
+                organizationRef: "",
+                projectRef: "",
+                enabled: true,
+                maxConcurrentRequests: 3
+            ),
+            credential: SecureCredential(value: "sk-live-secret-never-persist")
+        )
+
+        let saved = try XCTUnwrap(service.upsertedConnection)
+        XCTAssertEqual(saved.auth.store, "macos_keychain")
+        XCTAssertTrue(secrets.contains(service: saved.auth.service, account: saved.auth.account))
+        XCTAssertFalse(String(describing: saved).contains("sk-live-secret-never-persist"))
+        XCTAssertEqual(service.syncedModels.count, 2)
+        XCTAssertEqual(store.connections.count, 1)
+        XCTAssertFalse(store.hasEligibleTextModel, "seeded registry models remain unavailable until a successful probe")
+        XCTAssertFalse(store.hasEligibleImageModel, "seeded image models remain unavailable until a successful probe")
+    }
+
+    func testProviderStoreConnectAndProbeUsesSavedProviderAndPersistsScope() async throws {
+        let secrets = InMemoryProviderSecretStore()
+        let service = RecordingProviderRegistryService()
+        let store = ProviderStore(secretStore: secrets, service: service)
+
+        let providerID = try await store.connectAndProbe(
+            ProviderDraft(
+                kind: .openRouter,
+                displayName: "OpenRouter",
+                endpoint: "https://openrouter.ai/api/v1",
+                organizationRef: " org-live ",
+                projectRef: " project-live ",
+                enabled: true,
+                maxConcurrentRequests: 3
+            ),
+            credential: SecureCredential(value: "sk-live-secret-never-persist")
+        )
+
+        let saved = try XCTUnwrap(service.upsertedConnection)
+        XCTAssertEqual(saved.organizationRef, "org-live")
+        XCTAssertEqual(saved.projectRef, "project-live")
+        XCTAssertEqual(service.probedProviderIDs, [providerID])
+        XCTAssertEqual(store.connections.first?.id, providerID)
+        XCTAssertTrue(secrets.contains(service: saved.auth.service, account: saved.auth.account))
+        XCTAssertFalse(String(describing: saved).contains("sk-live-secret-never-persist"))
+        XCTAssertTrue(store.hasEligibleTextModel)
+        XCTAssertTrue(store.hasEligibleImageModel)
+    }
+
+    func testProviderStoreSavesCredentialAsSecretRefOnlyAndSeedsModelAwaitingProbe() async throws {
+        let secrets = InMemoryProviderSecretStore()
+        let store = ProviderStore(secretStore: secrets)
+        let draft = ProviderDraft(
+            kind: .openRouter,
+            displayName: "OpenRouter",
+            endpoint: "https://openrouter.ai/api/v1",
+            organizationRef: "",
+            projectRef: "",
+            enabled: true,
+            maxConcurrentRequests: 4
+        )
+
+        try await store.connect(draft, credential: SecureCredential(value: "sk-test-secret-value"))
+
+        XCTAssertEqual(store.connections.count, 1)
+        let provider = try XCTUnwrap(store.connections.first)
+        XCTAssertEqual(provider.secretRef.store, "macos_keychain")
+        XCTAssertTrue(secrets.contains(service: provider.secretRef.service, account: provider.secretRef.account))
+        XCTAssertFalse(provider.lastDiagnostic.contains("sk-test-secret-value"))
+        XCTAssertEqual(provider.health, .needsProbe)
+        XCTAssertFalse(store.hasEligibleTextModel)
+        XCTAssertFalse(store.hasEligibleImageModel)
+        XCTAssertEqual(store.models(for: provider.id).count, 2)
+        XCTAssertTrue(store.models(for: provider.id).allSatisfy { $0.health == .needsProbe })
+    }
+
+    func testProviderProbeSyncsLiveModelsAndUnlocksEligibility() async throws {
+        let service = RecordingProviderRegistryService()
+        service.state.providers = [Self.providerRecord(health: "unknown")]
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore(), service: service)
+
+        await store.refresh()
+        XCTAssertFalse(store.hasEligibleTextModel)
+
+        try await store.probeProvider("provider-1")
+
+        XCTAssertEqual(service.probedProviderIDs, ["provider-1"])
+        XCTAssertEqual(store.connections.first?.health, .healthy)
+        XCTAssertEqual(store.connections.first?.circuitOpen, false)
+        XCTAssertEqual(store.connections.first?.lastCheckedAtMs, 40)
+        XCTAssertEqual(store.connections.first?.diagnosticRef, "artifact://provider/provider-1/probe.json")
+        XCTAssertEqual(store.models.map(\.id).sorted(), ["provider-1/code-model", "provider-1/image-model"])
+        XCTAssertTrue(store.models.allSatisfy { $0.health == .healthy })
+        XCTAssertTrue(store.hasEligibleTextModel)
+        XCTAssertTrue(store.hasEligibleImageModel)
+    }
+
+    func testProviderAndModelEnablementAffectEligibility() async throws {
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore())
+        try await store.connect(
+            ProviderDraft(endpoint: "https://api.openai.com/v1"),
+            credential: SecureCredential(value: "secret-value")
+        )
+        let provider = try XCTUnwrap(store.connections.first)
+        let model = try XCTUnwrap(store.models(for: provider.id).first)
+
+        XCTAssertFalse(store.hasEligibleTextModel)
+        try await store.applySuccessfulProbe(providerID: provider.id)
+        XCTAssertTrue(store.hasEligibleTextModel)
+        try await store.setModelEnabled(model.id, false)
+        XCTAssertFalse(store.hasEligibleTextModel)
+        try await store.setModelEnabled(model.id, true)
+        XCTAssertTrue(store.hasEligibleTextModel)
+        try await store.setProviderEnabled(provider.id, false)
+        XCTAssertFalse(store.hasEligibleTextModel)
+        try await store.setProviderEnabled(provider.id, true)
+        XCTAssertFalse(store.hasEligibleTextModel, "a re-enabled provider needs a fresh successful probe")
+        try await store.applySuccessfulProbe(providerID: provider.id)
+        XCTAssertTrue(store.hasEligibleTextModel)
+    }
+
+    func testProviderImageModelEligibilityUsesImageCapability() async throws {
+        let service = RecordingProviderRegistryService()
+        service.state.providers = [Self.providerRecord(health: "healthy")]
+        service.state.models = [
+            Self.modelRecord(health: "healthy"),
+            Self.imageModelRecord(health: "healthy"),
+            Self.visionModelRecord(health: "healthy")
+        ]
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore(), service: service)
+
+        await store.refresh()
+
+        XCTAssertEqual(store.eligibleImageModels.map(\.id), ["provider-1/image-model"])
+        XCTAssertEqual(
+            store.eligibleVisionModels.map(\.id).sorted(),
+            ["provider-1/image-model", "provider-1/vision-model"]
+        )
+        XCTAssertTrue(store.hasEligibleImageModel)
+
+        try await store.setModelEnabled("provider-1/image-model", false)
+
+        XCTAssertFalse(store.hasEligibleImageModel)
+        XCTAssertEqual(store.eligibleVisionModels.map(\.id), ["provider-1/vision-model"])
+    }
+
+    func testProviderStoreFiltersProviderModelsBySearchText() async throws {
+        let service = RecordingProviderRegistryService()
+        service.state.providers = [Self.providerRecord(health: "healthy")]
+        service.state.models = [
+            Self.modelRecord(health: "healthy"),
+            Self.imageModelRecord(health: "healthy"),
+            Self.visionModelRecord(health: "healthy")
+        ]
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore(), service: service)
+
+        await store.refresh()
+
+        XCTAssertEqual(store.models(for: "provider-1", matching: "code").map(\.id), ["provider-1/code-model"])
+        XCTAssertEqual(store.models(for: "provider-1", matching: "image").map(\.id), ["provider-1/image-model"])
+        XCTAssertEqual(
+            store.models(for: "provider-1", matching: "vision").map(\.id).sorted(),
+            ["provider-1/image-model", "provider-1/vision-model"]
+        )
+        XCTAssertEqual(store.models(for: "provider-1", matching: "missing"), [])
+        XCTAssertEqual(store.models(for: "provider-1", matching: "   ").count, 3)
+    }
+
+    func testProviderStoreRejectsNonLocalHttpEndpoint() async {
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore())
+        do {
+            try await store.connect(
+                ProviderDraft(endpoint: "http://example.com/v1"),
+                credential: SecureCredential(value: "secret-value")
+            )
+            XCTFail("non-local HTTP endpoints must be rejected")
+        } catch {
+            XCTAssertEqual(error as? ProviderStoreError, .invalidEndpoint)
+        }
+    }
+
+    nonisolated fileprivate static func providerRecord(
+        health: String = "unknown",
+        id: String = "provider-1",
+        circuitOpen: Bool = false,
+        checkedAtMs: UInt64? = nil,
+        reasonCode: String? = nil,
+        diagnosticRef: String? = nil
+    ) -> ProviderConnectionRecord {
+        ProviderConnectionRecord(
+            schema: "opensks.provider-connection.v1",
+            id: id,
+            kind: .openRouter,
+            displayName: "OpenRouter",
+            enabled: true,
+            endpoint: ProviderEndpointRecord(
+                baseUrl: "https://openrouter.ai/api/v1",
+                allowInsecureHttp: false
+            ),
+            auth: ProviderSecretRef(
+                store: "macos_keychain",
+                service: "ai.opensks.provider.open_router",
+                account: id,
+                version: 1
+            ),
+            organizationRef: nil,
+            projectRef: nil,
+            health: ProviderHealthSnapshotRecord(
+                state: health,
+                circuitOpen: circuitOpen,
+                checkedAtMs: checkedAtMs,
+                reasonCode: reasonCode ?? (health == "healthy" ? "probe_ok" : "not_probed"),
+                diagnosticRef: diagnosticRef
+            ),
+            concurrency: ProviderConcurrencyRecord(
+                maxConcurrentRequests: 3,
+                requestsPerMinute: nil,
+                tokensPerMinute: nil
+            ),
+            createdAtMs: 10,
+            updatedAtMs: 20,
+            revision: 1
+        )
+    }
+
+    nonisolated fileprivate static func modelRecord(
+        health: String = "unknown",
+        enabled: Bool = true,
+        providerID: String = "provider-1"
+    ) -> ProviderModelRecord {
+        ProviderModelRecord(
+            schema: "opensks.model-catalog-entry.v1",
+            id: "\(providerID)/code-model",
+            providerId: providerID,
+            remoteModelId: "code-model",
+            displayName: "Code Model",
+            enabled: enabled,
+            capabilities: ProviderCapabilitiesRecord(
+                text: true,
+                code: true,
+                visionInput: false,
+                imageOutput: false,
+                imageEdit: false,
+                toolUse: true,
+                structuredOutput: true,
+                longContext: true,
+                streaming: true
+            ),
+            limits: ProviderLimitsRecord(
+                maxInputTokens: 128_000,
+                maxOutputTokens: nil,
+                requestsPerMinute: nil,
+                tokensPerMinute: nil,
+                maxConcurrency: nil
+            ),
+            health: health,
+            roleScores: ["code": ProviderRoleScoreRecord(score: 0.9, evidenceRefs: ["test"])],
+            catalogRevision: "catalog-1"
+        )
+    }
+
+    nonisolated fileprivate static func imageModelRecord(
+        health: String = "unknown",
+        enabled: Bool = true,
+        providerID: String = "provider-1"
+    ) -> ProviderModelRecord {
+        ProviderModelRecord(
+            schema: "opensks.model-catalog-entry.v1",
+            id: "\(providerID)/image-model",
+            providerId: providerID,
+            remoteModelId: "image-model",
+            displayName: "Image Model",
+            enabled: enabled,
+            capabilities: ProviderCapabilitiesRecord(
+                text: false,
+                code: false,
+                visionInput: true,
+                imageOutput: true,
+                imageEdit: false,
+                toolUse: false,
+                structuredOutput: false,
+                longContext: false,
+                streaming: false
+            ),
+            limits: ProviderLimitsRecord(
+                maxInputTokens: nil,
+                maxOutputTokens: nil,
+                requestsPerMinute: nil,
+                tokensPerMinute: nil,
+                maxConcurrency: nil
+            ),
+            health: health,
+            roleScores: [
+                "image": ProviderRoleScoreRecord(score: 0.9, evidenceRefs: ["test"]),
+                "vision": ProviderRoleScoreRecord(score: 0.7, evidenceRefs: ["test"])
+            ],
+            catalogRevision: "catalog-1"
+        )
+    }
+
+    nonisolated fileprivate static func visionModelRecord(
+        health: String = "unknown",
+        enabled: Bool = true,
+        providerID: String = "provider-1"
+    ) -> ProviderModelRecord {
+        ProviderModelRecord(
+            schema: "opensks.model-catalog-entry.v1",
+            id: "\(providerID)/vision-model",
+            providerId: providerID,
+            remoteModelId: "vision-model",
+            displayName: "Vision Model",
+            enabled: enabled,
+            capabilities: ProviderCapabilitiesRecord(
+                text: true,
+                code: false,
+                visionInput: true,
+                imageOutput: false,
+                imageEdit: false,
+                toolUse: false,
+                structuredOutput: true,
+                longContext: false,
+                streaming: true
+            ),
+            limits: ProviderLimitsRecord(
+                maxInputTokens: 32_000,
+                maxOutputTokens: nil,
+                requestsPerMinute: nil,
+                tokensPerMinute: nil,
+                maxConcurrency: nil
+            ),
+            health: health,
+            roleScores: ["vision": ProviderRoleScoreRecord(score: 0.8, evidenceRefs: ["test"])],
+            catalogRevision: "catalog-1"
+        )
+    }
+}
+
+private final class RecordingProviderRegistryService: ProviderRegistryService, @unchecked Sendable {
+    var state = ProviderRegistryState(
+        schema: "opensks.provider-registry-state.v1",
+        providers: [],
+        models: [],
+        latestProbes: []
+    )
+    var upsertedConnection: ProviderConnectionRecord?
+    var syncedModels: [ProviderModelRecord] = []
+    var probedProviderIDs: [String] = []
+
+    func registryState() async throws -> ProviderRegistryState {
+        state
+    }
+
+    func upsertConnection(
+        _ connection: ProviderConnectionRecord,
+        expectedRevision _: UInt64?
+    ) async throws -> ProviderRegistryCommandResult {
+        upsertedConnection = connection
+        state.providers.removeAll { $0.id == connection.id }
+        state.providers.append(connection)
+        return result(providerID: connection.id, mutation: "created", revision: connection.revision)
+    }
+
+    func deleteProvider(id: String, expectedRevision: UInt64) async throws -> ProviderRegistryCommandResult {
+        state.providers.removeAll { $0.id == id }
+        state.models.removeAll { $0.providerId == id }
+        return result(providerID: id, mutation: "deleted", revision: expectedRevision)
+    }
+
+    func setProviderEnabled(
+        id: String,
+        enabled: Bool,
+        expectedRevision: UInt64
+    ) async throws -> ProviderRegistryCommandResult {
+        if let index = state.providers.firstIndex(where: { $0.id == id }) {
+            state.providers[index].enabled = enabled
+            state.providers[index].revision = expectedRevision + 1
+        }
+        return result(providerID: id, mutation: enabled ? "enabled" : "disabled", revision: expectedRevision + 1)
+    }
+
+    func probeProvider(id: String) async throws -> ProviderRegistryProbeResult {
+        probedProviderIDs.append(id)
+        let provider = ProviderTests.providerRecord(
+            health: "healthy",
+            id: id,
+            checkedAtMs: 40,
+            diagnosticRef: "artifact://provider/\(id)/probe.json"
+        )
+        let model = ProviderTests.modelRecord(health: "healthy", providerID: id)
+        let imageModel = ProviderTests.imageModelRecord(health: "healthy", providerID: id)
+        let receipt = ProviderProbeReceiptRecord(
+            schema: "opensks.provider-probe-receipt.v1",
+            providerId: id,
+            endpointHostRedacted: "openrouter.ai",
+            httpCategory: "success",
+            latencyBucket: "under250_ms",
+            authAccepted: true,
+            modelListAvailable: true,
+            catalogCount: 1,
+            occurredAtMs: 40,
+            reasonCode: "probe_ok",
+            diagnosticRef: "artifact://provider/\(id)/probe.json"
+        )
+        state.providers.removeAll { $0.id == id }
+        state.providers.append(provider)
+        state.models.removeAll { $0.providerId == id }
+        state.models.append(model)
+        state.models.append(imageModel)
+        state.latestProbes.removeAll { $0.providerId == id }
+        state.latestProbes.append(receipt)
+        return ProviderRegistryProbeResult(
+            schema: "opensks.provider-registry-probe-result.v1",
+            provider: provider,
+            probeReceipt: receipt,
+            models: [model, imageModel],
+            syncReceipt: result(providerID: id, mutation: "models_synced", revision: 2).receipt
+        )
+    }
+
+    func syncModels(providerID: String, models: [ProviderModelRecord]) async throws -> ProviderRegistryCommandResult {
+        syncedModels = models
+        state.models.removeAll { $0.providerId == providerID }
+        state.models.append(contentsOf: models)
+        return result(providerID: providerID, mutation: "models_synced", revision: 1)
+    }
+
+    func setModelEnabled(id: String, enabled: Bool) async throws -> ProviderRegistryModelResult {
+        if let index = state.models.firstIndex(where: { $0.id == id }) {
+            state.models[index].enabled = enabled
+        }
+        return ProviderRegistryModelResult(
+            schema: "opensks.provider-registry-model-result.v1",
+            model: state.models.first { $0.id == id }!
+        )
+    }
+
+    func recordProbe(_ receipt: ProviderProbeReceiptRecord) async throws -> ProviderRegistryCommandResult {
+        state.latestProbes.removeAll { $0.providerId == receipt.providerId }
+        state.latestProbes.append(receipt)
+        return result(providerID: receipt.providerId, mutation: "updated", revision: 1)
+    }
+
+    private func result(providerID: String, mutation: String, revision: UInt64) -> ProviderRegistryCommandResult {
+        ProviderRegistryCommandResult(
+            schema: "opensks.provider-registry-command-result.v1",
+            receipt: ProviderMutationReceiptRecord(
+                schema: "opensks.provider-mutation.v1",
+                providerId: providerID,
+                mutation: mutation,
+                revision: revision,
+                secretRef: nil,
+                secretValueExposed: false,
+                occurredAtMs: 30,
+                reasonCode: "test"
+            )
+        )
+    }
+}
