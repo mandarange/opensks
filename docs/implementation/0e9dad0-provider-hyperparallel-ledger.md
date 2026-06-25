@@ -1252,3 +1252,14 @@ Product language contract: user-facing UI, logs, reason codes, schemas, and iden
 - migration: no schema migration. Existing release proof consumers already decode `upgrade_checked` and `blockers`.
 - removal/deletion: removed no runtime path; this only connects release proof to the already-generated updater SSOT artifact set.
 - final evidence: local upgrade-path artifact evidence is now bound into release proof. The proof remains correctly `NotVerified` because the current app bundle is only ad-hoc signed and no macOS notarization receipt is present.
+
+### Cross-cutting - Release Signing Diagnostic Evidence
+
+- status: Verified for diagnostic evidence; production signing/notarization remain NotVerified
+- owner file/module: `crates/opensks-contracts/src/lib.rs`, `crates/opensks-retention/src/lib.rs`, `crates/opensks-cli/src/retention.rs`, `schemas/release-proof.schema.json`, `.opensks/release/release-proof.json`
+- current evidence: release proof already blocked on `signed_app_missing` and `notarization_missing`, but it did not preserve structured evidence explaining what the local macOS app bundle actually reported. Manual `codesign` showed an ad-hoc signature and no team identifier, while `spctl` did not produce an accepted/notarized result.
+- target change: add defaulted optional `signing_evidence` to `opensks.release-proof.v1` and have `cargo run -- release proof` inspect `.opensks/macos/OpenSKS.app` with `codesign` and `spctl`. The proof now records app path, identifier, signature kind, team identifier, CDHash, probe statuses, production-signed boolean, notarized boolean, and a concise diagnostic without marking ad-hoc signing as production signing.
+- tests: `cargo test -p opensks-cli release_proof --locked`, `cargo test -p opensks-retention release_proof --locked`, `cargo test -p opensks-contracts release_proof --locked`, `cargo fmt --all --check`, `cargo clippy -p opensks-cli -p opensks-contracts -p opensks-retention --all-targets -- -D warnings`, `cargo run -p xtask -- schemas`, `git diff --check`, `cargo run -- release proof`, `cargo run -- acceptance audit`, and `sks validate-artifacts latest` passed. On clean HEAD `36982cf`, release proof records `signing_evidence.checked: true`, `signature: adhoc`, `team_identifier: not set`, `production_signed: false`, `notarized: false`, `codesign_status: 0`, and `notarization_status: 1`.
+- migration: generated `schemas/release-proof.schema.json` now includes optional/defaulted `signing_evidence`, so older proof JSON without the field remains decodable.
+- removal/deletion: no runtime removal. This is an evidence-contract hardening change.
+- final evidence: release proof now explains the remaining signing/notarization blockers with local app-bundle probe evidence. Full work-order completion remains unproven until a production-signed and notarized app bundle is available, plus live provider smoke credentials/opt-in.
