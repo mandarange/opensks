@@ -3618,6 +3618,18 @@ fn provider_commands_write_zero_leak_registry_probe_and_usage() {
     assert!(adapter_report.contains(
         "\"blockers\": [\"set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1\",\"configure_OPENROUTER_API_KEY_credential\",\"configure_OPENAI_API_KEY_credential\"]"
     ));
+    assert!(adapter_report.contains("\"remediation_actions\": ["));
+    assert!(adapter_report.contains(
+        "\"action\":\"Set OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1 before running live remote provider checks.\""
+    ));
+    assert!(adapter_report.contains(
+        "\"action\":\"Add an OpenRouter API key credential through Provider Center or the configured secret store.\""
+    ));
+    assert!(adapter_report.contains(
+        "\"action\":\"Add an OpenAI API key credential through Provider Center or the configured secret store.\""
+    ));
+    assert!(adapter_report.contains("\"scope\":\"operator_environment\""));
+    assert!(adapter_report.contains("\"scope\":\"provider_credential\""));
     assert!(adapter_report.contains("\"blockers\":[\"configure_OPENROUTER_API_KEY_credential\"]"));
     assert!(adapter_report.contains("\"blockers\":[\"configure_OPENAI_API_KEY_credential\"]"));
     assert!(adapter_report.contains("\"transport\":\"native_reqwest_blocking_http\""));

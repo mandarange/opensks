@@ -11040,6 +11040,7 @@ fn render_provider_adapter_check_report(
             "  \"secret_value_exposed\": false,\n",
             "  \"summary\": {{\"total\":{},\"attempted\":{},\"reachable\":{}}},\n",
             "  \"blockers\": {},\n",
+            "  \"remediation_actions\": {},\n",
             "  \"adapters\": {}\n",
             "}}\n"
         ),
@@ -11049,6 +11050,7 @@ fn render_provider_adapter_check_report(
         attempted,
         reachable,
         json_vec(&blockers),
+        render_provider_adapter_remediation_actions_json(&blockers),
         render_provider_adapter_checks_json(checks)
     )
 }
@@ -11079,6 +11081,68 @@ fn provider_adapter_check_blocker_stdout_lines(blockers: &[String]) -> String {
         .iter()
         .map(|blocker| format!("blocker: {blocker}\n"))
         .collect()
+}
+
+fn render_provider_adapter_remediation_actions_json(blockers: &[String]) -> String {
+    let actions = blockers
+        .iter()
+        .map(|blocker| {
+            let (action, scope) = provider_adapter_remediation_action(blocker);
+            format!(
+                "{{\"blocker\":{},\"action\":{},\"scope\":{}}}",
+                json_string(blocker),
+                json_string(action),
+                json_string(scope)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{actions}]")
+}
+
+fn provider_adapter_remediation_action(blocker: &str) -> (&'static str, &'static str) {
+    match blocker {
+        "set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1" => (
+            "Set OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1 before running live remote provider checks.",
+            "operator_environment",
+        ),
+        "configure_OPENROUTER_API_KEY_credential" => (
+            "Add an OpenRouter API key credential through Provider Center or the configured secret store.",
+            "provider_credential",
+        ),
+        "configure_OPENAI_API_KEY_credential" => (
+            "Add an OpenAI API key credential through Provider Center or the configured secret store.",
+            "provider_credential",
+        ),
+        "replace_OPENROUTER_API_KEY_credential" => (
+            "Replace the OpenRouter API key credential; authentication was rejected.",
+            "provider_credential",
+        ),
+        "replace_OPENAI_API_KEY_credential" => (
+            "Replace the OpenAI API key credential; authentication was rejected.",
+            "provider_credential",
+        ),
+        "resolve_OpenRouter_models_endpoint" => (
+            "Check OpenRouter models endpoint reachability and provider status.",
+            "provider_network",
+        ),
+        "resolve_OpenAI_models_endpoint" => (
+            "Check OpenAI models endpoint reachability and provider status.",
+            "provider_network",
+        ),
+        "resolve_OpenRouter_adapter_check_error" => (
+            "Review the OpenRouter adapter-check diagnostic in the local report.",
+            "provider_diagnostic",
+        ),
+        "resolve_OpenAI_adapter_check_error" => (
+            "Review the OpenAI adapter-check diagnostic in the local report.",
+            "provider_diagnostic",
+        ),
+        _ => (
+            "Review the redacted provider adapter-check blocker in the local report.",
+            "provider_diagnostic",
+        ),
+    }
 }
 
 fn render_provider_adapter_checks_json(checks: &[ProviderAdapterCheck]) -> String {

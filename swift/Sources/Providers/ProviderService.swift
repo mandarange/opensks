@@ -177,6 +177,7 @@ struct ProviderAdapterCheckReport: Codable, Equatable, Sendable {
     var secretValueExposed: Bool
     var summary: ProviderAdapterCheckSummary
     var blockers: [String]
+    var remediationActions: [ProviderAdapterRemediationAction]
     var adapters: [ProviderAdapterCheckRow]
 
     init(
@@ -185,6 +186,7 @@ struct ProviderAdapterCheckReport: Codable, Equatable, Sendable {
         secretValueExposed: Bool,
         summary: ProviderAdapterCheckSummary,
         blockers: [String],
+        remediationActions: [ProviderAdapterRemediationAction] = [],
         adapters: [ProviderAdapterCheckRow]
     ) {
         self.schema = schema
@@ -192,6 +194,7 @@ struct ProviderAdapterCheckReport: Codable, Equatable, Sendable {
         self.secretValueExposed = secretValueExposed
         self.summary = summary
         self.blockers = blockers
+        self.remediationActions = remediationActions
         self.adapters = adapters
     }
 
@@ -202,8 +205,16 @@ struct ProviderAdapterCheckReport: Codable, Equatable, Sendable {
         secretValueExposed = try container.decode(Bool.self, forKey: .secretValueExposed)
         summary = try container.decode(ProviderAdapterCheckSummary.self, forKey: .summary)
         blockers = try container.decodeIfPresent([String].self, forKey: .blockers) ?? []
+        remediationActions = try container
+            .decodeIfPresent([ProviderAdapterRemediationAction].self, forKey: .remediationActions) ?? []
         adapters = try container.decode([ProviderAdapterCheckRow].self, forKey: .adapters)
     }
+}
+
+struct ProviderAdapterRemediationAction: Codable, Equatable, Sendable {
+    var blocker: String
+    var action: String
+    var scope: String
 }
 
 struct ProviderAdapterCheckSummary: Codable, Equatable, Sendable {

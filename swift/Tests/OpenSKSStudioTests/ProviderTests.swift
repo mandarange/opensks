@@ -94,7 +94,38 @@ final class ProviderTests: XCTestCase {
         let report = try JSONDecoder.opensks.decode(ProviderAdapterCheckReport.self, from: Data(json.utf8))
 
         XCTAssertEqual(report.blockers, [])
+        XCTAssertEqual(report.remediationActions, [])
         XCTAssertEqual(report.adapters.first?.blockers, [])
+    }
+
+    func testProviderAdapterCheckReportDecodesRemediationActions() throws {
+        let json = """
+        {
+          "schema": "opensks.provider-adapter-check.v1",
+          "remote_probe_opt_in": false,
+          "secret_value_exposed": false,
+          "summary": {"total":2,"attempted":0,"reachable":0},
+          "blockers": ["configure_OPENROUTER_API_KEY_credential"],
+          "remediation_actions": [
+            {
+              "blocker": "configure_OPENROUTER_API_KEY_credential",
+              "action": "Add an OpenRouter API key credential through Provider Center or the configured secret store.",
+              "scope": "provider_credential"
+            }
+          ],
+          "adapters": []
+        }
+        """
+
+        let report = try JSONDecoder.opensks.decode(ProviderAdapterCheckReport.self, from: Data(json.utf8))
+
+        XCTAssertEqual(report.remediationActions.count, 1)
+        XCTAssertEqual(report.remediationActions.first?.blocker, "configure_OPENROUTER_API_KEY_credential")
+        XCTAssertEqual(
+            report.remediationActions.first?.action,
+            "Add an OpenRouter API key credential through Provider Center or the configured secret store."
+        )
+        XCTAssertEqual(report.remediationActions.first?.scope, "provider_credential")
     }
 
     func testProviderStoreSurfacesAdapterCheckReadinessWithoutSecretValues() async throws {
