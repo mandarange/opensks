@@ -128,6 +128,63 @@ final class ProviderTests: XCTestCase {
         XCTAssertEqual(state.adapterCheckReport?.adapters.first?.transport, "native_reqwest_blocking_http")
     }
 
+    func testLiveProviderRegistryServiceRunsAdapterCheckAndLoadsReport() async throws {
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("opensks-provider-adapter-run-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let cli = workspace.appendingPathComponent("fake-opensks")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "provider" ] && [ "$2" = "adapter-check" ]; then
+          mkdir -p "$OPENSKS_WORKSPACE/.opensks/providers"
+          cat > "$OPENSKS_WORKSPACE/.opensks/providers/provider-adapter-check.json" <<'JSON'
+        {
+          "schema": "opensks.provider-adapter-check.v1",
+          "generated_at": {"unix_seconds": 1782400001, "nanos": 0},
+          "remote_probe_opt_in": false,
+          "secret_value_exposed": false,
+          "summary": {"total": 2, "attempted": 0, "reachable": 0},
+          "blockers": ["set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1"],
+          "remediation_actions": [
+            {"blocker": "set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1", "action": "Set OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1.", "scope": "operator_environment"}
+          ],
+          "adapters": [
+            {
+              "name": "OpenRouter",
+              "configured": true,
+              "attempted": false,
+              "status": "remote_probe_requires_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1",
+              "blockers": ["set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1"],
+              "credential_source": "provider_registry_keychain:provider-openrouter",
+              "endpoint": "https://openrouter.ai/api/v1/models",
+              "http_code": null,
+              "duration_ms": 0,
+              "transport": "native_reqwest_blocking_http",
+              "secret_value_exposed": false,
+              "stderr": ""
+            }
+          ]
+        }
+        JSON
+          echo "checked remote provider adapters"
+        else
+          echo "unexpected args: $@" >&2
+          exit 64
+        fi
+        """
+        try script.write(to: cli, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
+
+        let service = LiveProviderRegistryService(cli: cli, workspace: workspace)
+        let report = try await service.runAdapterCheck()
+
+        XCTAssertEqual(report?.generatedAt?.unixSeconds, 1_782_400_001)
+        XCTAssertEqual(report?.adapters.first?.credentialSource, "provider_registry_keychain:provider-openrouter")
+        XCTAssertEqual(report?.remediationActions.first?.scope, "operator_environment")
+    }
+
     func testTextModelSelectionCarriesOrderedHealthyFallbacks() async throws {
         let service = RecordingProviderRegistryService()
         service.state.providers = [
@@ -342,6 +399,13 @@ final class ProviderTests: XCTestCase {
             secretValueExposed: false,
             summary: ProviderAdapterCheckSummary(total: 2, attempted: 0, reachable: 0),
             blockers: ["set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1"],
+            remediationActions: [
+                ProviderAdapterRemediationAction(
+                    blocker: "set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1",
+                    action: "Set OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1 before running live remote provider checks.",
+                    scope: "operator_environment"
+                )
+            ],
             adapters: [
                 ProviderAdapterCheckRow(
                     name: "OpenRouter",
@@ -367,6 +431,12 @@ final class ProviderTests: XCTestCase {
             store.adapterCheckReportSummaryDetail,
             "0/2 reachable · attempted 0 · remote probe false"
         )
+        XCTAssertEqual(
+            store.adapterCheckActionDetail,
+            "Set OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1 before running live provider checks."
+        )
+        XCTAssertEqual(store.adapterCheckRemediationActions.count, 1)
+        XCTAssertEqual(store.adapterCheckRemediationActions.first?.scope, "operator_environment")
         XCTAssertNotNil(provider.adapterDiagnostic)
         XCTAssertEqual(provider.adapterCheckGeneratedAtLabel, "unix 1782400000")
         XCTAssertEqual(
@@ -378,6 +448,54 @@ final class ProviderTests: XCTestCase {
         let renderer = ImageRenderer(content: view)
         renderer.scale = 1
         XCTAssertNotNil(renderer.nsImage, "provider center renders with adapter diagnostic")
+    }
+
+    func testProviderStoreRunsAdapterCheckAndRefreshesReport() async throws {
+        let service = RecordingProviderRegistryService()
+        service.state.providers = [Self.providerRecord(health: "unknown")]
+        service.adapterCheckReportAfterRun = ProviderAdapterCheckReport(
+            schema: "opensks.provider-adapter-check.v1",
+            generatedAt: ProviderAdapterCheckGeneratedAt(unixSeconds: 1_782_400_001, nanos: 0),
+            remoteProbeOptIn: false,
+            secretValueExposed: false,
+            summary: ProviderAdapterCheckSummary(total: 2, attempted: 0, reachable: 0),
+            blockers: ["set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1"],
+            remediationActions: [
+                ProviderAdapterRemediationAction(
+                    blocker: "set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1",
+                    action: "Set OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1 before running live remote provider checks.",
+                    scope: "operator_environment"
+                )
+            ],
+            adapters: [
+                ProviderAdapterCheckRow(
+                    name: "OpenRouter",
+                    configured: true,
+                    attempted: false,
+                    status: "remote_probe_requires_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1",
+                    blockers: ["set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1"],
+                    credentialSource: "provider_registry_keychain:provider-openrouter",
+                    endpoint: "https://openrouter.ai/api/v1/models",
+                    httpCode: nil,
+                    secretValueExposed: false,
+                    durationMs: 0,
+                    transport: "native_reqwest_blocking_http"
+                )
+            ]
+        )
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore(), service: service)
+
+        try await store.runAdapterCheck()
+
+        XCTAssertEqual(service.adapterCheckRunCount, 1)
+        XCTAssertEqual(store.adapterCheckReportGeneratedAtLabel, "unix 1782400001")
+        XCTAssertEqual(
+            store.adapterCheckActionDetail,
+            "Set OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1 before running live provider checks."
+        )
+        XCTAssertEqual(store.adapterCheckRemediationActions.first?.scope, "operator_environment")
+        XCTAssertFalse(store.connections.first?.adapterCheckDetail?.contains("provider-openrouter") == true)
+        XCTAssertEqual(store.syncState, .idle)
     }
 
     func testProviderComponentSurfacesRenderIndependently() async throws {
@@ -855,9 +973,19 @@ private final class RecordingProviderRegistryService: ProviderRegistryService, @
     var upsertedConnection: ProviderConnectionRecord?
     var syncedModels: [ProviderModelRecord] = []
     var probedProviderIDs: [String] = []
+    var adapterCheckRunCount = 0
+    var adapterCheckReportAfterRun: ProviderAdapterCheckReport?
 
     func registryState() async throws -> ProviderRegistryState {
         state
+    }
+
+    func runAdapterCheck() async throws -> ProviderAdapterCheckReport? {
+        adapterCheckRunCount += 1
+        if let adapterCheckReportAfterRun {
+            state.adapterCheckReport = adapterCheckReportAfterRun
+        }
+        return state.adapterCheckReport
     }
 
     func upsertConnection(

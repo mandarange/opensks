@@ -2,6 +2,7 @@ import Foundation
 
 protocol ProviderRegistryService: Sendable {
     func registryState() async throws -> ProviderRegistryState
+    func runAdapterCheck() async throws -> ProviderAdapterCheckReport?
     func upsertConnection(
         _ connection: ProviderConnectionRecord,
         expectedRevision: UInt64?
@@ -54,6 +55,14 @@ struct LiveProviderRegistryService: ProviderRegistryService {
             state.adapterCheckReport = await loadAdapterCheckReportFromAppData()
         }
         return state
+    }
+
+    func runAdapterCheck() async throws -> ProviderAdapterCheckReport? {
+        _ = try await capture(["provider", "adapter-check"], verb: "adapter-check")
+        if let adapterCheckReport = loadAdapterCheckReport() {
+            return adapterCheckReport
+        }
+        return await loadAdapterCheckReportFromAppData()
     }
 
     func upsertConnection(
@@ -129,9 +138,20 @@ struct LiveProviderRegistryService: ProviderRegistryService {
     }
 
     private func run<T: Decodable>(_ args: [String], verb: String) async throws -> T {
-        let result: ProcessSupervisor.RunResult
+        let result = try await capture(args, verb: verb)
+        guard !result.stdout.isEmpty else {
+            throw ProviderRegistryServiceError.emptyOutput(verb)
+        }
         do {
-            result = try await ProcessSupervisor().run(
+            return try JSONDecoder.opensks.decode(T.self, from: result.stdout)
+        } catch {
+            throw ProviderRegistryServiceError.decodeFailed(verb, underlying: error.localizedDescription)
+        }
+    }
+
+    private func capture(_ args: [String], verb: String) async throws -> ProcessSupervisor.RunResult {
+        do {
+            let result = try await ProcessSupervisor().run(
                 ProcessSupervisor.Spec(
                     executable: cli,
                     arguments: args,
@@ -140,22 +160,18 @@ struct LiveProviderRegistryService: ProviderRegistryService {
                     timeoutSeconds: OpenSKSCLIProcess.commandTimeoutSeconds
                 )
             )
+            if result.exitCode != 0 {
+                throw ProviderRegistryServiceError.nonZeroExit(
+                    result.exitCode,
+                    stderr: String(decoding: result.stderr, as: UTF8.self)
+                )
+            }
+            return result
         } catch {
-            throw ProviderRegistryServiceError.launchFailed(error.localizedDescription)
-        }
-        if result.exitCode != 0 {
-            throw ProviderRegistryServiceError.nonZeroExit(
-                result.exitCode,
-                stderr: String(decoding: result.stderr, as: UTF8.self)
-            )
-        }
-        guard !result.stdout.isEmpty else {
-            throw ProviderRegistryServiceError.emptyOutput(verb)
-        }
-        do {
-            return try JSONDecoder.opensks.decode(T.self, from: result.stdout)
-        } catch {
-            throw ProviderRegistryServiceError.decodeFailed(verb, underlying: error.localizedDescription)
+            if let error = error as? ProviderRegistryServiceError {
+                throw error
+            }
+            throw ProviderRegistryServiceError.launchFailed("\(verb): \(error.localizedDescription)")
         }
     }
 

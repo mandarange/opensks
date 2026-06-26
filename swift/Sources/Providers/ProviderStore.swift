@@ -122,6 +122,14 @@ final class ProviderStore: ObservableObject {
         return "\(report.summary.reachable)/\(report.summary.total) reachable · attempted \(report.summary.attempted) · remote probe \(remoteProbe)"
     }
 
+    var adapterCheckActionDetail: String? {
+        ProviderAdapterReadiness.summary(for: adapterCheckReport)
+    }
+
+    var adapterCheckRemediationActions: [ProviderAdapterRemediationAction] {
+        adapterCheckReport?.remediationActions ?? []
+    }
+
     func refresh() async {
         guard let service else {
             syncState = .idle
@@ -255,6 +263,21 @@ final class ProviderStore: ObservableObject {
         }
         try await applySuccessfulProbe(providerID: id)
         syncState = .idle
+    }
+
+    func runAdapterCheck() async throws {
+        guard let service else {
+            syncState = .idle
+            return
+        }
+        syncState = .probing
+        do {
+            adapterCheckReport = try await service.runAdapterCheck()
+            await refresh()
+        } catch {
+            syncState = .failed(error.localizedDescription)
+            throw error
+        }
     }
 
     func setModelEnabled(_ id: String, _ enabled: Bool) async throws {
@@ -678,6 +701,9 @@ private enum ProviderAdapterReadiness {
     }
 
     private static func safeDiagnostic(_ value: String) -> String {
+        if value.hasPrefix("provider_registry_keychain:") {
+            return "provider_registry_keychain"
+        }
         let lower = value.lowercased()
         if lower.contains("bearer ") || lower.contains("sk-") || lower.contains("token=") || lower.contains("key=") {
             return "[redacted]"

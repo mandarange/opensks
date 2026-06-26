@@ -11,15 +11,7 @@ struct ProviderDiagnosticsView: View {
                     .font(Theme.ui(13, .semibold))
                     .foregroundStyle(Theme.text)
                 Spacer(minLength: 0)
-                Button {
-                    Task { try? await store.probeProvider(provider.id) }
-                } label: {
-                    Label("Run probe", systemImage: "waveform.path.ecg")
-                }
-                .buttonStyle(.secondaryAction)
-                .frame(width: 128)
-                .disabled(!provider.enabled)
-                .accessibilityIdentifier("settings.providers.diagnostics.probe.\(provider.id)")
+                runProbeButton
             }
             diagnosticRow("Health", provider.statusLabel, provider.statusPillKind)
             diagnosticRow("Last check", provider.lastCheckedLabel, .neutral)
@@ -29,6 +21,7 @@ struct ProviderDiagnosticsView: View {
                 .foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("settings.providers.diagnostic")
+            runAdapterCheckButton
             if let adapterReportGeneratedAt = store.adapterCheckReportGeneratedAtLabel {
                 diagnosticRow("Live check", adapterReportGeneratedAt, .neutral)
                     .accessibilityIdentifier("settings.providers.adapterReportGeneratedAt")
@@ -41,6 +34,25 @@ struct ProviderDiagnosticsView: View {
                     .truncationMode(.middle)
                     .textSelection(.enabled)
                     .accessibilityIdentifier("settings.providers.adapterReportSummary")
+            }
+            if let adapterCheckActionDetail = store.adapterCheckActionDetail {
+                Label(adapterCheckActionDetail, systemImage: "exclamationmark.circle")
+                    .font(Theme.ui(11.5))
+                    .foregroundStyle(Theme.gold)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("settings.providers.adapterActionSummary")
+            }
+            if !store.adapterCheckRemediationActions.isEmpty {
+                VStack(alignment: .leading, spacing: Theme.s6) {
+                    Text("Provider check actions")
+                        .font(Theme.ui(11, .semibold))
+                        .foregroundStyle(Theme.muted)
+                    ForEach(store.adapterCheckRemediationActions, id: \.blocker) { action in
+                        remediationRow(action)
+                    }
+                }
+                .accessibilityIdentifier("settings.providers.adapterRemediationActions")
             }
             if let adapterDiagnostic = provider.adapterDiagnostic {
                 Label(adapterDiagnostic, systemImage: "exclamationmark.triangle.fill")
@@ -87,6 +99,31 @@ struct ProviderDiagnosticsView: View {
         .accessibilityIdentifier("settings.providers.diagnostics")
     }
 
+    private var runAdapterCheckButton: some View {
+        Button {
+            Task { try? await store.runAdapterCheck() }
+        } label: {
+            Label("Run provider check", systemImage: "powerplug")
+        }
+        .buttonStyle(.secondaryAction)
+        .frame(width: 190)
+        .disabled(store.syncState != .idle)
+        .accessibilityIdentifier("settings.providers.diagnostics.adapterCheck")
+        .help("Run the live provider adapter check and refresh this diagnostics card.")
+    }
+
+    private var runProbeButton: some View {
+        Button {
+            Task { try? await store.probeProvider(provider.id) }
+        } label: {
+            Label("Run probe", systemImage: "waveform.path.ecg")
+        }
+        .buttonStyle(.secondaryAction)
+        .frame(width: 128)
+        .disabled(!provider.enabled || store.syncState != .idle)
+        .accessibilityIdentifier("settings.providers.diagnostics.probe.\(provider.id)")
+    }
+
     private func diagnosticRow(_ label: String, _ value: String, _ kind: StatusPill.Kind) -> some View {
         HStack(spacing: Theme.s8) {
             Text(label)
@@ -97,5 +134,27 @@ struct ProviderDiagnosticsView: View {
             Spacer(minLength: 0)
         }
         .accessibilityElement(children: .combine)
+    }
+
+    private func remediationRow(_ action: ProviderAdapterRemediationAction) -> some View {
+        HStack(alignment: .top, spacing: Theme.s8) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 14, height: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(action.scope)
+                    .font(Theme.ui(10.5, .medium))
+                    .foregroundStyle(Theme.muted)
+                Text(action.action)
+                    .font(Theme.ui(11.5))
+                    .foregroundStyle(Theme.textSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(action.scope): \(action.action)")
     }
 }
