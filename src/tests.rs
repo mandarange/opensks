@@ -2746,6 +2746,63 @@ fn app_data_exposes_release_proof_remediation_actions() {
 }
 
 #[test]
+fn app_data_exposes_provider_mock_e2e_proof_summary() {
+    let root = temp_workspace("app-data-provider-mock-e2e");
+    let open = root.join(OPEN_SKSDIR);
+    fs::create_dir_all(open.join("providers")).expect("provider dir");
+    fs::write(
+        open.join("providers/provider-mock-e2e.json"),
+        r#"{
+          "schema": "opensks.provider-mock-e2e.v1",
+          "generated_at": {"unix_seconds": 1782400000, "nanos": 0},
+          "status": "verified",
+          "fixture_kind": "openai_compatible_registry_fixture",
+          "live_vendor_calls_performed": false,
+          "secret_value_exposed": false,
+          "provider_id": "mock-openai-compatible",
+          "model_id": "mock-openai-compatible/code-model",
+          "model_catalog_count": 1,
+          "model_catalog_synced": true,
+          "model_enabled": true,
+          "registry_route_status": "resolved",
+          "selected_model_id": "mock-openai-compatible/code-model",
+          "checks": [
+            {
+              "id": "registry_route_resolved",
+              "status": "verified",
+              "evidence_ref": "resolve_routing_decision_from_repository pinned code model"
+            }
+          ]
+        }"#,
+    )
+    .expect("provider mock e2e proof");
+
+    let output = run_cli(
+        vec!["app-data".to_string(), root.display().to_string()],
+        &root,
+    )
+    .expect("app data");
+    let json: serde_json::Value =
+        serde_json::from_str(&output.stdout).expect("app-data json should parse");
+
+    assert_eq!(json["provider_mock_e2e"]["status"], "verified");
+    assert_eq!(
+        json["provider_mock_e2e"]["selected_model_id"],
+        "mock-openai-compatible/code-model"
+    );
+    assert_eq!(json["provider_mock_e2e"]["model_catalog_count"], 1);
+    assert_eq!(
+        json["provider_mock_e2e"]["checks"][0]["id"],
+        "registry_route_resolved"
+    );
+    assert_eq!(
+        json["provider_mock_e2e"]["live_vendor_calls_performed"],
+        false
+    );
+    assert_eq!(json["provider_mock_e2e"]["secret_value_exposed"], false);
+}
+
+#[test]
 fn worker_runtime_writes_lease_recovery_and_routing_artifacts() {
     let root = temp_workspace("worker-runtime");
     let output = run_cli(["worker", "runtime", "recover stale worker lease"], &root)

@@ -142,6 +142,24 @@ final class ReleaseReadinessTests: XCTestCase {
                     )
                 ]
             ),
+            providerMockE2E: ProviderMockE2eSummary(
+                status: "verified",
+                fixtureKind: "openai_compatible_registry_fixture",
+                liveVendorCallsPerformed: false,
+                secretValueExposed: false,
+                modelCatalogCount: 1,
+                modelCatalogSynced: true,
+                modelEnabled: true,
+                registryRouteStatus: "resolved",
+                selectedModelId: "mock-openai-compatible/code-model",
+                checks: [
+                    ProviderMockE2eCheck(
+                        id: "registry_route_resolved",
+                        status: "verified",
+                        evidenceRef: "resolve_routing_decision_from_repository pinned code model"
+                    )
+                ]
+            ),
             gui: Gui(
                 prdTotal: 1,
                 prdImplemented: 1,

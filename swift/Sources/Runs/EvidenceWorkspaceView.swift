@@ -46,6 +46,9 @@ struct EvidenceWorkspaceView: View {
                 if let release = data.release, release.hasEvidence {
                     releaseProofCard(release)
                 }
+                if let providerMockE2e = data.providerMockE2E, providerMockE2e.hasEvidence {
+                    providerMockE2eCard(providerMockE2e)
+                }
                 postureCard(data.gui)
                 Text("Evidence reflects only what acceptance has verified. A result is never shown as passed unless the audit reported it.")
                     .font(Theme.ui(11))
@@ -251,6 +254,92 @@ struct EvidenceWorkspaceView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(action.blocker): \(action.action)")
+    }
+
+    // MARK: - Provider proof
+
+    private func providerMockE2eCard(_ proof: ProviderMockE2eSummary) -> some View {
+        card {
+            VStack(alignment: .leading, spacing: Theme.s12) {
+                HStack(spacing: Theme.s8) {
+                    Text("Provider mock E2E")
+                        .font(Theme.ui(13, .semibold))
+                        .foregroundStyle(Theme.text)
+                    Spacer()
+                    StatusPill(kind: proof.pillKind, label: proof.displayStatus)
+                }
+                VStack(alignment: .leading, spacing: Theme.s8) {
+                    providerProofRow(label: "Route", value: proof.registryRouteStatus, systemImage: "point.topleft.down.curvedto.point.bottomright.up")
+                    providerProofRow(label: "Model", value: proof.selectedModelId ?? "none", systemImage: "cpu")
+                    providerProofRow(label: "Catalog", value: "\(proof.modelCatalogCount) synced", systemImage: "list.bullet.rectangle")
+                    providerProofRow(label: "Live calls", value: proof.liveVendorCallsPerformed ? "true" : "false", systemImage: "network")
+                    providerProofRow(label: "Secret leak", value: proof.secretValueExposed ? "true" : "false", systemImage: "lock.shield")
+                }
+                if !proof.checks.isEmpty {
+                    VStack(alignment: .leading, spacing: Theme.s8) {
+                        Text("Checks")
+                            .font(Theme.ui(11.5, .semibold))
+                            .foregroundStyle(Theme.textSoft)
+                        ForEach(proof.checks) { check in
+                            providerProofCheckRow(check)
+                        }
+                    }
+                }
+            }
+        }
+        .accessibilityIdentifier("evidence.provider.mock.e2e.card")
+        .accessibilityElement(children: .contain)
+    }
+
+    private func providerProofRow(label: String, value: String, systemImage: String) -> some View {
+        HStack(spacing: Theme.s10) {
+            Label {
+                Text(label).font(Theme.ui(12, .medium)).foregroundStyle(Theme.textSoft)
+            } icon: {
+                Image(systemName: systemImage).font(.system(size: 12)).foregroundStyle(Theme.muted)
+            }
+            .frame(width: 130, alignment: .leading)
+            Text(value)
+                .font(Theme.mono(11.5))
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label): \(value)")
+    }
+
+    private func providerProofCheckRow(_ check: ProviderMockE2eCheck) -> some View {
+        HStack(alignment: .top, spacing: Theme.s10) {
+            Image(systemName: check.status == "verified" ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(check.status == "verified" ? Theme.pass : Theme.partial)
+                .frame(width: 16, height: 18)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: Theme.s8) {
+                    Text(check.id)
+                        .font(Theme.mono(11.5, .medium))
+                        .foregroundStyle(Theme.text)
+                        .textSelection(.enabled)
+                    Text(check.status)
+                        .font(Theme.ui(10.5, .medium))
+                        .foregroundStyle(Theme.muted)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Theme.input))
+                }
+                Text(check.evidenceRef)
+                    .font(Theme.ui(12))
+                    .foregroundStyle(Theme.textSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(check.id): \(check.status)")
     }
 
     // MARK: - Review posture

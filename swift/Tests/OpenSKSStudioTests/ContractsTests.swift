@@ -859,6 +859,24 @@ final class ContractsTests: XCTestCase {
               }
             ]
           },
+          "provider_mock_e2e": {
+            "status": "verified",
+            "fixture_kind": "openai_compatible_registry_fixture",
+            "live_vendor_calls_performed": false,
+            "secret_value_exposed": false,
+            "model_catalog_count": 1,
+            "model_catalog_synced": true,
+            "model_enabled": true,
+            "registry_route_status": "resolved",
+            "selected_model_id": "mock-openai-compatible/code-model",
+            "checks": [
+              {
+                "id": "registry_route_resolved",
+                "status": "verified",
+                "evidence_ref": "resolve_routing_decision_from_repository pinned code model"
+              }
+            ]
+          },
           "gui": {
             "prd_total": 1,
             "prd_implemented": 1,
@@ -886,6 +904,12 @@ final class ContractsTests: XCTestCase {
         XCTAssertEqual(data.release?.displayStatus, "Not Verified")
         XCTAssertEqual(data.release?.blockers.first?.code, "signed_app_missing")
         XCTAssertEqual(data.release?.remediationActions.first?.scope, "release_signing")
+        XCTAssertEqual(data.providerMockE2E?.status, "verified")
+        XCTAssertEqual(data.providerMockE2E?.registryRouteStatus, "resolved")
+        XCTAssertEqual(data.providerMockE2E?.selectedModelId, "mock-openai-compatible/code-model")
+        XCTAssertEqual(data.providerMockE2E?.checks.first?.id, "registry_route_resolved")
+        XCTAssertEqual(data.providerMockE2E?.liveVendorCallsPerformed, false)
+        XCTAssertEqual(data.providerMockE2E?.secretValueExposed, false)
         if case .warning? = data.release?.pillKind {
             // Expected release proof state for an unsigned/notarization-missing build.
         } else {

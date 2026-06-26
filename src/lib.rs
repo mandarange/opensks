@@ -339,6 +339,7 @@ struct NativeAppDashboard {
     cli_path: PathBuf,
     acceptance: NativeAcceptanceStatus,
     release: NativeReleaseStatus,
+    provider_mock_e2e: Option<NativeProviderMockE2eStatus>,
     gui: GuiSnapshot,
 }
 
@@ -369,6 +370,27 @@ struct NativeReleaseRemediationAction {
     blocker: String,
     action: String,
     scope: String,
+}
+
+#[derive(Debug, Clone)]
+struct NativeProviderMockE2eStatus {
+    status: String,
+    fixture_kind: String,
+    live_vendor_calls_performed: bool,
+    secret_value_exposed: bool,
+    model_catalog_count: usize,
+    model_catalog_synced: bool,
+    model_enabled: bool,
+    registry_route_status: String,
+    selected_model_id: Option<String>,
+    checks: Vec<NativeProviderMockE2eCheck>,
+}
+
+#[derive(Debug, Clone)]
+struct NativeProviderMockE2eCheck {
+    id: String,
+    status: String,
+    evidence_ref: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1932,6 +1954,11 @@ fn render_app_data_json(d: &NativeAppDashboard) -> String {
         None => "null",
     };
     let release = render_native_release_json(&d.release);
+    let provider_mock_e2e = d
+        .provider_mock_e2e
+        .as_ref()
+        .map(render_native_provider_mock_e2e_json)
+        .unwrap_or_else(|| "null".to_string());
     let lanes = render_worker_lane_items_json(&g.worker_lanes);
     format!(
         concat!(
@@ -1947,6 +1974,7 @@ fn render_app_data_json(d: &NativeAppDashboard) -> String {
             "  \"acceptance\": {{\"total\": {total}, \"passed\": {passed}, ",
             "\"partial\": {partial}, \"failed\": {failed}, \"goal_complete\": {goal_complete}}},\n",
             "  \"release\": {release},\n",
+            "  \"provider_mock_e2e\": {provider_mock_e2e},\n",
             "  \"gui\": {{\"prd_total\": {prd_total}, \"prd_implemented\": {prd_implemented}, ",
             "\"prd_artifact_mvp\": {prd_artifact_mvp}, \"prd_planned\": {prd_planned}, ",
             "\"prd_missing_live\": {prd_missing_live}, \"qa_status\": {qa_status}, ",
@@ -1978,6 +2006,7 @@ fn render_app_data_json(d: &NativeAppDashboard) -> String {
         failed = a.failed,
         goal_complete = goal_complete,
         release = release,
+        provider_mock_e2e = provider_mock_e2e,
         prd_total = g.prd_total,
         prd_implemented = g.prd_implemented,
         prd_artifact_mvp = g.prd_artifact_mvp,
@@ -1995,6 +2024,53 @@ fn render_app_data_json(d: &NativeAppDashboard) -> String {
         worker_lane_count = g.worker_lane_count,
         lanes = lanes,
     )
+}
+
+fn render_native_provider_mock_e2e_json(status: &NativeProviderMockE2eStatus) -> String {
+    format!(
+        concat!(
+            "{{\"status\": {status}, ",
+            "\"fixture_kind\": {fixture_kind}, ",
+            "\"live_vendor_calls_performed\": {live_vendor_calls_performed}, ",
+            "\"secret_value_exposed\": {secret_value_exposed}, ",
+            "\"model_catalog_count\": {model_catalog_count}, ",
+            "\"model_catalog_synced\": {model_catalog_synced}, ",
+            "\"model_enabled\": {model_enabled}, ",
+            "\"registry_route_status\": {registry_route_status}, ",
+            "\"selected_model_id\": {selected_model_id}, ",
+            "\"checks\": {checks}}}"
+        ),
+        status = json_string(&status.status),
+        fixture_kind = json_string(&status.fixture_kind),
+        live_vendor_calls_performed = status.live_vendor_calls_performed,
+        secret_value_exposed = status.secret_value_exposed,
+        model_catalog_count = status.model_catalog_count,
+        model_catalog_synced = status.model_catalog_synced,
+        model_enabled = status.model_enabled,
+        registry_route_status = json_string(&status.registry_route_status),
+        selected_model_id = status
+            .selected_model_id
+            .as_deref()
+            .map(json_string)
+            .unwrap_or_else(|| "null".to_string()),
+        checks = render_native_provider_mock_e2e_checks_json(&status.checks),
+    )
+}
+
+fn render_native_provider_mock_e2e_checks_json(checks: &[NativeProviderMockE2eCheck]) -> String {
+    let items = checks
+        .iter()
+        .map(|check| {
+            format!(
+                "{{\"id\": {id}, \"status\": {status}, \"evidence_ref\": {evidence_ref}}}",
+                id = json_string(&check.id),
+                status = json_string(&check.status),
+                evidence_ref = json_string(&check.evidence_ref)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{items}]")
 }
 
 fn render_native_release_json(release: &NativeReleaseStatus) -> String {
@@ -14134,7 +14210,105 @@ fn native_app_dashboard(workspace: &Path) -> Result<NativeAppDashboard, OpenSksE
             goal_complete,
         },
         release: collect_native_release_status(workspace),
+        provider_mock_e2e: collect_native_provider_mock_e2e_status(workspace),
         gui: collect_gui_snapshot(workspace),
+    })
+}
+
+fn collect_native_provider_mock_e2e_status(
+    workspace: &Path,
+) -> Option<NativeProviderMockE2eStatus> {
+    let proof_path = workspace
+        .join(OPEN_SKSDIR)
+        .join("providers")
+        .join("provider-mock-e2e.json");
+    let raw = fs::read_to_string(proof_path).unwrap_or_default();
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Some(NativeProviderMockE2eStatus {
+            status: "invalid".to_string(),
+            fixture_kind: "unknown".to_string(),
+            live_vendor_calls_performed: false,
+            secret_value_exposed: false,
+            model_catalog_count: 0,
+            model_catalog_synced: false,
+            model_enabled: false,
+            registry_route_status: "invalid".to_string(),
+            selected_model_id: None,
+            checks: Vec::new(),
+        });
+    };
+    let checks = value
+        .get("checks")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let id = item.get("id")?.as_str()?.to_string();
+                    let status = item
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let evidence_ref = item
+                        .get("evidence_ref")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    Some(NativeProviderMockE2eCheck {
+                        id,
+                        status,
+                        evidence_ref,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(NativeProviderMockE2eStatus {
+        status: value
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("not_audited")
+            .to_string(),
+        fixture_kind: value
+            .get("fixture_kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        live_vendor_calls_performed: value
+            .get("live_vendor_calls_performed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        secret_value_exposed: value
+            .get("secret_value_exposed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        model_catalog_count: value
+            .get("model_catalog_count")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0),
+        model_catalog_synced: value
+            .get("model_catalog_synced")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        model_enabled: value
+            .get("model_enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        registry_route_status: value
+            .get("registry_route_status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        selected_model_id: value
+            .get("selected_model_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        checks,
     })
 }
 

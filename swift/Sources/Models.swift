@@ -15,6 +15,7 @@ struct AppData: Codable, Sendable {
     let cliPath: String
     let acceptance: Acceptance
     let release: ReleaseProofSummary?
+    let providerMockE2E: ProviderMockE2eSummary?
     let gui: Gui
     let workerLanes: [WorkerLane]
 }
@@ -66,6 +67,43 @@ struct ReleaseRemediationAction: Codable, Sendable, Identifiable {
     let scope: String
 
     var id: String { "\(scope):\(blocker):\(action)" }
+}
+
+struct ProviderMockE2eSummary: Codable, Sendable {
+    let status: String
+    let fixtureKind: String
+    let liveVendorCallsPerformed: Bool
+    let secretValueExposed: Bool
+    let modelCatalogCount: Int
+    let modelCatalogSynced: Bool
+    let modelEnabled: Bool
+    let registryRouteStatus: String
+    let selectedModelId: String?
+    let checks: [ProviderMockE2eCheck]
+
+    var hasEvidence: Bool {
+        status != "not_audited" || !checks.isEmpty
+    }
+
+    var displayStatus: String {
+        status
+            .split(separator: "_")
+            .map { part in part.prefix(1).uppercased() + String(part.dropFirst()) }
+            .joined(separator: " ")
+    }
+
+    var pillKind: StatusPill.Kind {
+        if status == "verified" || status == "passed" { return .success }
+        if status == "invalid" || status == "failed" { return .danger }
+        if status == "partial" || status == "not_verified" { return .warning }
+        return .neutral
+    }
+}
+
+struct ProviderMockE2eCheck: Codable, Sendable, Identifiable {
+    let id: String
+    let status: String
+    let evidenceRef: String
 }
 
 struct Gui: Codable, Sendable {
