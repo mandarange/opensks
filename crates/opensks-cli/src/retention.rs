@@ -35,6 +35,10 @@ pub(crate) const RELEASE_PROOF_REQUIRED_ARTIFACTS: &[(&str, &str)] = &[
         "provider_adapter_check_schema",
         "schemas/provider-adapter-check.schema.json",
     ),
+    (
+        "provider_mock_e2e_schema",
+        "schemas/provider-mock-e2e.schema.json",
+    ),
     ("release_proof_schema", "schemas/release-proof.schema.json"),
     ("cargo_lock", "Cargo.lock"),
 ];

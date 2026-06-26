@@ -1,0 +1,303 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProviderMockE2eReport",
+  "type": "object",
+  "required": [
+    "fixture_kind",
+    "generated_at",
+    "live_vendor_calls_performed",
+    "model_catalog_count",
+    "model_catalog_synced",
+    "model_enabled",
+    "model_id",
+    "provider_id",
+    "registry_route_status",
+    "schema",
+    "secret_value_exposed",
+    "status"
+  ],
+  "properties": {
+    "checks": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ProviderMockE2eCheck"
+      }
+    },
+    "fixture_kind": {
+      "type": "string"
+    },
+    "generated_at": {
+      "$ref": "#/definitions/ContractTimestamp"
+    },
+    "live_vendor_calls_performed": {
+      "type": "boolean"
+    },
+    "model_catalog_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "model_catalog_synced": {
+      "type": "boolean"
+    },
+    "model_enabled": {
+      "type": "boolean"
+    },
+    "model_id": {
+      "type": "string"
+    },
+    "provider_id": {
+      "type": "string"
+    },
+    "registry_route_status": {
+      "$ref": "#/definitions/RoutingStatus"
+    },
+    "route_receipt": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ModelRouteReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schema": {
+      "type": "string"
+    },
+    "secret_value_exposed": {
+      "type": "boolean"
+    },
+    "selected_model_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "$ref": "#/definitions/TrustStatus"
+    }
+  },
+  "definitions": {
+    "CapabilityRequirements": {
+      "type": "object",
+      "required": [
+        "code",
+        "image_edit",
+        "image_output",
+        "structured_output",
+        "text",
+        "tool_use",
+        "vision_input"
+      ],
+      "properties": {
+        "code": {
+          "type": "boolean"
+        },
+        "image_edit": {
+          "type": "boolean"
+        },
+        "image_output": {
+          "type": "boolean"
+        },
+        "structured_output": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "boolean"
+        },
+        "tool_use": {
+          "type": "boolean"
+        },
+        "vision_input": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ContractTimestamp": {
+      "type": "object",
+      "required": [
+        "nanos",
+        "unix_seconds"
+      ],
+      "properties": {
+        "nanos": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "unix_seconds": {
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "ModelLimits": {
+      "type": "object",
+      "properties": {
+        "max_concurrency": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "max_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "requests_per_minute": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "tokens_per_minute": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ModelRouteReceipt": {
+      "type": "object",
+      "required": [
+        "effective_limits",
+        "reason_code",
+        "registry_revision",
+        "requested_capabilities"
+      ],
+      "properties": {
+        "effective_limits": {
+          "$ref": "#/definitions/ModelLimits"
+        },
+        "fallback_index": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "registry_revision": {
+          "type": "string"
+        },
+        "requested_capabilities": {
+          "$ref": "#/definitions/CapabilityRequirements"
+        }
+      }
+    },
+    "ProviderMockE2eCheck": {
+      "type": "object",
+      "required": [
+        "evidence_ref",
+        "id",
+        "status"
+      ],
+      "properties": {
+        "evidence_ref": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/TrustStatus"
+        }
+      }
+    },
+    "RoutingStatus": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "blocked_missing_capability",
+            "blocked_disabled",
+            "blocked_policy",
+            "blocked_provider_health"
+          ]
+        },
+        {
+          "description": "A user/thread setting requested a model or auto route, but no registry snapshot has validated provider/model/capability/health yet.",
+          "type": "string",
+          "enum": [
+            "requested"
+          ]
+        },
+        {
+          "description": "A registry snapshot found an enabled compatible provider/model.",
+          "type": "string",
+          "enum": [
+            "resolved"
+          ]
+        },
+        {
+          "description": "Secret resolution, policy, health/circuit, and concurrency admission are all satisfied; the request can be dispatched.",
+          "type": "string",
+          "enum": [
+            "dispatch_ready"
+          ]
+        },
+        {
+          "description": "A provider request was actually sent.",
+          "type": "string",
+          "enum": [
+            "dispatched"
+          ]
+        },
+        {
+          "description": "Legacy compatibility label. New product paths should prefer the staged statuses above and only use this for old receipts already persisted.",
+          "type": "string",
+          "enum": [
+            "routed"
+          ]
+        }
+      ]
+    },
+    "TrustStatus": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "verified_with_partial_evidence",
+        "not_verified",
+        "stale",
+        "partial",
+        "unavailable"
+      ]
+    }
+  }
+}

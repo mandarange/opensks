@@ -15,6 +15,7 @@ pub const SECRET_REF_SCHEMA: &str = "opensks.secret-ref.v1";
 pub const MODEL_CATALOG_ENTRY_SCHEMA: &str = "opensks.model-catalog-entry.v1";
 pub const PROVIDER_PROBE_RECEIPT_SCHEMA: &str = "opensks.provider-probe-receipt.v1";
 pub const PROVIDER_ADAPTER_CHECK_SCHEMA: &str = "opensks.provider-adapter-check.v1";
+pub const PROVIDER_MOCK_E2E_SCHEMA: &str = "opensks.provider-mock-e2e.v1";
 pub const MODEL_PROFILE_SCHEMA: &str = "opensks.model-profile.v1";
 pub const PROVIDER_DESCRIPTOR_SCHEMA: &str = "opensks.provider-descriptor.v1";
 pub const ROUTING_DECISION_SCHEMA: &str = "opensks.routing-decision.v1";
@@ -991,6 +992,35 @@ pub struct ProviderAdapterCheckReport {
     pub remediation_actions: Vec<ProviderAdapterRemediationAction>,
     #[serde(default)]
     pub adapters: Vec<ProviderAdapterCheckRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderMockE2eCheck {
+    pub id: String,
+    pub status: TrustStatus,
+    pub evidence_ref: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderMockE2eReport {
+    pub schema: String,
+    pub generated_at: ContractTimestamp,
+    pub status: TrustStatus,
+    pub fixture_kind: String,
+    pub live_vendor_calls_performed: bool,
+    pub secret_value_exposed: bool,
+    pub provider_id: String,
+    pub model_id: String,
+    pub model_catalog_count: usize,
+    pub model_catalog_synced: bool,
+    pub model_enabled: bool,
+    pub registry_route_status: RoutingStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_receipt: Option<ModelRouteReceipt>,
+    #[serde(default)]
+    pub checks: Vec<ProviderMockE2eCheck>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -3230,6 +3260,10 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
             serde_json::to_string_pretty(&schema_for!(ProviderAdapterCheckReport))?,
         ),
         (
+            "provider-mock-e2e.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ProviderMockE2eReport))?,
+        ),
+        (
             "provider-mutation.schema.json",
             serde_json::to_string_pretty(&schema_for!(ProviderMutationReceipt))?,
         ),
@@ -3607,6 +3641,45 @@ mod tests {
         assert_eq!(report.remediation_actions[0].scope, "provider_credential");
         assert_eq!(report.adapters[0].blockers, Vec::<String>::new());
         assert!(!report.secret_value_exposed);
+    }
+
+    #[test]
+    fn provider_mock_e2e_report_roundtrips_fixture_truth() {
+        let report = ProviderMockE2eReport {
+            schema: PROVIDER_MOCK_E2E_SCHEMA.to_string(),
+            generated_at: ContractTimestamp {
+                unix_seconds: 1782400000,
+                nanos: 0,
+            },
+            status: TrustStatus::Verified,
+            fixture_kind: "openai_compatible_registry_fixture".to_string(),
+            live_vendor_calls_performed: false,
+            secret_value_exposed: false,
+            provider_id: "mock-openai-compatible".to_string(),
+            model_id: "mock-openai-compatible/code-model".to_string(),
+            model_catalog_count: 1,
+            model_catalog_synced: true,
+            model_enabled: true,
+            registry_route_status: RoutingStatus::Resolved,
+            selected_model_id: Some("mock-openai-compatible/code-model".to_string()),
+            route_receipt: None,
+            checks: vec![ProviderMockE2eCheck {
+                id: "registry_route_resolved".to_string(),
+                status: TrustStatus::Verified,
+                evidence_ref: "provider mock-e2e".to_string(),
+            }],
+        };
+
+        let json = serde_json::to_string(&report).expect("serialize mock provider e2e");
+        assert!(json.contains("\"live_vendor_calls_performed\":false"));
+        let decoded: ProviderMockE2eReport =
+            serde_json::from_str(&json).expect("decode mock provider e2e");
+
+        assert_eq!(decoded.schema, PROVIDER_MOCK_E2E_SCHEMA);
+        assert_eq!(decoded.status, TrustStatus::Verified);
+        assert_eq!(decoded.registry_route_status, RoutingStatus::Resolved);
+        assert!(!decoded.live_vendor_calls_performed);
+        assert!(!decoded.secret_value_exposed);
     }
 
     #[test]

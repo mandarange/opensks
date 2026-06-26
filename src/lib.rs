@@ -1482,6 +1482,9 @@ fn run_provider_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSk
     let dir = cwd.join(OPEN_SKSDIR).join("providers");
     fs::create_dir_all(&dir)?;
     let stamp = ClockStamp::now()?;
+    if subcommand == "mock-e2e" {
+        return run_provider_mock_e2e(cwd, &dir, &stamp);
+    }
     let statuses = provider_statuses(cwd);
 
     match subcommand.as_str() {
@@ -1534,6 +1537,7 @@ fn run_provider_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSk
                 ),
             })
         }
+        "mock-e2e" => unreachable!("provider mock-e2e is handled before status collection"),
         "adapter-check" => {
             let checks = check_provider_adapters(&dir, &statuses);
             write_provider_registry_artifacts(&dir, &stamp, &statuses, &[])?;
@@ -1575,6 +1579,192 @@ fn run_provider_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSk
             provider_usage()
         ))),
     }
+}
+
+fn run_provider_mock_e2e(
+    cwd: &Path,
+    dir: &Path,
+    stamp: &ClockStamp,
+) -> Result<CliOutput, OpenSksError> {
+    let scratch = cwd
+        .join(OPEN_SKSDIR)
+        .join("runtime")
+        .join("provider-mock-e2e-scratch");
+    match fs::remove_dir_all(&scratch) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    fs::create_dir_all(&scratch)?;
+
+    let now_ms = stamp
+        .secs
+        .saturating_mul(1000)
+        .saturating_add(u64::from(stamp.nanos / 1_000_000));
+    let provider_id = "mock-openai-compatible";
+    let model_id = "mock-openai-compatible/code-model";
+    let connection = opensks_contracts::ProviderConnection {
+        schema: opensks_contracts::PROVIDER_CONNECTION_SCHEMA.to_string(),
+        id: provider_id.to_string(),
+        kind: opensks_contracts::ProviderKind::OpenAiCompatible,
+        display_name: "Mock OpenAI-compatible Provider".to_string(),
+        enabled: true,
+        endpoint: opensks_contracts::ProviderEndpoint {
+            base_url: "https://fixture.provider.local/v1".to_string(),
+            allow_insecure_http: false,
+        },
+        auth: opensks_contracts::SecretRef::macos_keychain(
+            "ai.opensks.provider.mock-e2e",
+            provider_id,
+            1,
+        ),
+        organization_ref: None,
+        project_ref: None,
+        health: opensks_contracts::ProviderHealthSnapshot {
+            state: opensks_contracts::HealthState::Healthy,
+            circuit_open: false,
+            checked_at_ms: Some(now_ms),
+            reason_code: "mock_e2e_fixture".to_string(),
+            diagnostic_ref: None,
+        },
+        concurrency: opensks_contracts::ProviderConcurrencyPolicy {
+            max_concurrent_requests: 2,
+            requests_per_minute: Some(60),
+            tokens_per_minute: None,
+        },
+        created_at_ms: now_ms,
+        updated_at_ms: now_ms,
+        revision: 1,
+    };
+    let repo = opensks_provider::ProviderRepository::open_workspace(&scratch)
+        .map_err(|error| OpenSksError::Invalid(error.to_string()))?;
+    repo.upsert_connection(&connection, None, now_ms)
+        .map_err(|error| OpenSksError::Invalid(error.to_string()))?;
+
+    let models_fixture = r#"{"data":[{"id":"code-model","name":"Code Model","context_length":64000,"supported_parameters":["tools","response_format"],"architecture":{"input_modalities":["text"],"output_modalities":["text"]}}]}"#;
+    let models = opensks_provider::parse_openai_compatible_models(&connection, models_fixture)
+        .map_err(|error| OpenSksError::Invalid(error.to_string()))?;
+    let sync_receipt = repo
+        .sync_models(provider_id, &models, now_ms)
+        .map_err(|error| OpenSksError::Invalid(error.to_string()))?;
+    let stored_models = repo
+        .list_models(provider_id)
+        .map_err(|error| OpenSksError::Invalid(error.to_string()))?;
+    let settings = opensks_contracts::ConversationTurnSettings {
+        model: opensks_contracts::ModelSelection {
+            mode: opensks_contracts::ModelSelectionMode::Pinned,
+            model_id: Some(model_id.to_string()),
+            fallback_model_ids: Vec::new(),
+        },
+        reasoning_effort: opensks_contracts::ReasoningEffort::Standard,
+        execution_mode: opensks_contracts::ExecutionMode::Worktree,
+        pipeline_id: "provider-mock-e2e".to_string(),
+        graph_revision: None,
+        max_parallelism: 1,
+        verifier_count: 1,
+        tool_policy_id: "provider-mock-e2e-readonly".to_string(),
+        approval_policy_id: "provider-mock-e2e-local".to_string(),
+        token_budget: None,
+        cost_budget_usd: None,
+        timeout_ms: Some(30_000),
+        image_model_id: None,
+    };
+    let decision = opensks_provider::resolve_routing_decision_from_repository(
+        &repo,
+        "provider-mock-e2e",
+        &settings,
+    )
+    .map_err(|error| OpenSksError::Invalid(error.to_string()))?;
+
+    let catalog_synced = sync_receipt.mutation
+        == opensks_contracts::ProviderMutationKind::ModelsSynced
+        && !stored_models.is_empty();
+    let model_enabled = stored_models
+        .iter()
+        .any(|model| model.id == model_id && model.enabled);
+    let route_resolved = decision.status == opensks_contracts::RoutingStatus::Resolved
+        && decision.selected_model_id.as_deref() == Some(model_id);
+    let all_verified = catalog_synced && model_enabled && route_resolved;
+    let report_status = if all_verified {
+        opensks_contracts::TrustStatus::Verified
+    } else {
+        opensks_contracts::TrustStatus::Partial
+    };
+    let check_status = |passed: bool| {
+        if passed {
+            opensks_contracts::TrustStatus::Verified
+        } else {
+            opensks_contracts::TrustStatus::Partial
+        }
+    };
+    let report = opensks_contracts::ProviderMockE2eReport {
+        schema: opensks_contracts::PROVIDER_MOCK_E2E_SCHEMA.to_string(),
+        generated_at: opensks_contracts::ContractTimestamp {
+            unix_seconds: stamp.secs.min(i64::MAX as u64) as i64,
+            nanos: stamp.nanos,
+        },
+        status: report_status,
+        fixture_kind: "openai_compatible_registry_fixture".to_string(),
+        live_vendor_calls_performed: false,
+        secret_value_exposed: false,
+        provider_id: provider_id.to_string(),
+        model_id: model_id.to_string(),
+        model_catalog_count: stored_models.len(),
+        model_catalog_synced: catalog_synced,
+        model_enabled,
+        registry_route_status: decision.status.clone(),
+        selected_model_id: decision.selected_model_id.clone(),
+        route_receipt: decision.route_receipt.clone(),
+        checks: vec![
+            opensks_contracts::ProviderMockE2eCheck {
+                id: "secret_ref_only".to_string(),
+                status: opensks_contracts::TrustStatus::Verified,
+                evidence_ref:
+                    "auth store is SecretRef::macos_keychain; no credential value is constructed"
+                        .to_string(),
+            },
+            opensks_contracts::ProviderMockE2eCheck {
+                id: "model_catalog_synced".to_string(),
+                status: check_status(catalog_synced),
+                evidence_ref: "parse_openai_compatible_models + ProviderRepository::sync_models"
+                    .to_string(),
+            },
+            opensks_contracts::ProviderMockE2eCheck {
+                id: "model_enabled".to_string(),
+                status: check_status(model_enabled),
+                evidence_ref: "ProviderRepository::list_models after sync".to_string(),
+            },
+            opensks_contracts::ProviderMockE2eCheck {
+                id: "registry_route_resolved".to_string(),
+                status: check_status(route_resolved),
+                evidence_ref: "resolve_routing_decision_from_repository pinned code model"
+                    .to_string(),
+            },
+            opensks_contracts::ProviderMockE2eCheck {
+                id: "no_live_vendor_calls".to_string(),
+                status: opensks_contracts::TrustStatus::Verified,
+                evidence_ref: "fixture path does not call provider HTTP transports".to_string(),
+            },
+        ],
+    };
+    let artifact = dir.join("provider-mock-e2e.json");
+    write_text_atomic(
+        &artifact,
+        &(serde_json::to_string_pretty(&report).map_err(|error| {
+            OpenSksError::Invalid(format!("serialize provider mock e2e report: {error}"))
+        })? + "\n"),
+    )?;
+    fs::remove_dir_all(&scratch).ok();
+
+    Ok(CliOutput {
+        stdout: format!(
+            "wrote provider mock E2E proof\nstatus: {:?}\nmodel_catalog_count: {}\nroute_status: {:?}\nlive_vendor_calls_performed: false\nartifact: {}\n",
+            report.status,
+            report.model_catalog_count,
+            report.registry_route_status,
+            artifact.display()
+        ),
+    })
 }
 
 fn run_updater_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {

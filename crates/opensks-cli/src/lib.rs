@@ -842,6 +842,7 @@ pub fn provider_usage() -> &'static str {
         "       opensks provider probe\n",
         "       opensks provider usage\n",
         "       opensks provider adapter-check\n",
+        "       opensks provider mock-e2e\n",
         "       opensks provider route code|text|image\n",
         "       opensks provider registry-list --workspace <path>\n",
         "       opensks provider registry-upsert --workspace <path> --connection <json> [--expected-revision <n>]\n",

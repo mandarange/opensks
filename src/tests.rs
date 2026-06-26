@@ -3748,6 +3748,49 @@ fn provider_commands_write_zero_leak_registry_probe_and_usage() {
     assert!(adapter_report.contains("\"secret_value_exposed\":false"));
     assert!(!adapter_report.contains("sk-"));
     assert!(!adapter_report.contains("bearer"));
+
+    let mock_e2e = run_cli(["provider", "mock-e2e"], &root).expect("provider mock e2e");
+    assert!(mock_e2e.stdout.contains("wrote provider mock E2E proof"));
+    assert!(mock_e2e.stdout.contains("status: Verified"));
+    assert!(
+        mock_e2e
+            .stdout
+            .contains("live_vendor_calls_performed: false")
+    );
+    let mock_report =
+        fs::read_to_string(dir.join("provider-mock-e2e.json")).expect("provider mock e2e report");
+    let mock_contract: opensks_contracts::ProviderMockE2eReport =
+        serde_json::from_str(&mock_report).expect("provider mock e2e contract");
+    assert_eq!(
+        mock_contract.schema,
+        opensks_contracts::PROVIDER_MOCK_E2E_SCHEMA
+    );
+    assert_eq!(
+        mock_contract.status,
+        opensks_contracts::TrustStatus::Verified
+    );
+    assert_eq!(
+        mock_contract.registry_route_status,
+        opensks_contracts::RoutingStatus::Resolved
+    );
+    assert_eq!(
+        mock_contract.selected_model_id.as_deref(),
+        Some("mock-openai-compatible/code-model")
+    );
+    assert_eq!(mock_contract.model_catalog_count, 1);
+    assert!(mock_contract.model_catalog_synced);
+    assert!(mock_contract.model_enabled);
+    assert!(!mock_contract.live_vendor_calls_performed);
+    assert!(!mock_contract.secret_value_exposed);
+    assert!(
+        mock_contract
+            .checks
+            .iter()
+            .any(|check| check.id == "registry_route_resolved"
+                && check.status == opensks_contracts::TrustStatus::Verified)
+    );
+    assert!(!mock_report.contains("sk-"));
+    assert!(!mock_report.to_ascii_lowercase().contains("bearer"));
     let leftover_secret_configs = fs::read_dir(&dir)
         .expect("provider dir")
         .filter_map(Result::ok)
@@ -3817,6 +3860,7 @@ fn provider_help_has_no_artifact_side_effects() {
     let help = run_cli(["provider", "adapter-check", "--help"], &root).expect("provider help");
 
     assert!(help.stdout.contains("usage: opensks provider list"));
+    assert!(help.stdout.contains("opensks provider mock-e2e"));
     assert!(!root.join(OPEN_SKSDIR).join("providers").exists());
 }
 
