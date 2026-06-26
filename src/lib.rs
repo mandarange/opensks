@@ -5199,7 +5199,7 @@ fn copy_dir_snapshot(
 fn should_skip_runtime_path(name: &str) -> bool {
     matches!(
         name,
-        ".git" | ".opensks" | ".sneakoscope" | "target" | ".DS_Store"
+        ".git" | ".opensks" | ".sneakoscope" | "target" | "node_modules" | ".DS_Store"
     )
 }
 

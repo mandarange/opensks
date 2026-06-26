@@ -1585,6 +1585,17 @@ Follow-up evidence: `cargo test provider_commands_write_zero_leak_registry_probe
 - removal/deletion: no vault coverage was removed; the tests were moved to a separate test module with local helper setup.
 - final evidence: the architecture guard now passes all ownership, root-lib budget, path hygiene, Swift process, Chat route, stream, and adapter transport checks.
 
+### Security - Release Scan Vendor Directory Boundary
+
+- status: Verified
+- owner file/module: `src/lib.rs`, `src/tests.rs`, `docs/implementation/0e9dad0-provider-hyperparallel-ledger.md`
+- current evidence: `cargo run -- security audit` returned `secret_findings: 1` and `security_findings: 8` even though tracked source was clean. Every current finding came from an untracked local dependency install tree: one sample proxy-key-like string and several package README install examples. Acceptance therefore stayed at 21 passed / 2 partial because `prod-004` treated that local dependency cache as part of the current release candidate.
+- target change: classify the dependency vendor directory as the same kind of runtime/vendor path as `.git`, `.opensks`, `.sneakoscope`, and `target` for workspace snapshot, secret scan, and security finding recursion. Preserve scanning for first-party text files and keep leaky first-party files blocking `prod-004`.
+- tests: `sks proof-field scan --intent "Keep release security and secret-leak scans scoped to managed source artifacts by excluding dependency vendor directories" --changed src/lib.rs --changed src/tests.rs --changed docs/implementation/0e9dad0-provider-hyperparallel-ledger.md` reported `Mode: full_proof`, `Eligible: no`, `Contract clarity: 0.7`, and `Workflow complexity: balanced (0.34)`, so this slice used focused regression plus live gate evidence. `cargo fmt --all --check` passed. `cargo test -p opensks security_audit_excludes_dependency_vendor_dirs_from_release_scan --locked -- --test-threads=1` passed. `cargo test -p opensks security_audit_scans_prompt_supply_chain_mcp_and_unsafe_actions --locked -- --test-threads=1` passed, proving first-party security patterns still trigger. `cargo test -p opensks prod004 --locked -- --test-threads=1` passed with 4 prod-004 gate tests. `cargo run -- security audit` now reports `secret_findings: 0` and `security_findings: 0`. `cargo run -- qa run` now reports `secret_findings: 0` and `security_findings: 0`. `cargo run -- acceptance audit` now reports 23 total, 22 passed, 1 partial, 0 failed, with production tier passed and only `mvp-004` live provider adapter proof remaining partial.
+- migration: no schema or data migration. Historical secret-leak release-history events remain preserved; the latest candidate scan becomes clean under the existing `latest_candidate_clean_with_history_preserved` policy.
+- removal/deletion: no user dependency install tree or npm manifest files were deleted or modified. No first-party secret/security rules were removed.
+- final evidence: `.opensks/security/security-audit.json` records `status: passed`, zero secret findings, zero security findings, and zero critical/warning findings while `.opensks/acceptance/acceptance-summary.json` records `production: passed`; `.opensks/acceptance/acceptance-findings.jsonl` now contains only the `mvp-004` OpenRouter/OpenAI live adapter probe partial.
+
 ### Honest Loopback - Release-Level External Blocker Revalidation
 
 - status: Blocked

