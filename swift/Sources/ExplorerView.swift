@@ -355,7 +355,7 @@ struct ExplorerView: View {
                 Text("Readiness is verified by the CLI, never by reading keys.")
                     .font(Theme.ui(11)).foregroundStyle(Theme.muted)
                 GhostButton(title: "Run provider check", systemImage: "powerplug") {
-                    state.runVerb(label: "provider adapter-check", args: ["provider", "adapter-check"])
+                    state.runProviderAdapterCheck()
                 }
             }
             .padding(.horizontal, 12).padding(.bottom, 12)

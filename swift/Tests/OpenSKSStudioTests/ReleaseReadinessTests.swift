@@ -226,7 +226,7 @@ final class ReleaseReadinessTests: XCTestCase {
 
         XCTAssertNotNil(
             ImageRenderer(content: view).nsImage,
-            "release proof blocker/action card must render from app-data"
+            "release proof and provider adapter-check action cards must render from app-data"
         )
     }
 

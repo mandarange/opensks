@@ -318,6 +318,16 @@ struct EvidenceWorkspaceView: View {
                         .font(Theme.ui(13, .semibold))
                         .foregroundStyle(Theme.text)
                     Spacer()
+                    Button {
+                        state.runProviderAdapterCheck()
+                    } label: {
+                        Label("Run provider check", systemImage: "powerplug")
+                    }
+                    .buttonStyle(.secondaryAction)
+                    .frame(maxWidth: 190)
+                    .disabled(state.isRunning)
+                    .accessibilityIdentifier("evidence.run.provider-adapter-check")
+                    .help("Run the live provider adapter check and refresh the evidence card.")
                     StatusPill(kind: providerAdapterCheckPillKind(report), label: providerAdapterCheckStatusLabel(report))
                 }
                 VStack(alignment: .leading, spacing: Theme.s8) {
