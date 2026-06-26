@@ -140,6 +140,8 @@ struct ProviderConnectionViewModel: Identifiable, Equatable, Sendable {
     var diagnosticRef: String? = nil
     var adapterDiagnostic: String? = nil
     var adapterBlockers: [String] = []
+    var adapterCheckGeneratedAt: ProviderAdapterCheckGeneratedAt? = nil
+    var adapterCheckDetail: String? = nil
     var revision: UInt64
 
     var statusLabel: String {
@@ -167,6 +169,11 @@ struct ProviderConnectionViewModel: Identifiable, Equatable, Sendable {
         let trimmed = diagnosticRef?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let trimmed, !trimmed.isEmpty else { return nil }
         return trimmed
+    }
+
+    var adapterCheckGeneratedAtLabel: String? {
+        guard let adapterCheckGeneratedAt else { return nil }
+        return "unix \(adapterCheckGeneratedAt.unixSeconds)"
     }
 }
 

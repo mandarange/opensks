@@ -45,6 +45,89 @@ final class ProviderTests: XCTestCase {
         XCTAssertTrue(store.hasEligibleTextModel)
     }
 
+    func testLiveProviderRegistryServiceLoadsAdapterCheckFromAppDataFallback() async throws {
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("opensks-provider-service-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let cli = workspace.appendingPathComponent("fake-opensks")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "provider" ] && [ "$2" = "registry-list" ]; then
+        cat <<'JSON'
+        {
+          "schema": "opensks.provider-registry-state.v1",
+          "providers": [
+            {
+              "schema": "opensks.provider-connection.v1",
+              "id": "provider-1",
+              "kind": "codex_lb",
+              "display_name": "codex-lb",
+              "enabled": true,
+              "endpoint": {"base_url": "https://codex.hyper-lab.xyz/backend-api/codex", "allow_insecure_http": false},
+              "auth": {"schema": "opensks.secret-ref.v1", "store": "macos_keychain", "service": "ai.opensks.provider.codex_lb", "account": "provider-1", "version": 1},
+              "health": {"state": "unknown", "circuit_open": false, "reason_code": "not_probed"},
+              "concurrency": {"max_concurrent_requests": 16},
+              "created_at_ms": 1,
+              "updated_at_ms": 1,
+              "revision": 1
+            }
+          ],
+          "models": [],
+          "latest_probes": []
+        }
+        JSON
+        elif [ "$1" = "app-data" ]; then
+        cat <<'JSON'
+        {
+          "provider_adapter_check": {
+            "schema": "opensks.provider-adapter-check.v1",
+            "generated_at": {"unix_seconds": 1782400000, "nanos": 0},
+            "remote_probe_opt_in": false,
+            "secret_value_exposed": false,
+            "summary": {"total": 2, "attempted": 0, "reachable": 0},
+            "blockers": ["set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1"],
+            "remediation_actions": [
+              {"blocker": "set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1", "action": "Set OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1.", "scope": "operator_environment"}
+            ],
+            "adapters": [
+              {
+                "name": "OpenRouter",
+                "configured": false,
+                "attempted": false,
+                "status": "not_configured",
+                "blockers": ["configure_OPENROUTER_API_KEY_credential"],
+                "credential_source": "none",
+                "endpoint": "https://openrouter.ai/api/v1/models",
+                "http_code": null,
+                "duration_ms": 0,
+                "transport": "native_reqwest_blocking_http",
+                "secret_value_exposed": false,
+                "stderr": ""
+              }
+            ]
+          }
+        }
+        JSON
+        else
+          echo "unexpected args: $@" >&2
+          exit 64
+        fi
+        """
+        try script.write(to: cli, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
+
+        let service = LiveProviderRegistryService(cli: cli, workspace: workspace)
+        let state = try await service.registryState()
+
+        XCTAssertEqual(state.providers.map(\.displayName), ["codex-lb"])
+        XCTAssertEqual(state.adapterCheckReport?.generatedAt?.unixSeconds, 1_782_400_000)
+        XCTAssertEqual(state.adapterCheckReport?.summary.total, 2)
+        XCTAssertEqual(state.adapterCheckReport?.remediationActions.first?.scope, "operator_environment")
+        XCTAssertEqual(state.adapterCheckReport?.adapters.first?.transport, "native_reqwest_blocking_http")
+    }
+
     func testTextModelSelectionCarriesOrderedHealthyFallbacks() async throws {
         let service = RecordingProviderRegistryService()
         service.state.providers = [
@@ -191,6 +274,16 @@ final class ProviderTests: XCTestCase {
         await store.refresh()
 
         let provider = try XCTUnwrap(store.connections.first)
+        XCTAssertEqual(store.adapterCheckReportGeneratedAtLabel, "unix 1782400000")
+        XCTAssertEqual(
+            store.adapterCheckReportSummaryDetail,
+            "0/2 reachable · attempted 0 · remote probe false"
+        )
+        XCTAssertEqual(provider.adapterCheckGeneratedAtLabel, "unix 1782400000")
+        XCTAssertEqual(
+            provider.adapterCheckDetail,
+            "credential none · transport native_reqwest_blocking_http · http none · duration 0ms"
+        )
         XCTAssertEqual(
             provider.adapterBlockers,
             [
@@ -204,6 +297,7 @@ final class ProviderTests: XCTestCase {
         XCTAssertFalse(store.providerReadinessDetail.contains("sk-test-secret"))
         XCTAssertFalse(provider.adapterBlockers.contains { $0.contains("sk-test-secret") })
         XCTAssertFalse(provider.adapterBlockers.contains("configure_OPENROUTER_API_KEY_credential"))
+        XCTAssertFalse(provider.adapterCheckDetail?.contains("sk-test-secret") == true)
     }
 
     func testProviderStoreSurfacesHealthCircuitAndDiagnosticReference() async throws {
@@ -267,7 +361,18 @@ final class ProviderTests: XCTestCase {
         let store = ProviderStore(secretStore: InMemoryProviderSecretStore(), service: service)
         await store.refresh()
 
-        XCTAssertNotNil(store.connections.first?.adapterDiagnostic)
+        let provider = try XCTUnwrap(store.connections.first)
+        XCTAssertEqual(store.adapterCheckReportGeneratedAtLabel, "unix 1782400000")
+        XCTAssertEqual(
+            store.adapterCheckReportSummaryDetail,
+            "0/2 reachable · attempted 0 · remote probe false"
+        )
+        XCTAssertNotNil(provider.adapterDiagnostic)
+        XCTAssertEqual(provider.adapterCheckGeneratedAtLabel, "unix 1782400000")
+        XCTAssertEqual(
+            provider.adapterCheckDetail,
+            "credential none · transport native_reqwest_blocking_http · http none · duration 0ms"
+        )
         let view = ProviderCenterView(store: store)
             .frame(width: 720, height: 560)
         let renderer = ImageRenderer(content: view)

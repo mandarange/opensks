@@ -29,12 +29,38 @@ struct ProviderDiagnosticsView: View {
                 .foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("settings.providers.diagnostic")
+            if let adapterReportGeneratedAt = store.adapterCheckReportGeneratedAtLabel {
+                diagnosticRow("Live check", adapterReportGeneratedAt, .neutral)
+                    .accessibilityIdentifier("settings.providers.adapterReportGeneratedAt")
+            }
+            if let adapterReportSummary = store.adapterCheckReportSummaryDetail {
+                Label(adapterReportSummary, systemImage: "antenna.radiowaves.left.and.right")
+                    .font(Theme.mono(11))
+                    .foregroundStyle(Theme.textSoft)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("settings.providers.adapterReportSummary")
+            }
             if let adapterDiagnostic = provider.adapterDiagnostic {
                 Label(adapterDiagnostic, systemImage: "exclamationmark.triangle.fill")
                     .font(Theme.ui(11.5))
                     .foregroundStyle(provider.adapterBlockers.isEmpty ? Theme.muted : Theme.gold)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("settings.providers.adapterDiagnostic")
+            }
+            if let adapterCheckGeneratedAt = provider.adapterCheckGeneratedAtLabel {
+                diagnosticRow("Adapter check", adapterCheckGeneratedAt, .neutral)
+                    .accessibilityIdentifier("settings.providers.adapterCheckGeneratedAt")
+            }
+            if let adapterCheckDetail = provider.adapterCheckDetail {
+                Label(adapterCheckDetail, systemImage: "network")
+                    .font(Theme.mono(11))
+                    .foregroundStyle(Theme.textSoft)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("settings.providers.adapterCheckDetail")
             }
             if !provider.adapterBlockers.isEmpty {
                 VStack(alignment: .leading, spacing: Theme.s6) {

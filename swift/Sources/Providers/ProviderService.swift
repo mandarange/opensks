@@ -48,7 +48,11 @@ struct LiveProviderRegistryService: ProviderRegistryService {
             ["provider", "registry-list", "--workspace", workspace.path],
             verb: "registry-list"
         )
-        state.adapterCheckReport = loadAdapterCheckReport()
+        if let adapterCheckReport = loadAdapterCheckReport() {
+            state.adapterCheckReport = adapterCheckReport
+        } else {
+            state.adapterCheckReport = await loadAdapterCheckReportFromAppData()
+        }
         return state
     }
 
@@ -163,6 +167,16 @@ struct LiveProviderRegistryService: ProviderRegistryService {
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder.opensks.decode(ProviderAdapterCheckReport.self, from: data)
     }
+
+    private func loadAdapterCheckReportFromAppData() async -> ProviderAdapterCheckReport? {
+        let data: ProviderRegistryAppDataAdapterCheck?
+        data = try? await run(["app-data", workspace.path], verb: "app-data")
+        return data?.providerAdapterCheck
+    }
+}
+
+private struct ProviderRegistryAppDataAdapterCheck: Decodable, Sendable {
+    var providerAdapterCheck: ProviderAdapterCheckReport?
 }
 
 struct ProviderRegistryState: Codable, Equatable, Sendable {

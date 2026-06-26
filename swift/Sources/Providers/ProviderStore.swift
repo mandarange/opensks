@@ -111,6 +111,17 @@ final class ProviderStore: ObservableObject {
         return "Enable a healthy code-capable model before starting a turn."
     }
 
+    var adapterCheckReportGeneratedAtLabel: String? {
+        guard let generatedAt = adapterCheckReport?.generatedAt else { return nil }
+        return "unix \(generatedAt.unixSeconds)"
+    }
+
+    var adapterCheckReportSummaryDetail: String? {
+        guard let report = adapterCheckReport else { return nil }
+        let remoteProbe = report.remoteProbeOptIn ? "true" : "false"
+        return "\(report.summary.reachable)/\(report.summary.total) reachable · attempted \(report.summary.attempted) · remote probe \(remoteProbe)"
+    }
+
     func refresh() async {
         guard let service else {
             syncState = .idle
@@ -333,7 +344,8 @@ final class ProviderStore: ObservableObject {
                     ProviderAdapterReadiness.normalizedName(record.displayName)
                 ] ?? adapterChecksByName[
                     ProviderAdapterReadiness.normalizedName(record.kind.displayLabel)
-                ]
+                ],
+                adapterCheckGeneratedAt: state.adapterCheckReport?.generatedAt
             )
         }
         let providerEnabled = Dictionary(uniqueKeysWithValues: connections.map { ($0.id, $0.enabled) })
@@ -515,7 +527,8 @@ private extension ProviderConnectionRecord {
     func viewModel(
         enabledModelCount: Int,
         latestProbe: ProviderProbeReceiptRecord?,
-        adapterCheck: ProviderAdapterCheckRow?
+        adapterCheck: ProviderAdapterCheckRow?,
+        adapterCheckGeneratedAt: ProviderAdapterCheckGeneratedAt?
     ) -> ProviderConnectionViewModel {
         ProviderConnectionViewModel(
             id: id,
@@ -538,6 +551,8 @@ private extension ProviderConnectionRecord {
             diagnosticRef: health.diagnosticRef ?? latestProbe?.diagnosticRef,
             adapterDiagnostic: ProviderAdapterReadiness.diagnostic(for: adapterCheck),
             adapterBlockers: ProviderAdapterReadiness.safeBlockers(adapterCheck?.blockers ?? []),
+            adapterCheckGeneratedAt: adapterCheck == nil ? nil : adapterCheckGeneratedAt,
+            adapterCheckDetail: ProviderAdapterReadiness.detail(for: adapterCheck),
             revision: revision
         )
     }
@@ -597,6 +612,15 @@ private enum ProviderAdapterReadiness {
         }
     }
 
+    static func detail(for row: ProviderAdapterCheckRow?) -> String? {
+        guard let row else { return nil }
+        let credential = safeDiagnostic(row.credentialSource)
+        let transport = safeDiagnostic(row.transport ?? "unknown")
+        let http = safeDiagnostic(row.httpCode ?? "none")
+        let duration = row.durationMs.map { "\($0)ms" } ?? "unknown"
+        return "credential \(credential) · transport \(transport) · http \(http) · duration \(duration)"
+    }
+
     static func safeBlockers(_ blockers: [String]) -> [String] {
         blockers.map { blocker in
             switch blocker {
@@ -651,6 +675,14 @@ private enum ProviderAdapterReadiness {
         default:
             return "Provider check has a redacted blocker in the local report."
         }
+    }
+
+    private static func safeDiagnostic(_ value: String) -> String {
+        let lower = value.lowercased()
+        if lower.contains("bearer ") || lower.contains("sk-") || lower.contains("token=") || lower.contains("key=") {
+            return "[redacted]"
+        }
+        return value
     }
 }
 
