@@ -3,7 +3,7 @@
 ## Scope
 
 - Commit under review: `4796ae4 Fix Chat model picker refresh`
-- Workspace: `/Users/weklem/Desktop/devs/opensks`
+- Workspace: `<workspace>`
 - Conversation under native UI proof: `374e912c603d1a9d7649ddc3d4632c79`
 - Reason for this artifact: SKS `$Naruto` follow-up required native multi-session evidence and durable proof beyond prose-only ledger notes.
 
@@ -14,7 +14,7 @@ Computer Use read the native app after launching `.opensks/macos/OpenSKS.app/Con
 Relevant `app_state` excerpt:
 
 ```text
-App=/Users/weklem/Desktop/devs/opensks/.opensks/macos/OpenSKS.app/ (bundleID dev.opensks.local, pid 67008)
+App=<workspace>/.opensks/macos/OpenSKS.app/ (bundleID dev.opensks.local, pid 67008)
 Window: "OpenSKS", App: OpenSKS.
 3 text OpenSKS Studio ~/Desktop/devs/opensks Idle · agent ready
 5 text Help: Configured provider registry connections — secrets are never shown, Value: 1 provider
@@ -32,7 +32,7 @@ Interpretation: the native Chat composer is no longer stuck at `Model Auto`; it 
 Command:
 
 ```bash
-.opensks/macos/OpenSKS.app/Contents/Resources/opensks-cli conversation settings-get --workspace /Users/weklem/Desktop/devs/opensks --conversation 374e912c603d1a9d7649ddc3d4632c79
+.opensks/macos/OpenSKS.app/Contents/Resources/opensks-cli conversation settings-get --workspace <workspace> --conversation 374e912c603d1a9d7649ddc3d4632c79
 ```
 
 Output:

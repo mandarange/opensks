@@ -35,6 +35,7 @@ pub fn runtime_capability_report(
     args: &[String],
 ) -> opensks_contracts::RuntimeCapabilityReport {
     let mut report = opensks_contracts::baseline_capability_report();
+    let provider_posture = provider_registry_dispatch_posture(cwd);
     let workspace_marker = cwd
         .canonicalize()
         .unwrap_or_else(|_| cwd.to_path_buf())
@@ -52,23 +53,24 @@ pub fn runtime_capability_report(
     if let Some(cap) = capability_mut(&mut report, "chat.answer") {
         cap.maturity = opensks_contracts::CapabilityMaturity::Foundation;
         cap.available = false;
-        cap.reason_code = if std::env::var_os("OPENROUTER_API_KEY").is_some() {
-            "openrouter_key_present_but_live_chat_answer_unprobed".to_string()
-        } else {
-            "model_credentials_missing_for_live_chat_answer".to_string()
-        };
+        cap.reason_code = provider_posture.chat_answer_reason();
         cap.evidence_refs = vec![
             "runtime:capability-registry".to_string(),
             "adapter:openrouter-native-http".to_string(),
         ];
-        cap.actions = vec!["connect_model".to_string()];
+        cap.evidence_refs.extend(
+            provider_posture
+                .evidence_refs()
+                .into_iter()
+                .map(str::to_string),
+        );
+        cap.actions = provider_posture.actions();
     }
 
     if let Some(cap) = capability_mut(&mut report, "agent.code_edit") {
         cap.maturity = opensks_contracts::CapabilityMaturity::Foundation;
         cap.available = false;
-        cap.reason_code =
-            "agentic_loop_toolgateway_patch_engine_need_live_provider_credentials".to_string();
+        cap.reason_code = provider_posture.code_edit_reason();
         cap.evidence_refs = vec![
             "crate:opensks-adapter".to_string(),
             "crate:opensks-patch-engine".to_string(),
@@ -89,25 +91,31 @@ pub fn runtime_capability_report(
             "driver:openrouter-tools".to_string(),
             "driver:provider-failure-terminal".to_string(),
         ];
-        cap.actions = vec![
-            "connect_model".to_string(),
-            "review_patch_policy".to_string(),
-        ];
+        cap.evidence_refs.extend(
+            provider_posture
+                .evidence_refs()
+                .into_iter()
+                .map(str::to_string),
+        );
+        cap.actions = provider_posture.actions();
+        append_action(cap, "review_patch_policy");
     }
 
     if let Some(cap) = capability_mut(&mut report, "model.dispatch") {
         cap.maturity = opensks_contracts::CapabilityMaturity::Foundation;
         cap.available = false;
-        cap.reason_code = if std::env::var_os("OPENROUTER_API_KEY").is_some() {
-            "openrouter_secret_present_runtime_probe_required".to_string()
-        } else {
-            "openrouter_secret_missing".to_string()
-        };
+        cap.reason_code = provider_posture.model_dispatch_reason();
         cap.evidence_refs = vec![
             "provider:openrouter-native-reqwest".to_string(),
             "registry:runtime-overlay".to_string(),
         ];
-        cap.actions = vec!["connect_model".to_string()];
+        cap.evidence_refs.extend(
+            provider_posture
+                .evidence_refs()
+                .into_iter()
+                .map(str::to_string),
+        );
+        cap.actions = provider_posture.actions();
     }
 
     if let Some(cap) = capability_mut(&mut report, "agent.local_test_edit") {
@@ -206,5 +214,152 @@ fn append_evidence(cap: &mut opensks_contracts::RuntimeCapability, evidence: &st
         .any(|existing| existing == evidence)
     {
         cap.evidence_refs.push(evidence.to_string());
+    }
+}
+
+fn append_action(cap: &mut opensks_contracts::RuntimeCapability, action: &str) {
+    if !cap.actions.iter().any(|existing| existing == action) {
+        cap.actions.push(action.to_string());
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderRegistryDispatchPosture {
+    NoRegistryDb,
+    NoEnabledProvider,
+    EnabledProviderNeedsModelCatalog,
+    CodeRoutePresent,
+}
+
+impl ProviderRegistryDispatchPosture {
+    fn chat_answer_reason(self) -> String {
+        match self {
+            Self::CodeRoutePresent => {
+                "provider_registry_code_route_present_live_chat_probe_required".to_string()
+            }
+            Self::EnabledProviderNeedsModelCatalog => {
+                "provider_registry_enabled_provider_needs_model_catalog".to_string()
+            }
+            Self::NoEnabledProvider => "provider_registry_no_enabled_provider".to_string(),
+            Self::NoRegistryDb => {
+                if std::env::var_os("OPENROUTER_API_KEY").is_some() {
+                    "openrouter_key_present_but_live_chat_answer_unprobed".to_string()
+                } else {
+                    "model_credentials_missing_for_live_chat_answer".to_string()
+                }
+            }
+        }
+    }
+
+    fn code_edit_reason(self) -> String {
+        match self {
+            Self::CodeRoutePresent => {
+                "agentic_loop_provider_registry_code_route_present_live_dispatch_unverified"
+                    .to_string()
+            }
+            Self::EnabledProviderNeedsModelCatalog => {
+                "agentic_loop_provider_registry_needs_model_catalog".to_string()
+            }
+            Self::NoEnabledProvider => {
+                "agentic_loop_provider_registry_needs_enabled_provider".to_string()
+            }
+            Self::NoRegistryDb => {
+                "agentic_loop_toolgateway_patch_engine_need_live_provider_credentials".to_string()
+            }
+        }
+    }
+
+    fn model_dispatch_reason(self) -> String {
+        match self {
+            Self::CodeRoutePresent => {
+                "provider_registry_code_route_present_dispatch_probe_required".to_string()
+            }
+            Self::EnabledProviderNeedsModelCatalog => {
+                "provider_registry_enabled_provider_needs_model_catalog".to_string()
+            }
+            Self::NoEnabledProvider => "provider_registry_no_enabled_provider".to_string(),
+            Self::NoRegistryDb => {
+                if std::env::var_os("OPENROUTER_API_KEY").is_some() {
+                    "openrouter_secret_present_runtime_probe_required".to_string()
+                } else {
+                    "openrouter_secret_missing".to_string()
+                }
+            }
+        }
+    }
+
+    fn evidence_refs(self) -> Vec<&'static str> {
+        match self {
+            Self::CodeRoutePresent => vec![
+                "provider-registry:enabled-provider",
+                "provider-registry:enabled-code-model",
+                "provider-registry:secret-ref-only",
+            ],
+            Self::EnabledProviderNeedsModelCatalog => vec![
+                "provider-registry:enabled-provider",
+                "provider-registry:model-catalog-missing-code-route",
+                "provider-registry:secret-ref-only",
+            ],
+            Self::NoEnabledProvider => vec!["provider-registry:no-enabled-provider"],
+            Self::NoRegistryDb => vec!["provider-registry:not-materialized"],
+        }
+    }
+
+    fn actions(self) -> Vec<String> {
+        match self {
+            Self::CodeRoutePresent => vec![
+                "run_provider_adapter_check".to_string(),
+                "connect_model".to_string(),
+            ],
+            Self::EnabledProviderNeedsModelCatalog => vec![
+                "sync_models".to_string(),
+                "run_provider_adapter_check".to_string(),
+            ],
+            Self::NoEnabledProvider | Self::NoRegistryDb => vec!["connect_model".to_string()],
+        }
+    }
+}
+
+fn provider_registry_dispatch_posture(cwd: &Path) -> ProviderRegistryDispatchPosture {
+    let db_path = cwd.join(opensks_provider::PROVIDER_DB_RELATIVE_PATH);
+    if !db_path.exists() {
+        return ProviderRegistryDispatchPosture::NoRegistryDb;
+    }
+    let Ok(repo) = opensks_provider::ProviderRepository::open_path(&db_path) else {
+        return ProviderRegistryDispatchPosture::NoRegistryDb;
+    };
+    let Ok(providers) = repo.list_connections() else {
+        return ProviderRegistryDispatchPosture::NoRegistryDb;
+    };
+    let enabled_providers = providers
+        .iter()
+        .filter(|provider| provider.enabled)
+        .collect::<Vec<_>>();
+    if enabled_providers.is_empty() {
+        return ProviderRegistryDispatchPosture::NoEnabledProvider;
+    }
+
+    let mut enabled_code_model_count = 0usize;
+    for provider in &enabled_providers {
+        let Ok(models) = repo.list_models(&provider.id) else {
+            continue;
+        };
+        enabled_code_model_count += models
+            .iter()
+            .filter(|model| model.enabled)
+            .filter(|model| model.capabilities.code)
+            .filter(|model| {
+                !matches!(
+                    model.health,
+                    opensks_contracts::HealthState::Unavailable
+                        | opensks_contracts::HealthState::OpenCircuit
+                )
+            })
+            .count();
+    }
+    if enabled_code_model_count == 0 {
+        ProviderRegistryDispatchPosture::EnabledProviderNeedsModelCatalog
+    } else {
+        ProviderRegistryDispatchPosture::CodeRoutePresent
     }
 }
