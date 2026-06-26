@@ -175,6 +175,7 @@ struct ProviderRegistryState: Codable, Equatable, Sendable {
 
 struct ProviderAdapterCheckReport: Codable, Equatable, Sendable {
     var schema: String
+    var generatedAt: ProviderAdapterCheckGeneratedAt?
     var remoteProbeOptIn: Bool
     var secretValueExposed: Bool
     var summary: ProviderAdapterCheckSummary
@@ -184,6 +185,7 @@ struct ProviderAdapterCheckReport: Codable, Equatable, Sendable {
 
     init(
         schema: String,
+        generatedAt: ProviderAdapterCheckGeneratedAt? = nil,
         remoteProbeOptIn: Bool,
         secretValueExposed: Bool,
         summary: ProviderAdapterCheckSummary,
@@ -192,6 +194,7 @@ struct ProviderAdapterCheckReport: Codable, Equatable, Sendable {
         adapters: [ProviderAdapterCheckRow]
     ) {
         self.schema = schema
+        self.generatedAt = generatedAt
         self.remoteProbeOptIn = remoteProbeOptIn
         self.secretValueExposed = secretValueExposed
         self.summary = summary
@@ -203,6 +206,7 @@ struct ProviderAdapterCheckReport: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         schema = try container.decode(String.self, forKey: .schema)
+        generatedAt = try container.decodeIfPresent(ProviderAdapterCheckGeneratedAt.self, forKey: .generatedAt)
         remoteProbeOptIn = try container.decode(Bool.self, forKey: .remoteProbeOptIn)
         secretValueExposed = try container.decode(Bool.self, forKey: .secretValueExposed)
         summary = try container.decode(ProviderAdapterCheckSummary.self, forKey: .summary)
@@ -211,6 +215,11 @@ struct ProviderAdapterCheckReport: Codable, Equatable, Sendable {
             .decodeIfPresent([ProviderAdapterRemediationAction].self, forKey: .remediationActions) ?? []
         adapters = try container.decode([ProviderAdapterCheckRow].self, forKey: .adapters)
     }
+}
+
+struct ProviderAdapterCheckGeneratedAt: Codable, Equatable, Sendable {
+    var unixSeconds: Int
+    var nanos: Int
 }
 
 struct ProviderAdapterRemediationAction: Codable, Equatable, Sendable {
@@ -234,7 +243,10 @@ struct ProviderAdapterCheckRow: Codable, Equatable, Sendable {
     var credentialSource: String
     var endpoint: String
     var httpCode: String?
+    var durationMs: Int?
+    var transport: String?
     var secretValueExposed: Bool
+    var stderr: String
 
     init(
         name: String,
@@ -245,7 +257,10 @@ struct ProviderAdapterCheckRow: Codable, Equatable, Sendable {
         credentialSource: String,
         endpoint: String,
         httpCode: String?,
-        secretValueExposed: Bool
+        secretValueExposed: Bool,
+        durationMs: Int? = nil,
+        transport: String? = nil,
+        stderr: String = ""
     ) {
         self.name = name
         self.configured = configured
@@ -255,7 +270,10 @@ struct ProviderAdapterCheckRow: Codable, Equatable, Sendable {
         self.credentialSource = credentialSource
         self.endpoint = endpoint
         self.httpCode = httpCode
+        self.durationMs = durationMs
+        self.transport = transport
         self.secretValueExposed = secretValueExposed
+        self.stderr = stderr
     }
 
     init(from decoder: Decoder) throws {
@@ -267,8 +285,17 @@ struct ProviderAdapterCheckRow: Codable, Equatable, Sendable {
         blockers = try container.decodeIfPresent([String].self, forKey: .blockers) ?? []
         credentialSource = try container.decode(String.self, forKey: .credentialSource)
         endpoint = try container.decode(String.self, forKey: .endpoint)
-        httpCode = try container.decodeIfPresent(String.self, forKey: .httpCode)
+        if let code = try? container.decodeIfPresent(String.self, forKey: .httpCode) {
+            httpCode = code
+        } else if let code = try? container.decodeIfPresent(Int.self, forKey: .httpCode) {
+            httpCode = String(code)
+        } else {
+            httpCode = nil
+        }
+        durationMs = try container.decodeIfPresent(Int.self, forKey: .durationMs)
+        transport = try container.decodeIfPresent(String.self, forKey: .transport)
         secretValueExposed = try container.decode(Bool.self, forKey: .secretValueExposed)
+        stderr = try container.decodeIfPresent(String.self, forKey: .stderr) ?? ""
     }
 }
 

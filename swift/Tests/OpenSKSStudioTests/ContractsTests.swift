@@ -879,6 +879,7 @@ final class ContractsTests: XCTestCase {
           },
           "provider_adapter_check": {
             "schema": "opensks.provider-adapter-check.v1",
+            "generated_at": {"unix_seconds": 1782400000, "nanos": 0},
             "remote_probe_opt_in": false,
             "secret_value_exposed": false,
             "summary": {
@@ -908,6 +909,8 @@ final class ContractsTests: XCTestCase {
                 "credential_source": "none",
                 "endpoint": "https://openrouter.ai/api/v1/models",
                 "http_code": null,
+                "duration_ms": 0,
+                "transport": "native_reqwest_blocking_http",
                 "secret_value_exposed": false
               }
             ]
@@ -971,11 +974,14 @@ final class ContractsTests: XCTestCase {
         XCTAssertEqual(data.release?.signingEvidence?.codesignStatus, 0)
         XCTAssertEqual(data.release?.signingEvidence?.notarizationStatus, 1)
         XCTAssertEqual(data.providerAdapterCheck?.remoteProbeOptIn, false)
+        XCTAssertEqual(data.providerAdapterCheck?.generatedAt?.unixSeconds, 1_782_400_000)
         XCTAssertEqual(data.providerAdapterCheck?.summary.total, 2)
         XCTAssertEqual(data.providerAdapterCheck?.summary.reachable, 0)
         XCTAssertEqual(data.providerAdapterCheck?.remediationActions.first?.scope, "operator_environment")
         XCTAssertEqual(data.providerAdapterCheck?.adapters.first?.name, "OpenRouter")
         XCTAssertEqual(data.providerAdapterCheck?.adapters.first?.endpoint, "https://openrouter.ai/api/v1/models")
+        XCTAssertEqual(data.providerAdapterCheck?.adapters.first?.durationMs, 0)
+        XCTAssertEqual(data.providerAdapterCheck?.adapters.first?.transport, "native_reqwest_blocking_http")
         XCTAssertEqual(data.providerMockE2E?.status, "verified")
         XCTAssertEqual(data.providerMockE2E?.registryRouteStatus, "resolved")
         XCTAssertEqual(data.providerMockE2E?.selectedModelId, "mock-openai-compatible/code-model")

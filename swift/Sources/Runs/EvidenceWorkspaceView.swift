@@ -385,6 +385,7 @@ struct EvidenceWorkspaceView: View {
                     providerProofRow(label: "Required", value: "\(report.summary.total)", systemImage: "checklist")
                     providerProofRow(label: "Attempted", value: "\(report.summary.attempted)", systemImage: "play.circle")
                     providerProofRow(label: "Reachable", value: "\(report.summary.reachable)", systemImage: "network")
+                    providerProofRow(label: "Last check", value: providerAdapterGeneratedAtLabel(report.generatedAt), systemImage: "clock")
                     providerProofRow(label: "Remote probe", value: report.remoteProbeOptIn ? "true" : "false", systemImage: "antenna.radiowaves.left.and.right")
                     providerProofRow(label: "Secret leak", value: report.secretValueExposed ? "true" : "false", systemImage: "lock.shield")
                 }
@@ -440,6 +441,11 @@ struct EvidenceWorkspaceView: View {
         return .neutral
     }
 
+    private func providerAdapterGeneratedAtLabel(_ generatedAt: ProviderAdapterCheckGeneratedAt?) -> String {
+        guard let generatedAt else { return "not recorded" }
+        return "unix \(generatedAt.unixSeconds)"
+    }
+
     private func providerAdapterActionRow(_ action: ProviderAdapterRemediationAction) -> some View {
         HStack(alignment: .top, spacing: Theme.s10) {
             Image(systemName: "arrow.triangle.2.circlepath")
@@ -486,11 +492,52 @@ struct EvidenceWorkspaceView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .textSelection(.enabled)
+                Text(providerAdapterDiagnosticLine(adapter))
+                    .font(Theme.ui(12))
+                    .foregroundStyle(Theme.textSoft)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                if !adapter.blockers.isEmpty {
+                    Text("Blockers: \(providerAdapterBlockerSummary(adapter.blockers))")
+                        .font(Theme.ui(12))
+                        .foregroundStyle(Theme.muted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
+                if !adapter.stderr.isEmpty {
+                    Text("stderr: \(providerAdapterSafeDiagnostic(adapter.stderr))")
+                        .font(Theme.ui(12))
+                        .foregroundStyle(Theme.muted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
             }
             Spacer(minLength: 0)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(adapter.name): \(adapter.status)")
+        .accessibilityLabel("\(adapter.name): \(adapter.status), \(providerAdapterDiagnosticLine(adapter))")
+    }
+
+    private func providerAdapterDiagnosticLine(_ adapter: ProviderAdapterCheckRow) -> String {
+        let http = adapter.httpCode ?? "none"
+        let duration = adapter.durationMs.map { "\($0)ms" } ?? "unknown"
+        let transport = adapter.transport ?? "unknown"
+        return "credential \(adapter.credentialSource) · transport \(transport) · http \(http) · duration \(duration)"
+    }
+
+    private func providerAdapterBlockerSummary(_ blockers: [String]) -> String {
+        blockers.map(providerAdapterSafeDiagnostic).joined(separator: ", ")
+    }
+
+    private func providerAdapterSafeDiagnostic(_ value: String) -> String {
+        let lower = value.lowercased()
+        if lower.contains("bearer ") || lower.contains("sk-") || lower.contains("token=") || lower.contains("key=") {
+            return "[redacted]"
+        }
+        return value
     }
 
     // MARK: - Provider proof

@@ -95,13 +95,18 @@ final class ProviderTests: XCTestCase {
 
         XCTAssertEqual(report.blockers, [])
         XCTAssertEqual(report.remediationActions, [])
+        XCTAssertNil(report.generatedAt)
         XCTAssertEqual(report.adapters.first?.blockers, [])
+        XCTAssertNil(report.adapters.first?.durationMs)
+        XCTAssertNil(report.adapters.first?.transport)
+        XCTAssertEqual(report.adapters.first?.stderr, "")
     }
 
     func testProviderAdapterCheckReportDecodesRemediationActions() throws {
         let json = """
         {
           "schema": "opensks.provider-adapter-check.v1",
+          "generated_at": {"unix_seconds": 1782400000, "nanos": 42},
           "remote_probe_opt_in": false,
           "secret_value_exposed": false,
           "summary": {"total":2,"attempted":0,"reachable":0},
@@ -113,12 +118,29 @@ final class ProviderTests: XCTestCase {
               "scope": "provider_credential"
             }
           ],
-          "adapters": []
+          "adapters": [
+            {
+              "name": "OpenRouter",
+              "configured": true,
+              "attempted": true,
+              "status": "adapter_models_endpoint_reachable",
+              "blockers": [],
+              "credential_source": "macos_keychain",
+              "endpoint": "https://openrouter.ai/api/v1/models",
+              "http_code": 200,
+              "duration_ms": 42,
+              "transport": "native_reqwest_blocking_http",
+              "secret_value_exposed": false,
+              "stderr": ""
+            }
+          ]
         }
         """
 
         let report = try JSONDecoder.opensks.decode(ProviderAdapterCheckReport.self, from: Data(json.utf8))
 
+        XCTAssertEqual(report.generatedAt?.unixSeconds, 1_782_400_000)
+        XCTAssertEqual(report.generatedAt?.nanos, 42)
         XCTAssertEqual(report.remediationActions.count, 1)
         XCTAssertEqual(report.remediationActions.first?.blocker, "configure_OPENROUTER_API_KEY_credential")
         XCTAssertEqual(
@@ -126,6 +148,9 @@ final class ProviderTests: XCTestCase {
             "Add an OpenRouter API key credential through Provider Center or the configured secret store."
         )
         XCTAssertEqual(report.remediationActions.first?.scope, "provider_credential")
+        XCTAssertEqual(report.adapters.first?.httpCode, "200")
+        XCTAssertEqual(report.adapters.first?.durationMs, 42)
+        XCTAssertEqual(report.adapters.first?.transport, "native_reqwest_blocking_http")
     }
 
     func testProviderStoreSurfacesAdapterCheckReadinessWithoutSecretValues() async throws {
@@ -133,6 +158,7 @@ final class ProviderTests: XCTestCase {
         service.state.providers = [Self.providerRecord(health: "unknown")]
         service.state.adapterCheckReport = ProviderAdapterCheckReport(
             schema: "opensks.provider-adapter-check.v1",
+            generatedAt: ProviderAdapterCheckGeneratedAt(unixSeconds: 1_782_400_000, nanos: 0),
             remoteProbeOptIn: false,
             secretValueExposed: false,
             summary: ProviderAdapterCheckSummary(total: 2, attempted: 0, reachable: 0),
@@ -154,7 +180,9 @@ final class ProviderTests: XCTestCase {
                     credentialSource: "none",
                     endpoint: "https://openrouter.ai/api/v1/models",
                     httpCode: nil,
-                    secretValueExposed: false
+                    secretValueExposed: false,
+                    durationMs: 0,
+                    transport: "native_reqwest_blocking_http"
                 )
             ]
         )
@@ -215,6 +243,7 @@ final class ProviderTests: XCTestCase {
         service.state.providers = [Self.providerRecord(health: "unknown")]
         service.state.adapterCheckReport = ProviderAdapterCheckReport(
             schema: "opensks.provider-adapter-check.v1",
+            generatedAt: ProviderAdapterCheckGeneratedAt(unixSeconds: 1_782_400_000, nanos: 0),
             remoteProbeOptIn: false,
             secretValueExposed: false,
             summary: ProviderAdapterCheckSummary(total: 2, attempted: 0, reachable: 0),
@@ -229,7 +258,9 @@ final class ProviderTests: XCTestCase {
                     credentialSource: "none",
                     endpoint: "https://openrouter.ai/api/v1/models",
                     httpCode: nil,
-                    secretValueExposed: false
+                    secretValueExposed: false,
+                    durationMs: 0,
+                    transport: "native_reqwest_blocking_http"
                 )
             ]
         )

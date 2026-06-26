@@ -162,6 +162,7 @@ final class ReleaseReadinessTests: XCTestCase {
             ),
             providerAdapterCheck: ProviderAdapterCheckReport(
                 schema: "opensks.provider-adapter-check.v1",
+                generatedAt: ProviderAdapterCheckGeneratedAt(unixSeconds: 1_782_400_000, nanos: 0),
                 remoteProbeOptIn: false,
                 secretValueExposed: false,
                 summary: ProviderAdapterCheckSummary(total: 2, attempted: 0, reachable: 0),
@@ -185,7 +186,9 @@ final class ReleaseReadinessTests: XCTestCase {
                         credentialSource: "none",
                         endpoint: "https://openrouter.ai/api/v1/models",
                         httpCode: nil,
-                        secretValueExposed: false
+                        secretValueExposed: false,
+                        durationMs: 0,
+                        transport: "native_reqwest_blocking_http"
                     )
                 ]
             ),
