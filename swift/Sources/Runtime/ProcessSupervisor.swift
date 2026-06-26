@@ -13,6 +13,7 @@
 // It is an actor so callers share one supervisor; `run` is nonisolated because a
 // launch holds no shared actor state — each call owns its process + buffers.
 
+import Darwin
 import Foundation
 
 actor ProcessSupervisor {
@@ -20,6 +21,7 @@ actor ProcessSupervisor {
         let executable: URL
         let arguments: [String]
         var workingDirectory: URL?
+        var environment: [String: String] = [:]
         var stdin: Data?
         /// Timeout in seconds; the child is terminated if it exceeds it.
         var timeoutSeconds: Double?
@@ -81,6 +83,11 @@ actor ProcessSupervisor {
         process.arguments = spec.arguments
         if let cwd = spec.workingDirectory {
             process.currentDirectoryURL = cwd
+        }
+        if !spec.environment.isEmpty {
+            var environment = ProcessInfo.processInfo.environment
+            environment.merge(spec.environment) { _, new in new }
+            process.environment = environment
         }
 
         return try await withTaskCancellationHandler {
@@ -144,7 +151,7 @@ actor ProcessSupervisor {
                     DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
                         if process.isRunning {
                             timedOut.set()
-                            process.terminate()
+                            Self.terminateProcess(process)
                         }
                     }
                 }
@@ -152,7 +159,16 @@ actor ProcessSupervisor {
         } onCancel: {
             // Task cancelled → terminate the child instead of orphaning it.
             if process.isRunning {
-                process.terminate()
+                Self.terminateProcess(process)
+            }
+        }
+    }
+
+    private nonisolated static func terminateProcess(_ process: Process) {
+        process.terminate()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
             }
         }
     }

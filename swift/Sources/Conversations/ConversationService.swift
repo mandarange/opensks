@@ -416,7 +416,9 @@ struct LiveConversationService: ConversationService {
                 ProcessSupervisor.Spec(
                     executable: cli,
                     arguments: args,
-                    workingDirectory: cwd
+                    workingDirectory: OpenSKSCLIProcess.workingDirectory(for: cwd),
+                    environment: OpenSKSCLIProcess.environmentOverlay(for: cwd),
+                    timeoutSeconds: OpenSKSCLIProcess.commandTimeoutSeconds
                 )
             )
             return CaptureResult(

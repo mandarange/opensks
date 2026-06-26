@@ -29,6 +29,22 @@ final class ProcessSupervisorTests: XCTestCase {
         XCTAssertEqual(String(decoding: result.stdout, as: UTF8.self), payload)
     }
 
+    func testMergesEnvironmentOverlay() async throws {
+        let result = try await supervisor.run(
+            ProcessSupervisor.Spec(
+                executable: URL(fileURLWithPath: "/usr/bin/env"),
+                arguments: [],
+                environment: ["OPENSKS_TEST_WORKSPACE": "workspace-env-ok"]
+            )
+        )
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(
+            String(decoding: result.stdout, as: UTF8.self)
+                .contains("OPENSKS_TEST_WORKSPACE=workspace-env-ok")
+        )
+    }
+
     func testLargeOutputDoesNotDeadlock() async throws {
         // 200 KB on stdout: with sequential draining this could deadlock; the
         // concurrent drains must complete it.

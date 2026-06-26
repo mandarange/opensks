@@ -206,8 +206,9 @@ struct RuntimeCapabilityReport: Codable, Sendable {
             let result = try await processSupervisor.run(ProcessSupervisor.Spec(
                 executable: cli,
                 arguments: ["capability", "report"],
-                workingDirectory: workspace,
-                timeoutSeconds: 30,
+                workingDirectory: OpenSKSCLIProcess.workingDirectory(for: workspace),
+                environment: OpenSKSCLIProcess.environmentOverlay(for: workspace),
+                timeoutSeconds: OpenSKSCLIProcess.commandTimeoutSeconds,
                 maxCaptureBytes: 1024 * 1024
             ))
             guard result.exitCode == 0, !result.timedOut else { return nil }

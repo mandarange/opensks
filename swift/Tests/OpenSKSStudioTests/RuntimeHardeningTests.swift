@@ -56,6 +56,36 @@ final class RuntimeHardeningTests: XCTestCase {
         XCTAssertNotEqual(before, after, "mission count changes must refresh app-data")
     }
 
+    func testFileScannerHonorsNodeBudget() throws {
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("opensks-filescan-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        for index in 0..<20 {
+            let path = workspace.appendingPathComponent("file-\(index).txt", isDirectory: false)
+            try "fixture".write(to: path, atomically: true, encoding: .utf8)
+        }
+
+        let nodes = FileScanner.scan(workspace, maxNodes: 5)
+
+        XCTAssertLessThanOrEqual(Self.count(nodes), 5)
+    }
+
+    func testWorkspaceAccessPanelStartsAtWorkspaceParent() {
+        let workspace = URL(fileURLWithPath: "/tmp/opensks-parent/opensks", isDirectory: true)
+
+        XCTAssertEqual(
+            AppState.workspaceAccessPanelDirectory(for: workspace).path,
+            "/tmp/opensks-parent"
+        )
+    }
+
+    private static func count(_ nodes: [FileNode]) -> Int {
+        nodes.reduce(0) { total, node in
+            total + 1 + count(node.children ?? [])
+        }
+    }
+
     // MARK: - 1. EventBatcher coalesces a burst into bounded flushes
 
     /// A 10,000-event burst into a manually-ticked batcher coalesces to ONE flush

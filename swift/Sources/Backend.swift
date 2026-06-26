@@ -45,18 +45,23 @@ func classifyLine(_ s: String) -> LineKind {
 
 actor CLIRunner {
     /// Run `cli args` capturing all stdout. Used for the quick `app-data` read.
-    func capture(cli: URL, cwd: URL, args: [String]) -> Data {
-        let proc = Process()
-        proc.executableURL = cli
-        proc.arguments = args
-        proc.currentDirectoryURL = cwd
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = Pipe()
-        do { try proc.run() } catch { return Data() }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
-        return data
+    func capture(cli: URL, cwd: URL, args: [String]) async -> Data {
+        do {
+            let result = try await ProcessSupervisor().run(
+                ProcessSupervisor.Spec(
+                    executable: cli,
+                    arguments: args,
+                    workingDirectory: OpenSKSCLIProcess.workingDirectory(for: cwd),
+                    environment: OpenSKSCLIProcess.environmentOverlay(for: cwd),
+                    timeoutSeconds: OpenSKSCLIProcess.commandTimeoutSeconds,
+                    maxCaptureBytes: 4 * 1024 * 1024
+                )
+            )
+            guard result.exitCode == 0, !result.timedOut else { return Data() }
+            return result.stdout
+        } catch {
+            return Data()
+        }
     }
 
     /// Run `cli args` streaming stdout/stderr line-by-line as events.
@@ -65,7 +70,8 @@ actor CLIRunner {
             let proc = Process()
             proc.executableURL = cli
             proc.arguments = args
-            proc.currentDirectoryURL = cwd
+            proc.currentDirectoryURL = OpenSKSCLIProcess.workingDirectory(for: cwd)
+            proc.environment = OpenSKSCLIProcess.environment(for: cwd)
             let outPipe = Pipe()
             let errPipe = Pipe()
             proc.standardOutput = outPipe
@@ -414,7 +420,8 @@ private final class EngineDaemonSession: @unchecked Sendable {
 
         process.executableURL = cli
         process.arguments = ["daemon", "--stdio", "--workspace", cwd.path]
-        process.currentDirectoryURL = cwd
+        process.currentDirectoryURL = OpenSKSCLIProcess.workingDirectory(for: cwd)
+        process.environment = OpenSKSCLIProcess.environment(for: cwd)
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
@@ -1054,7 +1061,13 @@ enum FileScanner {
     private static let skip: Set<String> = ["target", "node_modules", ".git", ".opensks", ".sneakoscope", ".build"]
     private static let secretMarkers = [".env", ".key", ".pem", ".p12", ".pfx", "id_rsa", "credentials", ".token", ".secret", "secret", ".keychain"]
 
-    static func scan(_ root: URL, depth: Int = 0) -> [FileNode] {
+    static func scan(_ root: URL, depth: Int = 0, maxNodes: Int = 600) -> [FileNode] {
+        var remaining = maxNodes
+        return scan(root, depth: depth, remaining: &remaining)
+    }
+
+    private static func scan(_ root: URL, depth: Int, remaining: inout Int) -> [FileNode] {
+        guard remaining > 0 else { return [] }
         guard depth < 6 else { return [] }
         let keys: [URLResourceKey] = [.isDirectoryKey]
         guard let items = try? FileManager.default.contentsOfDirectory(
@@ -1062,11 +1075,13 @@ enum FileScanner {
         ) else { return [] }
         var nodes: [FileNode] = []
         for url in items {
+            guard remaining > 0 else { break }
             let name = url.lastPathComponent
             let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
             if isDir && skip.contains(name) { continue }
+            remaining -= 1
             if isDir {
-                nodes.append(FileNode(id: url.path, name: name, isDir: true, children: scan(url, depth: depth + 1)))
+                nodes.append(FileNode(id: url.path, name: name, isDir: true, children: scan(url, depth: depth + 1, remaining: &remaining)))
             } else {
                 nodes.append(FileNode(id: url.path, name: name, isDir: false, children: nil))
             }
@@ -1094,11 +1109,11 @@ enum FileScanner {
 
 // MARK: - Proof artifact freshness
 
-struct ProofArtifactFingerprint: Equatable {
+struct ProofArtifactFingerprint: Equatable, Sendable {
     let files: [ProofArtifactFileFingerprint]
 }
 
-struct ProofArtifactFileFingerprint: Equatable {
+struct ProofArtifactFileFingerprint: Equatable, Sendable {
     let relativePath: String
     let exists: Bool
     let isDirectory: Bool
@@ -1157,14 +1172,16 @@ enum ProofArtifactMonitor {
             )
         }
 
-        let data = (try? Data(contentsOf: url)) ?? Data()
+        let attributes = (try? fileManager.attributesOfItem(atPath: url.path)) ?? [:]
+        let byteCount = (attributes[.size] as? NSNumber)?.intValue ?? 0
+        let modifiedAt = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
         return ProofArtifactFileFingerprint(
             relativePath: relativePath,
             exists: true,
             isDirectory: false,
-            byteCount: data.count,
+            byteCount: byteCount,
             childCount: 0,
-            contentHash: hash(data: data)
+            contentHash: hash(strings: [String(byteCount), String(modifiedAt)])
         )
     }
 
@@ -1249,17 +1266,20 @@ final class AppState: ObservableObject {
     private var runTask: Task<Void, Never>?
     private var proofRefreshTask: Task<Void, Never>?
     private var lastProofArtifactFingerprint: ProofArtifactFingerprint?
+    private var workspaceSecurityScope: URL?
 
     init() {
-        var ws = FileManager.default.currentDirectoryPath
+        let fileManager = FileManager.default
+        let cwd = fileManager.currentDirectoryPath
+        var ws = cwd == "/" ? fileManager.homeDirectoryForCurrentUser.path : cwd
         var cliPath = ws + "/target/debug/opensks"
-        if let res = Bundle.main.resourceURL {
+        for res in Self.launchResourceDirectories() {
             if let txt = try? String(contentsOf: res.appendingPathComponent("workspace-path.txt"), encoding: .utf8) {
                 let trimmed = txt.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty { ws = trimmed }
             }
             let candidate = res.appendingPathComponent("opensks-cli")
-            if FileManager.default.fileExists(atPath: candidate.path) { cliPath = candidate.path }
+            if fileManager.fileExists(atPath: candidate.path) { cliPath = candidate.path }
         }
         let workspaceURL = URL(fileURLWithPath: ws, isDirectory: true)
         let cliURL = URL(fileURLWithPath: cliPath)
@@ -1268,7 +1288,77 @@ final class AppState: ObservableObject {
         self.editorStore = EditorWorkspaceStore(
             service: LiveEditorFileService(cli: cliURL, workspace: workspaceURL)
         )
-        self.fileRoots = FileScanner.scan(workspaceURL)
+        refreshFileRoots()
+    }
+
+    deinit {
+        workspaceSecurityScope?.stopAccessingSecurityScopedResource()
+    }
+
+    func refreshFileRoots() {
+        self.fileRoots = []
+        let workspaceForScan = workspace
+        Task { [weak self] in
+            let roots = await Task.detached(priority: .utility) {
+                FileScanner.scan(workspaceForScan)
+            }.value
+            guard let self, self.workspace == workspaceForScan else { return }
+            self.fileRoots = roots
+        }
+    }
+
+    func requestWorkspaceAccess() {
+        let panel = NSOpenPanel()
+        panel.title = "Open Workspace"
+        panel.prompt = "Allow"
+        panel.message = "Choose the active OpenSKS workspace folder."
+        panel.directoryURL = Self.workspaceAccessPanelDirectory(for: workspace)
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+
+        guard panel.runModal() == .OK, let selected = panel.url else { return }
+
+        let selectedPath = selected.standardizedFileURL.resolvingSymlinksInPath().path
+        let workspacePath = workspace.standardizedFileURL.resolvingSymlinksInPath().path
+        guard selectedPath == workspacePath else {
+            loadError = "selected folder is not the active workspace"
+            return
+        }
+
+        workspaceSecurityScope?.stopAccessingSecurityScopedResource()
+        workspaceSecurityScope = selected.startAccessingSecurityScopedResource() ? selected : nil
+        loadError = nil
+        append(RunLine(text: "[workspace] access refreshed for \(workspace.path)", kind: .info))
+        refreshFileRoots()
+        loadData()
+        connectEngine()
+    }
+
+    static func workspaceAccessPanelDirectory(for workspace: URL) -> URL {
+        workspace.deletingLastPathComponent()
+    }
+
+    private static func launchResourceDirectories(bundle: Bundle = .main) -> [URL] {
+        var candidates: [URL] = []
+        if let resourceURL = bundle.resourceURL {
+            candidates.append(resourceURL)
+        }
+        candidates.append(bundle.bundleURL.appendingPathComponent("Contents/Resources", isDirectory: true))
+        if let executableURL = bundle.executableURL {
+            candidates.append(
+                executableURL
+                    .deletingLastPathComponent()
+                    .deletingLastPathComponent()
+                    .appendingPathComponent("Resources", isDirectory: true)
+            )
+        }
+        var seen = Set<String>()
+        return candidates.filter { url in
+            let path = url.standardizedFileURL.path
+            return seen.insert(path).inserted
+        }
     }
 
     /// Convert an absolute (or already-relative) path into a workspace-relative
@@ -1312,8 +1402,10 @@ final class AppState: ObservableObject {
                 return
             }
             do {
-                self.data = try JSONDecoder.opensks.decode(AppData.self, from: raw)
-                self.lastProofArtifactFingerprint = ProofArtifactMonitor.fingerprint(workspace: ws)
+                let data = try JSONDecoder.opensks.decode(AppData.self, from: raw)
+                let fingerprint = await Self.proofArtifactFingerprint(workspace: ws)
+                self.data = data
+                self.lastProofArtifactFingerprint = fingerprint
                 self.loadError = nil
             } catch {
                 self.loadError = "could not decode app-data: \(error.localizedDescription)"
@@ -1323,18 +1415,24 @@ final class AppState: ObservableObject {
 
     func startProofArtifactRefresh(intervalNanoseconds: UInt64 = 2_000_000_000) {
         guard proofRefreshTask == nil else { return }
-        lastProofArtifactFingerprint = ProofArtifactMonitor.fingerprint(workspace: workspace)
         proofRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            self.lastProofArtifactFingerprint = await Self.proofArtifactFingerprint(workspace: self.workspace)
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: intervalNanoseconds)
-                guard let self else { return }
-                let next = ProofArtifactMonitor.fingerprint(workspace: self.workspace)
+                let next = await Self.proofArtifactFingerprint(workspace: self.workspace)
                 if next != self.lastProofArtifactFingerprint {
                     self.lastProofArtifactFingerprint = next
                     self.loadData()
                 }
             }
         }
+    }
+
+    private static func proofArtifactFingerprint(workspace: URL) async -> ProofArtifactFingerprint {
+        await Task.detached(priority: .utility) {
+            ProofArtifactMonitor.fingerprint(workspace: workspace)
+        }.value
     }
 
     func stopProofArtifactRefresh() {

@@ -118,8 +118,9 @@ struct LiveDesignImportService: DesignImportService {
             let result = try await supervisor.run(ProcessSupervisor.Spec(
                 executable: cli,
                 arguments: args,
-                workingDirectory: workspace,
-                timeoutSeconds: 120
+                workingDirectory: OpenSKSCLIProcess.workingDirectory(for: workspace),
+                environment: OpenSKSCLIProcess.environmentOverlay(for: workspace),
+                timeoutSeconds: OpenSKSCLIProcess.commandTimeoutSeconds
             ))
             if result.timedOut {
                 throw DesignImportServiceError.transport(

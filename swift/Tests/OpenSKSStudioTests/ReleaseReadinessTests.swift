@@ -184,6 +184,20 @@ final class ReleaseReadinessTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testStatusBarRendersWorkspaceAccessRecoveryControl() throws {
+        let state = AppState()
+        state.loadError = "opensks-cli app-data returned no output"
+        let view = StatusBarView()
+            .environmentObject(state)
+            .frame(width: 900, height: 26)
+
+        XCTAssertNotNil(
+            ImageRenderer(content: view).nsImage,
+            "status bar must render the accessible workspace-access recovery control"
+        )
+    }
+
     // MARK: - Keyboard shortcuts help surface (PR-045)
 
     /// The discoverable shortcuts reference renders non-nil.

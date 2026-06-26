@@ -33,9 +33,12 @@ const DESIGN_SCREENSHOT_MODE: &str = "deterministic_local_raster_artifact";
 const DESIGN_SCREENSHOT_RENDERER: &str = "opensks_local_source_rasterizer_v1";
 const PROVIDER_KEYCHAIN_SERVICE: &str = "opensks-provider-credentials";
 const PROVIDER_HTTP_TRANSPORT: &str = "native_reqwest_blocking_http";
+pub const OPENSKS_WORKSPACE_ENV: &str = "OPENSKS_WORKSPACE";
 const OPEN_SKS_LOGO_SVG: &str = include_str!("../assets/opensks-logo.svg");
 #[cfg(target_os = "macos")]
 const SWIFT_PACKAGE_DIR_ENV: &str = "OPENSKS_SWIFT_PACKAGE_DIR";
+#[cfg(target_os = "macos")]
+const SWIFT_DISABLE_SANDBOX_ENV: &str = "OPENSKS_SWIFT_DISABLE_SANDBOX";
 #[cfg(target_os = "macos")]
 const SWIFT_STUDIO_PRODUCT: &str = "OpenSKSStudio";
 const PRD_SOURCE_LABEL: &str =
@@ -13453,6 +13456,38 @@ pub fn default_cwd() -> Result<PathBuf, OpenSksError> {
     Ok(env::current_dir()?)
 }
 
+#[cfg(test)]
+fn default_cli_cwd(args: &[String]) -> Result<PathBuf, OpenSksError> {
+    if let Some(value) = env::var_os(OPENSKS_WORKSPACE_ENV) {
+        let workspace = PathBuf::from(value);
+        if !workspace.as_os_str().is_empty() {
+            return Ok(workspace);
+        }
+    }
+    if let Some(workspace) = workspace_override_from_args(args) {
+        return Ok(workspace);
+    }
+    default_cwd()
+}
+
+#[cfg(test)]
+fn workspace_override_from_args(args: &[String]) -> Option<PathBuf> {
+    if args.first().is_some_and(|arg| arg == "app-data") {
+        return args
+            .get(1)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+    }
+
+    args.windows(2).find_map(|window| {
+        if window[0] == "--workspace" && !window[1].is_empty() {
+            Some(PathBuf::from(&window[1]))
+        } else {
+            None
+        }
+    })
+}
+
 pub fn native_app_bundle_path(cwd: &Path) -> PathBuf {
     cwd.join(OPEN_SKSDIR).join("macos").join("OpenSKS.app")
 }
@@ -13558,9 +13593,14 @@ fn compile_swift_app(cwd: &Path, output: &Path) -> Result<(), OpenSksError> {
         ClockStamp::now()?.compact_id()
     ));
     let _ = fs::remove_dir_all(&scratch_dir);
+    let disable_swift_sandbox = env::var_os(SWIFT_DISABLE_SANDBOX_ENV).is_some();
 
-    let build = process::Command::new("swift")
-        .arg("build")
+    let mut build_command = process::Command::new("swift");
+    build_command.arg("build");
+    if disable_swift_sandbox {
+        build_command.arg("--disable-sandbox");
+    }
+    let build = build_command
         .arg("--package-path")
         .arg(&package_dir)
         .arg("--configuration")
@@ -13579,8 +13619,12 @@ fn compile_swift_app(cwd: &Path, output: &Path) -> Result<(), OpenSksError> {
         )));
     }
 
-    let bin_path = process::Command::new("swift")
-        .arg("build")
+    let mut bin_path_command = process::Command::new("swift");
+    bin_path_command.arg("build");
+    if disable_swift_sandbox {
+        bin_path_command.arg("--disable-sandbox");
+    }
+    let bin_path = bin_path_command
         .arg("--package-path")
         .arg(&package_dir)
         .arg("--configuration")

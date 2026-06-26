@@ -120,7 +120,9 @@ struct LiveIntelligenceService: IntelligenceService {
                 ProcessSupervisor.Spec(
                     executable: cli,
                     arguments: args,
-                    workingDirectory: workspace
+                    workingDirectory: OpenSKSCLIProcess.workingDirectory(for: workspace),
+                    environment: OpenSKSCLIProcess.environmentOverlay(for: workspace),
+                    timeoutSeconds: OpenSKSCLIProcess.commandTimeoutSeconds
                 )
             )
             return ProcessResult(

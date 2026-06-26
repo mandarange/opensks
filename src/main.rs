@@ -1,4 +1,4 @@
-use std::process;
+use std::{path::PathBuf, process};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -7,7 +7,7 @@ fn main() {
     let cwd = match if double_click_launch {
         opensks::default_launch_cwd()
     } else {
-        opensks::default_cwd()
+        cli_cwd(&args)
     } {
         Ok(cwd) => cwd,
         Err(error) => {
@@ -54,4 +54,24 @@ fn main() {
             process::exit(code);
         }
     }
+}
+
+fn cli_cwd(args: &[String]) -> Result<PathBuf, opensks::OpenSksError> {
+    if let Some(value) = std::env::var_os(opensks::OPENSKS_WORKSPACE_ENV) {
+        let workspace = PathBuf::from(value);
+        if !workspace.as_os_str().is_empty() {
+            return Ok(workspace);
+        }
+    }
+    if args.first().is_some_and(|arg| arg == "app-data") {
+        if let Some(workspace) = args.get(1).filter(|value| !value.is_empty()) {
+            return Ok(PathBuf::from(workspace));
+        }
+    }
+    if let Some(workspace) = args.windows(2).find_map(|window| {
+        (window[0] == "--workspace" && !window[1].is_empty()).then(|| PathBuf::from(&window[1]))
+    }) {
+        return Ok(workspace);
+    }
+    opensks::default_cwd()
 }

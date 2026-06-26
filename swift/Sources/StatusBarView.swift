@@ -9,7 +9,7 @@ struct StatusBarView: View {
     var body: some View {
         HStack(spacing: 14) {
             Image(systemName: "folder").font(.system(size: 10)).foregroundStyle(Theme.muted)
-            Text(state.data?.workspaceLabel ?? "loading…")
+            Text(state.data?.workspaceLabel ?? (state.loadError == nil ? "loading…" : "workspace unavailable"))
                 .font(Theme.ui(10.5))
                 .foregroundStyle(Theme.muted)
                 .lineLimit(1)
@@ -19,6 +19,18 @@ struct StatusBarView: View {
                     .font(Theme.ui(10.5))
                     .foregroundStyle(Theme.coral)
                     .lineLimit(1)
+
+                Button {
+                    state.requestWorkspaceAccess()
+                } label: {
+                    Image(systemName: "folder.badge.gearshape")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.textSoft)
+                .accessibilityLabel("Grant workspace folder access")
+                .accessibilityIdentifier("status.workspace.access")
+                .help("Grant workspace folder access")
             }
 
             Spacer()

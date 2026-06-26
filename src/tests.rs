@@ -844,6 +844,43 @@ fn missing_goal_text_is_usage_error() {
     assert!(matches!(error, OpenSksError::Usage(_)));
 }
 
+#[test]
+fn workspace_override_uses_explicit_workspace_flag_before_process_cwd() {
+    let root = temp_workspace("workspace-flag-cwd");
+    let args = vec![
+        "provider".to_string(),
+        "registry-list".to_string(),
+        "--workspace".to_string(),
+        root.display().to_string(),
+    ];
+
+    assert_eq!(workspace_override_from_args(&args), Some(root));
+}
+
+#[test]
+fn workspace_override_uses_app_data_workspace_argument() {
+    let root = temp_workspace("app-data-cwd");
+    let args = vec!["app-data".to_string(), root.display().to_string()];
+
+    assert_eq!(workspace_override_from_args(&args), Some(root));
+}
+
+#[test]
+fn default_cli_cwd_prefers_workspace_environment() {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let root = temp_workspace("env-cwd");
+    unsafe {
+        env::set_var(OPENSKS_WORKSPACE_ENV, &root);
+    }
+    let cwd = default_cli_cwd(&["acceptance".to_string(), "audit".to_string()])
+        .expect("workspace env cwd");
+    unsafe {
+        env::remove_var(OPENSKS_WORKSPACE_ENV);
+    }
+
+    assert_eq!(cwd, root);
+}
+
 // macOS-only (compile_swift_app errs off macOS; ci-core is ubuntu, ci-macos-app covers it).
 #[cfg(target_os = "macos")]
 #[test]

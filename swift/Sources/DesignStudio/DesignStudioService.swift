@@ -189,8 +189,10 @@ struct LiveDesignStudioService: DesignStudioService {
                 ProcessSupervisor.Spec(
                     executable: cli,
                     arguments: args,
-                    workingDirectory: workspace,
-                    stdin: stdin
+                    workingDirectory: OpenSKSCLIProcess.workingDirectory(for: workspace),
+                    environment: OpenSKSCLIProcess.environmentOverlay(for: workspace),
+                    stdin: stdin,
+                    timeoutSeconds: OpenSKSCLIProcess.commandTimeoutSeconds
                 )
             )
             return ProcessResult(
