@@ -439,12 +439,14 @@ pub fn baseline_capability_report() -> RuntimeCapabilityReport {
             capability(
                 "stream.protocol",
                 "Engine stream protocol",
-                Degraded,
-                "daemon_explicit_terminal_marker_protocol_v2_missing",
+                Live,
+                "daemon_stream_protocol_v2_explicit_terminal_frames",
                 &[
                     "daemon:request_completed",
                     "swift:explicit-terminal-router",
                     "schema:engine-stream-frame",
+                    "test:request_response_ends_with_an_explicit_terminal_marker",
+                    "test:subscribe_events_emits_stream_v2_frames",
                 ],
                 &[],
             ),
@@ -566,6 +568,23 @@ mod tests {
             .find(|c| c.id == "agent.code_edit")
             .expect("agent.code_edit present");
         assert_eq!(code_edit.maturity, CapabilityMaturity::Foundation);
+        let stream = report
+            .capabilities
+            .iter()
+            .find(|c| c.id == "stream.protocol")
+            .expect("stream.protocol present");
+        assert_eq!(stream.maturity, CapabilityMaturity::Live);
+        assert_eq!(
+            stream.reason_code,
+            "daemon_stream_protocol_v2_explicit_terminal_frames"
+        );
+        assert!(
+            stream
+                .evidence_refs
+                .iter()
+                .any(|e| e == "schema:engine-stream-frame"),
+            "stream.protocol Live claim must be backed by the v2 frame schema"
+        );
         // Honesty milestone: NO baseline capability is a Simulation stand-in.
         assert!(
             report

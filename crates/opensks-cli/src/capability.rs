@@ -137,13 +137,15 @@ pub fn runtime_capability_report(
     }
 
     if let Some(cap) = capability_mut(&mut report, "stream.protocol") {
-        cap.maturity = opensks_contracts::CapabilityMaturity::Degraded;
+        cap.maturity = opensks_contracts::CapabilityMaturity::Live;
         cap.available = true;
-        cap.reason_code = "daemon_ndjson_explicit_terminal_protocol_v2_missing".to_string();
+        cap.reason_code = "daemon_stream_protocol_v2_explicit_terminal_frames".to_string();
         cap.evidence_refs = vec![
             "daemon:request_completed".to_string(),
             "swift:explicit-terminal-router".to_string(),
+            "schema:engine-stream-frame".to_string(),
             "test:request_response_ends_with_an_explicit_terminal_marker".to_string(),
+            "test:subscribe_events_emits_stream_v2_frames".to_string(),
         ];
     }
 

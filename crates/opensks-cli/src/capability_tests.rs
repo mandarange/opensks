@@ -89,9 +89,26 @@ fn capability_report_emits_valid_json_and_matrix() {
         .iter()
         .find(|c| c.id == "stream.protocol")
         .expect("stream.protocol");
+    assert_eq!(stream.maturity, opensks_contracts::CapabilityMaturity::Live);
+    assert!(stream.available);
+    assert_eq!(
+        stream.reason_code,
+        "daemon_stream_protocol_v2_explicit_terminal_frames"
+    );
     assert!(
         !stream.reason_code.contains("quiet_window"),
         "runtime capability truth must not preserve stale quiet-window reason"
+    );
+    assert!(
+        !stream.reason_code.contains("missing"),
+        "runtime capability truth must not claim stream v2 is missing after v2 frames landed"
+    );
+    assert!(
+        stream
+            .evidence_refs
+            .iter()
+            .any(|e| e == "schema:engine-stream-frame"),
+        "runtime capability truth must cite the v2 stream frame schema"
     );
     let matrix = run_capability_command(&["matrix".to_string()], &cwd).expect("matrix");
     assert!(matrix.stdout.contains("Runtime Truth Matrix"));
