@@ -543,9 +543,22 @@ struct EvidenceWorkspaceView: View {
     private func postureCard(_ gui: Gui) -> some View {
         card {
             VStack(alignment: .leading, spacing: Theme.s10) {
-                Text("Review posture")
-                    .font(Theme.ui(13, .semibold))
-                    .foregroundStyle(Theme.text)
+                HStack(spacing: Theme.s8) {
+                    Text("Review posture")
+                        .font(Theme.ui(13, .semibold))
+                        .foregroundStyle(Theme.text)
+                    Spacer(minLength: Theme.s8)
+                    Button {
+                        state.runSecurityAudit()
+                    } label: {
+                        Label("Run security audit", systemImage: "lock.shield")
+                    }
+                    .buttonStyle(.secondaryAction)
+                    .frame(maxWidth: 185)
+                    .disabled(state.isRunning)
+                    .accessibilityIdentifier("evidence.run.security-audit")
+                    .help("Run the security audit and refresh QA/security posture evidence.")
+                }
                 postureRow(label: "QA", status: gui.qaStatus, systemImage: "checklist")
                 postureRow(label: "Security", status: gui.securityStatus, systemImage: "lock.shield")
                 postureRow(

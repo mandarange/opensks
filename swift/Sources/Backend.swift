@@ -1893,6 +1893,10 @@ final class AppState: ObservableObject {
         runVerb(label: "provider adapter-check", args: ["provider", "adapter-check"])
     }
 
+    func runSecurityAudit() {
+        runVerb(label: "security audit", args: ["security", "audit"])
+    }
+
     func rebuildExecutionState(from events: [ExecutionEventEnvelope]) {
         executionStore.rebuild(from: events)
         objectWillChange.send()

@@ -1474,3 +1474,14 @@ Follow-up evidence: `cargo test provider_commands_write_zero_leak_registry_probe
 - migration: no data migration. UI/action surface only.
 - removal/deletion: none.
 - final evidence: after regenerating `.opensks/macos/OpenSKS.app`, Computer Use relaunched the app as `pid 2964`, opened Project -> Evidence, and found the Release proof card exposing a `Run release proof` button with help text `Run release proof and refresh signing, notarization, and artifact binding evidence.` Clicking it completed through the app UI, temporarily disabled release/provider run controls while running, and updated the status bar to `release proof exit 0` while preserving the honest `Not Verified` signing/notarization blocker state.
+
+### Cross-cutting - Evidence Security Audit Rerun Control
+
+- status: Verified
+- owner file/module: `swift/Sources/Backend.swift`, `swift/Sources/Runs/EvidenceWorkspaceView.swift`, `swift/Tests/OpenSKSStudioTests/ReleaseReadinessTests.swift`
+- current evidence: the Evidence workspace Review posture card surfaced QA/security status from app-data, but there was no direct control to rerun `security audit` from the same evidence surface after code, app-data, or local proof artifacts changed.
+- target change: add a named `AppState.runSecurityAudit()` helper and expose a disabled-while-running `Run security audit` button on the Review posture card. The button must use the existing `runVerb` path so audit output streams into the drawer and app-data reloads after the command finishes.
+- tests: `CLANG_MODULE_CACHE_PATH=/tmp/opensks-clang-module-cache MODULE_CACHE_DIR=/tmp/opensks-clang-module-cache swift test --disable-sandbox --package-path swift --scratch-path /tmp/opensks-swift-build-security-audit-button --filter OpenSKSStudioTests.ReleaseReadinessTests/testEvidenceWorkspaceRendersReleaseProofActions` passed. `cargo fmt --all --check`, `git diff --check`, and `cargo run -- security audit` passed; the audit wrote local security artifacts with 0 secret findings and 0 security findings.
+- migration: no data migration. UI/action surface only.
+- removal/deletion: none.
+- final evidence: after regenerating `.opensks/macos/OpenSKS.app`, Computer Use relaunched the app as `pid 29402`, opened Project -> Evidence, and found the Review posture card exposing a `Run security audit` button with help text `Run the security audit and refresh QA/security posture evidence.` Clicking it completed through the app UI, temporarily disabled proof run controls while running, and updated the status bar to `security audit exit 0` while preserving the honest `Security passed` posture from app-data.
