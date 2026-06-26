@@ -33,24 +33,41 @@ struct Acceptance: Codable, Sendable {
 
 struct ReleaseProofSummary: Codable, Sendable {
     let status: String
+    let sourceCommitSha: String?
+    let workspaceDirty: Bool
+    let artifactDigestGatePassed: Bool
+    let sameShaArtifactBinding: Bool
+    let missingArtifacts: [String]
     let blockers: [ReleaseProofBlocker]
     let remediationActions: [ReleaseRemediationAction]
     let signingEvidence: ReleaseSigningEvidence?
 
     init(
         status: String,
+        sourceCommitSha: String? = nil,
+        workspaceDirty: Bool = false,
+        artifactDigestGatePassed: Bool = false,
+        sameShaArtifactBinding: Bool = false,
+        missingArtifacts: [String] = [],
         blockers: [ReleaseProofBlocker],
         remediationActions: [ReleaseRemediationAction],
         signingEvidence: ReleaseSigningEvidence? = nil
     ) {
         self.status = status
+        self.sourceCommitSha = sourceCommitSha
+        self.workspaceDirty = workspaceDirty
+        self.artifactDigestGatePassed = artifactDigestGatePassed
+        self.sameShaArtifactBinding = sameShaArtifactBinding
+        self.missingArtifacts = missingArtifacts
         self.blockers = blockers
         self.remediationActions = remediationActions
         self.signingEvidence = signingEvidence
     }
 
     var hasEvidence: Bool {
-        status != "not_audited" || !blockers.isEmpty || !remediationActions.isEmpty || signingEvidence != nil
+        status != "not_audited" || sourceCommitSha != nil || workspaceDirty || artifactDigestGatePassed
+            || sameShaArtifactBinding || !missingArtifacts.isEmpty || !blockers.isEmpty || !remediationActions.isEmpty
+            || signingEvidence != nil
     }
 
     var displayStatus: String {

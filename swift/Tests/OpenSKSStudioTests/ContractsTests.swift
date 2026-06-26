@@ -845,6 +845,11 @@ final class ContractsTests: XCTestCase {
           },
           "release": {
             "status": "not_verified",
+            "source_commit_sha": "abc123def456",
+            "workspace_dirty": false,
+            "artifact_digest_gate_passed": true,
+            "same_sha_artifact_binding": true,
+            "missing_artifacts": [],
             "blockers": [
               {
                 "code": "signed_app_missing",
@@ -950,6 +955,11 @@ final class ContractsTests: XCTestCase {
 
         XCTAssertEqual(data.release?.status, "not_verified")
         XCTAssertEqual(data.release?.displayStatus, "Not Verified")
+        XCTAssertEqual(data.release?.sourceCommitSha, "abc123def456")
+        XCTAssertEqual(data.release?.workspaceDirty, false)
+        XCTAssertEqual(data.release?.artifactDigestGatePassed, true)
+        XCTAssertEqual(data.release?.sameShaArtifactBinding, true)
+        XCTAssertEqual(data.release?.missingArtifacts, [])
         XCTAssertEqual(data.release?.blockers.first?.code, "signed_app_missing")
         XCTAssertEqual(data.release?.remediationActions.first?.scope, "release_signing")
         XCTAssertEqual(data.release?.signingEvidence?.checked, true)

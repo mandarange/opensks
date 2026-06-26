@@ -356,6 +356,11 @@ struct NativeAcceptanceStatus {
 #[derive(Debug, Clone)]
 struct NativeReleaseStatus {
     status: String,
+    source_commit_sha: Option<String>,
+    workspace_dirty: bool,
+    artifact_digest_gate_passed: bool,
+    same_sha_artifact_binding: bool,
+    missing_artifacts: Vec<String>,
     blockers: Vec<NativeReleaseBlocker>,
     remediation_actions: Vec<NativeReleaseRemediationAction>,
     signing_evidence: Option<NativeReleaseSigningEvidence>,
@@ -2097,11 +2102,21 @@ fn render_native_release_json(release: &NativeReleaseStatus) -> String {
     format!(
         concat!(
             "{{\"status\": {status}, ",
+            "\"source_commit_sha\": {source_commit_sha}, ",
+            "\"workspace_dirty\": {workspace_dirty}, ",
+            "\"artifact_digest_gate_passed\": {artifact_digest_gate_passed}, ",
+            "\"same_sha_artifact_binding\": {same_sha_artifact_binding}, ",
+            "\"missing_artifacts\": {missing_artifacts}, ",
             "\"blockers\": {blockers}, ",
             "\"remediation_actions\": {actions}, ",
             "\"signing_evidence\": {signing_evidence}}}"
         ),
         status = json_string(&release.status),
+        source_commit_sha = render_optional_string_json(release.source_commit_sha.as_deref()),
+        workspace_dirty = release.workspace_dirty,
+        artifact_digest_gate_passed = release.artifact_digest_gate_passed,
+        same_sha_artifact_binding = release.same_sha_artifact_binding,
+        missing_artifacts = render_string_array_json(&release.missing_artifacts),
         blockers = render_native_release_blockers_json(&release.blockers),
         actions = render_native_release_actions_json(&release.remediation_actions),
         signing_evidence =
@@ -2182,6 +2197,15 @@ fn render_optional_i32_json(value: Option<i32>) -> String {
     value
         .map(|number| number.to_string())
         .unwrap_or_else(|| "null".to_string())
+}
+
+fn render_string_array_json(values: &[String]) -> String {
+    let items = values
+        .iter()
+        .map(|value| json_string(value))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{items}]")
 }
 
 fn run_scheduler_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
@@ -14452,6 +14476,11 @@ fn collect_native_release_status(workspace: &Path) -> NativeReleaseStatus {
     if raw.trim().is_empty() {
         return NativeReleaseStatus {
             status: "not_audited".to_string(),
+            source_commit_sha: None,
+            workspace_dirty: false,
+            artifact_digest_gate_passed: false,
+            same_sha_artifact_binding: false,
+            missing_artifacts: Vec::new(),
             blockers: Vec::new(),
             remediation_actions: Vec::new(),
             signing_evidence: None,
@@ -14460,6 +14489,11 @@ fn collect_native_release_status(workspace: &Path) -> NativeReleaseStatus {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return NativeReleaseStatus {
             status: "invalid".to_string(),
+            source_commit_sha: None,
+            workspace_dirty: false,
+            artifact_digest_gate_passed: false,
+            same_sha_artifact_binding: false,
+            missing_artifacts: Vec::new(),
             blockers: Vec::new(),
             remediation_actions: Vec::new(),
             signing_evidence: None,
@@ -14470,6 +14504,33 @@ fn collect_native_release_status(workspace: &Path) -> NativeReleaseStatus {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("not_audited")
         .to_string();
+    let source_commit_sha = value
+        .get("source_commit_sha")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let workspace_dirty = value
+        .get("workspace_dirty")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let artifact_digest_gate_passed = value
+        .get("artifact_digest_gate_passed")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let same_sha_artifact_binding = value
+        .get("same_sha_artifact_binding")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let missing_artifacts = value
+        .get("missing_artifacts")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     let blockers = value
         .get("blockers")
         .and_then(serde_json::Value::as_array)
@@ -14518,6 +14579,11 @@ fn collect_native_release_status(workspace: &Path) -> NativeReleaseStatus {
     let signing_evidence = collect_native_release_signing_evidence(value.get("signing_evidence"));
     NativeReleaseStatus {
         status,
+        source_commit_sha,
+        workspace_dirty,
+        artifact_digest_gate_passed,
+        same_sha_artifact_binding,
+        missing_artifacts,
         blockers,
         remediation_actions,
         signing_evidence,

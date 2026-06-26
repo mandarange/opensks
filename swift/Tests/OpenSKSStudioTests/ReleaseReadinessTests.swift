@@ -128,6 +128,11 @@ final class ReleaseReadinessTests: XCTestCase {
             acceptance: Acceptance(total: 23, passed: 22, partial: 1, failed: 0, goalComplete: false),
             release: ReleaseProofSummary(
                 status: "not_verified",
+                sourceCommitSha: "abc123def456",
+                workspaceDirty: false,
+                artifactDigestGatePassed: true,
+                sameShaArtifactBinding: true,
+                missingArtifacts: [],
                 blockers: [
                     ReleaseProofBlocker(
                         code: "signed_app_missing",

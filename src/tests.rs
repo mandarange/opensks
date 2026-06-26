@@ -2720,6 +2720,11 @@ fn app_data_exposes_release_proof_remediation_actions() {
         r#"{
           "schema": "opensks.release-proof.v1",
           "status": "not_verified",
+          "source_commit_sha": "abc123def456",
+          "workspace_dirty": false,
+          "artifact_digest_gate_passed": true,
+          "same_sha_artifact_binding": true,
+          "missing_artifacts": [],
           "blockers": [
             {
               "code": "signed_app_missing",
@@ -2759,6 +2764,17 @@ fn app_data_exposes_release_proof_remediation_actions() {
         serde_json::from_str(&output.stdout).expect("app-data json should parse");
 
     assert_eq!(json["release"]["status"], "not_verified");
+    assert_eq!(json["release"]["source_commit_sha"], "abc123def456");
+    assert_eq!(json["release"]["workspace_dirty"], false);
+    assert_eq!(json["release"]["artifact_digest_gate_passed"], true);
+    assert_eq!(json["release"]["same_sha_artifact_binding"], true);
+    assert_eq!(
+        json["release"]["missing_artifacts"]
+            .as_array()
+            .expect("missing artifacts array")
+            .len(),
+        0
+    );
     assert_eq!(json["release"]["blockers"][0]["code"], "signed_app_missing");
     assert_eq!(
         json["release"]["remediation_actions"][0]["scope"],

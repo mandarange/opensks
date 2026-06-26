@@ -199,6 +199,7 @@ struct EvidenceWorkspaceView: View {
                         }
                     }
                 }
+                releaseIntegritySection(release)
                 if let signingEvidence = release.signingEvidence {
                     releaseSigningEvidenceSection(signingEvidence)
                 }
@@ -216,6 +217,46 @@ struct EvidenceWorkspaceView: View {
         }
         .accessibilityIdentifier("evidence.release.card")
         .accessibilityElement(children: .contain)
+    }
+
+    private func releaseIntegritySection(_ release: ReleaseProofSummary) -> some View {
+        VStack(alignment: .leading, spacing: Theme.s8) {
+            Text("Integrity evidence")
+                .font(Theme.ui(11.5, .semibold))
+                .foregroundStyle(Theme.textSoft)
+            providerProofRow(label: "Source commit", value: release.sourceCommitSha ?? "unknown", systemImage: "number")
+            providerProofRow(label: "Workspace dirty", value: release.workspaceDirty ? "true" : "false", systemImage: "folder.badge.gearshape")
+            providerProofRow(label: "Digest gate", value: release.artifactDigestGatePassed ? "passed" : "not passed", systemImage: "checkmark.seal")
+            providerProofRow(label: "SHA binding", value: release.sameShaArtifactBinding ? "passed" : "not passed", systemImage: "link")
+            providerProofRow(label: "Missing artifacts", value: "\(release.missingArtifacts.count)", systemImage: "tray")
+            if !release.missingArtifacts.isEmpty {
+                ForEach(release.missingArtifacts, id: \.self) { artifact in
+                    releaseMissingArtifactRow(artifact)
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(
+            "Integrity evidence: workspace dirty \(release.workspaceDirty ? "true" : "false"), digest gate \(release.artifactDigestGatePassed ? "passed" : "not passed"), SHA binding \(release.sameShaArtifactBinding ? "passed" : "not passed"), missing artifacts \(release.missingArtifacts.count)"
+        )
+    }
+
+    private func releaseMissingArtifactRow(_ artifact: String) -> some View {
+        HStack(alignment: .top, spacing: Theme.s10) {
+            Image(systemName: "tray.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.partial)
+                .frame(width: 16, height: 18)
+            Text(artifact)
+                .font(Theme.mono(11.5))
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Missing artifact: \(artifact)")
     }
 
     private func releaseBlockerRow(_ blocker: ReleaseProofBlocker) -> some View {
