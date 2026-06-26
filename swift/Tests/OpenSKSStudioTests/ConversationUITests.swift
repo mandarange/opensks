@@ -21,7 +21,7 @@ final class ConversationUITests: XCTestCase {
             id: id,
             projectId: "mock-project",
             title: title,
-            titleSource: "manual",
+            titleSource: .generated,
             status: status,
             pinned: pinned,
             archived: archived,
@@ -67,16 +67,61 @@ final class ConversationUITests: XCTestCase {
 
     func testSummaryDecodesSnakeCaseWireContract() throws {
         let json = """
-        {"schema":"opensks.conversation-summary.v1","id":"c1","project_id":"p1","title":"Hello","title_source":"manual","status":"running","pinned":true,"archived":false,"message_count":3,"created_at_ms":10,"updated_at_ms":20,"last_message_at_ms":25}
+        {"schema":"opensks.conversation-summary.v1","id":"c1","project_id":"p1","title":"Hello","title_source":"generated","status":"running","pinned":true,"archived":false,"message_count":3,"created_at_ms":10,"updated_at_ms":20,"last_message_at_ms":25}
         """
         let decoded = try JSONDecoder.opensks.decode(ConversationSummary.self, from: Data(json.utf8))
         XCTAssertEqual(decoded.id, "c1")
         XCTAssertEqual(decoded.projectId, "p1")
+        XCTAssertEqual(decoded.titleSource, .generated)
         XCTAssertEqual(decoded.status, .running)
         XCTAssertTrue(decoded.pinned)
         XCTAssertEqual(decoded.messageCount, 3)
         XCTAssertEqual(decoded.lastMessageAtMs, 25)
         XCTAssertEqual(decoded.activityMs, 25)
+    }
+
+    func testConversationSummaryDecodesAllRustWireStatuses() throws {
+        let statuses: [(String, ConversationStatus, String)] = [
+            ("idle", .idle, "Idle"),
+            ("queued", .queued, "Queued"),
+            ("running", .running, "Running"),
+            ("waiting_for_input", .waitingForInput, "Waiting for input"),
+            ("waiting_for_approval", .waitingForApproval, "Waiting for approval"),
+            ("failed", .failed, "Failed"),
+            ("completed", .completed, "Done")
+        ]
+        for (raw, expected, label) in statuses {
+            let json = """
+            {"schema":"opensks.conversation-summary.v1","id":"c-\(raw)","project_id":"p1","title":"\(raw)","title_source":"generated","status":"\(raw)","pinned":false,"archived":false,"message_count":0,"created_at_ms":1,"updated_at_ms":1,"last_message_at_ms":null}
+            """
+            let decoded = try JSONDecoder.opensks.decode(ConversationSummary.self, from: Data(json.utf8))
+            XCTAssertEqual(decoded.status, expected)
+            XCTAssertEqual(decoded.status.displayLabel, label)
+
+            let encoded = try JSONEncoder.opensks.encode(decoded)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            XCTAssertEqual(object["status"] as? String, raw)
+        }
+    }
+
+    func testConversationSummaryDecodesAllRustTitleSources() throws {
+        let titleSources: [(String, ConversationTitleSource)] = [
+            ("generated", .generated),
+            ("user", .user),
+            ("agent", .agent),
+            ("imported", .imported)
+        ]
+        for (raw, expected) in titleSources {
+            let json = """
+            {"schema":"opensks.conversation-summary.v1","id":"c-\(raw)","project_id":"p1","title":"\(raw)","title_source":"\(raw)","status":"idle","pinned":false,"archived":false,"message_count":0,"created_at_ms":1,"updated_at_ms":1,"last_message_at_ms":null}
+            """
+            let decoded = try JSONDecoder.opensks.decode(ConversationSummary.self, from: Data(json.utf8))
+            XCTAssertEqual(decoded.titleSource, expected)
+
+            let encoded = try JSONEncoder.opensks.encode(decoded)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            XCTAssertEqual(object["title_source"] as? String, raw)
+        }
     }
 
     func testUnknownEnumValuesFallBackInsteadOfThrowing() throws {
@@ -86,6 +131,28 @@ final class ConversationUITests: XCTestCase {
         let decoded = try JSONDecoder.opensks.decode(ConversationMessage.self, from: Data(json.utf8))
         XCTAssertEqual(decoded.role, .unknown)
         XCTAssertEqual(decoded.state, .unknown)
+    }
+
+    func testConversationMessageDecodesAllRustWireStates() throws {
+        let states: [(String, MessageState)] = [
+            ("draft", .draft),
+            ("queued", .queued),
+            ("streaming", .streaming),
+            ("complete", .complete),
+            ("failed", .failed),
+            ("cancelled", .cancelled)
+        ]
+        for (raw, expected) in states {
+            let json = """
+            {"schema":"opensks.conversation-message.v1","id":"m-\(raw)","project_id":"p1","conversation_id":"c1","turn_id":"t1","role":"assistant","state":"\(raw)","content_redacted":"\(raw)","sequence":1,"created_at_ms":1,"updated_at_ms":1}
+            """
+            let decoded = try JSONDecoder.opensks.decode(ConversationMessage.self, from: Data(json.utf8))
+            XCTAssertEqual(decoded.state, expected)
+
+            let encoded = try JSONEncoder.opensks.encode(decoded)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            XCTAssertEqual(object["state"] as? String, raw)
+        }
     }
 
     func testTimelineDecodesSnakeCaseWireContract() throws {

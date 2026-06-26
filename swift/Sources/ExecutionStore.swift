@@ -59,6 +59,8 @@ final class ExecutionStore: ObservableObject {
             run.state = "running"
         case .runCancelled:
             run.state = "cancelled"
+        case .runCompleted:
+            run.state = "completed"
         case .workItemRunning:
             run.state = "running"
         case .workItemCompleted, .verificationPassed:

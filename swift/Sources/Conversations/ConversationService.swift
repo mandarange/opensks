@@ -50,7 +50,9 @@ protocol ConversationService: Sendable {
 
     /// Ask the daemon turn supervisor to recover expired leases, claim at most
     /// one queued accepted turn, execute it, and persist its final projections.
-    func supervisorTick() async throws -> TurnSupervisorTickResult
+    /// Foreground sends pass their just-accepted run id so stale queued turns do
+    /// not delay the user's live Chat turn.
+    func supervisorTick(runID: String?) async throws -> TurnSupervisorTickResult
 
     /// Subscribe to a run's durable execution-event stream. Live chat uses this
     /// as the product path for incremental run progress; reloads only reconcile
@@ -74,6 +76,10 @@ protocol ConversationService: Sendable {
 }
 
 extension ConversationService {
+    func supervisorTick() async throws -> TurnSupervisorTickResult {
+        try await supervisorTick(runID: nil)
+    }
+
     func turnStart(
         conversationID: String,
         projectID: String,
@@ -144,6 +150,7 @@ struct LiveConversationService: ConversationService {
     let cli: URL
     let workspace: URL
     let engine = EngineProcess()
+    let supervisorEngine = EngineProcess()
     private static let chatSupervisorId = "swift-chat-supervisor"
     private static let chatSupervisorLeaseTtlMs: UInt64 = 30_000
 
@@ -293,14 +300,17 @@ struct LiveConversationService: ConversationService {
         )
     }
 
-    func supervisorTick() async throws -> TurnSupervisorTickResult {
+    func supervisorTick(runID: String? = nil) async throws -> TurnSupervisorTickResult {
         let requestId = "req-conversation-supervisor-\(UUID().uuidString)"
-        let result = await engine.conversationSupervisorTick(
+        // Keep foreground execution off the run-event subscription session so a
+        // long-poll stream cannot delay the user's just-sent Chat turn.
+        let result = await supervisorEngine.conversationSupervisorTick(
             cli: cli,
             cwd: workspace,
             requestId: requestId,
             supervisorId: Self.chatSupervisorId,
-            leaseTtlMs: Self.chatSupervisorLeaseTtlMs
+            leaseTtlMs: Self.chatSupervisorLeaseTtlMs,
+            runID: runID
         )
         if result.stream.exitCode != 0 {
             throw ConversationServiceError.nonZeroExit(
@@ -528,7 +538,7 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
             id: mintId("conv"),
             projectId: projectId,
             title: title.isEmpty ? "Untitled" : title,
-            titleSource: "manual",
+            titleSource: .generated,
             status: .idle,
             pinned: false,
             archived: false,
@@ -543,7 +553,7 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
     }
 
     func rename(id: String, title: String) async throws {
-        try mutate(id) { $0.with(title: title, titleSource: "manual", updatedAtMs: tick()) }
+        try mutate(id) { $0.with(title: title, titleSource: .user, updatedAtMs: tick()) }
     }
 
     func setPinned(id: String, pinned: Bool) async throws {
@@ -589,7 +599,7 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
             id: mintId("conv"),
             projectId: projectId,
             title: "\(source.title) (fork)",
-            titleSource: "fork",
+            titleSource: .generated,
             status: .idle,
             pinned: false,
             archived: false,
@@ -961,15 +971,23 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         return turn
     }
 
-    func supervisorTick() async throws -> TurnSupervisorTickResult {
-        withLock { supervisorTickLocked() }
+    func supervisorTick(runID: String? = nil) async throws -> TurnSupervisorTickResult {
+        withLock { supervisorTickLocked(runID: runID) }
     }
 
-    private func supervisorTickLocked() -> TurnSupervisorTickResult {
+    private func supervisorTickLocked(runID: String?) -> TurnSupervisorTickResult {
         supervisorTickCount += 1
         for conversationID in runsByConversation.keys.sorted() {
             var runs = runsByConversation[conversationID] ?? []
-            guard let runIndex = runs.firstIndex(where: { $0.runState == .queued || $0.runState == .running }) else {
+            let runIndex: Int?
+            if let runID {
+                runIndex = runs.firstIndex {
+                    $0.runId == runID && ($0.runState == .queued || $0.runState == .running)
+                }
+            } else {
+                runIndex = runs.firstIndex(where: { $0.runState == .queued || $0.runState == .running })
+            }
+            guard let runIndex else {
                 continue
             }
             let run = runs[runIndex]
@@ -1115,7 +1133,7 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
 private extension ConversationSummary {
     func with(
         title: String? = nil,
-        titleSource: String? = nil,
+        titleSource: ConversationTitleSource? = nil,
         status: ConversationStatus? = nil,
         pinned: Bool? = nil,
         archived: Bool? = nil,

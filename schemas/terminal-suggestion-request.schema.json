@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TerminalSuggestionRequest",
+  "type": "object",
+  "required": [
+    "cursor",
+    "cwd",
+    "include_ai",
+    "input",
+    "max_suggestions",
+    "request_id",
+    "schema"
+  ],
+  "properties": {
+    "context_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "cursor": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "cwd": {
+      "type": "string"
+    },
+    "include_ai": {
+      "type": "boolean"
+    },
+    "input": {
+      "type": "string"
+    },
+    "last_exit_code": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int32"
+    },
+    "max_suggestions": {
+      "type": "integer",
+      "format": "uint8",
+      "minimum": 0.0
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "shell": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

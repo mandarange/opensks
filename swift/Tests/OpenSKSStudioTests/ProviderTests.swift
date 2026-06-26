@@ -759,6 +759,32 @@ final class ProviderTests: XCTestCase {
         XCTAssertTrue(store.eligibleImageModels.map(\.id).contains("provider-1/image-model"))
     }
 
+    func testProviderStoreKeepsCodexLbSelectableAfterStaleDegradedProbe() async throws {
+        let service = RecordingProviderRegistryService()
+        service.state.providers = [
+            Self.providerRecord(
+                kind: .codexLB,
+                health: "degraded",
+                displayName: "codex-lb",
+                endpoint: "https://codex-lb.example.com/backend-api/codex",
+                reasonCode: "model_catalog_empty"
+            )
+        ]
+        service.state.models = [
+            Self.modelRecord(health: "unknown"),
+            Self.imageModelRecord(health: "unknown")
+        ]
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore(), service: service)
+
+        await store.refresh()
+
+        XCTAssertEqual(store.connections.first?.health, .degraded)
+        XCTAssertTrue(store.hasEligibleTextModel)
+        XCTAssertTrue(store.hasEligibleImageModel)
+        XCTAssertTrue(store.eligibleTextModels.map(\.id).contains("provider-1/code-model"))
+        XCTAssertTrue(store.eligibleImageModels.map(\.id).contains("provider-1/image-model"))
+    }
+
     func testProviderSecretRefDefaultsSchemaWhenDecodingOlderRecords() throws {
         let json = """
         {

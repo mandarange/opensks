@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TerminalMcpToolDescriptor",
+  "type": "object",
+  "required": [
+    "description",
+    "display_name",
+    "provider_available",
+    "requires_approval",
+    "risk",
+    "schema",
+    "tool_id"
+  ],
+  "properties": {
+    "description": {
+      "type": "string"
+    },
+    "display_name": {
+      "type": "string"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "input_schema_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provider_available": {
+      "type": "boolean"
+    },
+    "requires_approval": {
+      "type": "boolean"
+    },
+    "risk": {
+      "$ref": "#/definitions/TerminalRiskLevel"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "tool_id": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "TerminalRiskLevel": {
+      "type": "string",
+      "enum": [
+        "safe",
+        "caution",
+        "destructive",
+        "privileged",
+        "secret_exposure",
+        "network_mutation",
+        "unknown"
+      ]
+    }
+  }
+}

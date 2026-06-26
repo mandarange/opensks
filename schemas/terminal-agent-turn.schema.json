@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TerminalAgentTurnStartRequest",
+  "type": "object",
+  "required": [
+    "allow_auto_execute_safe_commands",
+    "allow_command_proposals",
+    "cwd",
+    "mode",
+    "prompt",
+    "schema",
+    "session_id",
+    "turn_id"
+  ],
+  "properties": {
+    "allow_auto_execute_safe_commands": {
+      "type": "boolean"
+    },
+    "allow_command_proposals": {
+      "type": "boolean"
+    },
+    "context_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "cwd": {
+      "type": "string"
+    },
+    "mode": {
+      "$ref": "#/definitions/TerminalAgentMode"
+    },
+    "prompt": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "turn_id": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "TerminalAgentMode": {
+      "type": "string",
+      "enum": [
+        "explain_only",
+        "suggest_commands",
+        "diagnose_failure",
+        "plan_then_suggest",
+        "unknown"
+      ]
+    }
+  }
+}

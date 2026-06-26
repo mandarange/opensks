@@ -407,7 +407,7 @@ final class RuntimeHardeningTests: XCTestCase {
             id: id,
             projectId: "mock-project",
             title: id,
-            titleSource: "manual",
+            titleSource: .generated,
             status: .idle,
             pinned: false,
             archived: false,

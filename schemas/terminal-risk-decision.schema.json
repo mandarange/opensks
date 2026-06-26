@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TerminalRiskDecision",
+  "type": "object",
+  "required": [
+    "command_redacted",
+    "decision",
+    "id",
+    "reason_code",
+    "requires_approval",
+    "risk",
+    "schema"
+  ],
+  "properties": {
+    "command_redacted": {
+      "type": "string"
+    },
+    "decision": {
+      "$ref": "#/definitions/TerminalExecutionDecision"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "id": {
+      "type": "string"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "requires_approval": {
+      "type": "boolean"
+    },
+    "risk": {
+      "$ref": "#/definitions/TerminalRiskLevel"
+    },
+    "schema": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "TerminalExecutionDecision": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "warn",
+        "require_approval",
+        "block",
+        "unknown"
+      ]
+    },
+    "TerminalRiskLevel": {
+      "type": "string",
+      "enum": [
+        "safe",
+        "caution",
+        "destructive",
+        "privileged",
+        "secret_exposure",
+        "network_mutation",
+        "unknown"
+      ]
+    }
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TerminalSuggestion",
+  "type": "object",
+  "required": [
+    "confidence",
+    "description",
+    "display",
+    "id",
+    "replacement",
+    "requires_approval",
+    "risk",
+    "schema",
+    "source"
+  ],
+  "properties": {
+    "confidence": {
+      "type": "number",
+      "format": "float"
+    },
+    "description": {
+      "type": "string"
+    },
+    "display": {
+      "type": "string"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "id": {
+      "type": "string"
+    },
+    "replacement": {
+      "type": "string"
+    },
+    "requires_approval": {
+      "type": "boolean"
+    },
+    "risk": {
+      "$ref": "#/definitions/TerminalRiskLevel"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/definitions/TerminalSuggestionSource"
+    }
+  },
+  "definitions": {
+    "TerminalRiskLevel": {
+      "type": "string",
+      "enum": [
+        "safe",
+        "caution",
+        "destructive",
+        "privileged",
+        "secret_exposure",
+        "network_mutation",
+        "unknown"
+      ]
+    },
+    "TerminalSuggestionSource": {
+      "type": "string",
+      "enum": [
+        "shell_history",
+        "completion",
+        "project_catalog",
+        "file_path",
+        "open_sks_context",
+        "provider",
+        "fallback",
+        "unknown"
+      ]
+    }
+  }
+}

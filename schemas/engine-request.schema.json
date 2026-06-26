@@ -193,7 +193,13 @@
         "approval_request",
         "approval_approve",
         "approval_deny",
-        "outbox_dispatch"
+        "outbox_dispatch",
+        "terminal_session_start",
+        "terminal_session_input",
+        "terminal_session_resize",
+        "terminal_session_stop",
+        "terminal_suggestion_request",
+        "terminal_agent_turn_start"
       ]
     },
     "EngineRequestParams": {
@@ -300,6 +306,66 @@
             "string",
             "null"
           ]
+        },
+        "terminal_agent_turn_start": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TerminalAgentTurnStartRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "terminal_session_input": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TerminalSessionInputRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "terminal_session_resize": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TerminalSessionResizeRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "terminal_session_start": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TerminalSessionStartRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "terminal_session_stop": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TerminalSessionStopRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "terminal_suggestion_request": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TerminalSuggestionRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -354,6 +420,271 @@
         "deep",
         "maximum"
       ]
+    },
+    "TerminalAgentMode": {
+      "type": "string",
+      "enum": [
+        "explain_only",
+        "suggest_commands",
+        "diagnose_failure",
+        "plan_then_suggest",
+        "unknown"
+      ]
+    },
+    "TerminalAgentTurnStartRequest": {
+      "type": "object",
+      "required": [
+        "allow_auto_execute_safe_commands",
+        "allow_command_proposals",
+        "cwd",
+        "mode",
+        "prompt",
+        "schema",
+        "session_id",
+        "turn_id"
+      ],
+      "properties": {
+        "allow_auto_execute_safe_commands": {
+          "type": "boolean"
+        },
+        "allow_command_proposals": {
+          "type": "boolean"
+        },
+        "context_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/definitions/TerminalAgentMode"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "turn_id": {
+          "type": "string"
+        }
+      }
+    },
+    "TerminalEnvPolicy": {
+      "type": "string",
+      "enum": [
+        "minimal",
+        "inherit_safe",
+        "deny_secrets",
+        "unknown"
+      ]
+    },
+    "TerminalInputKind": {
+      "type": "string",
+      "enum": [
+        "user_command",
+        "raw_bytes",
+        "agent_proposed_command",
+        "control",
+        "unknown"
+      ]
+    },
+    "TerminalSessionInputRequest": {
+      "type": "object",
+      "required": [
+        "input_kind",
+        "schema",
+        "session_id",
+        "text"
+      ],
+      "properties": {
+        "approved_risk_decision_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input_kind": {
+          "$ref": "#/definitions/TerminalInputKind"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "TerminalSessionResizeRequest": {
+      "type": "object",
+      "required": [
+        "cols",
+        "rows",
+        "schema",
+        "session_id"
+      ],
+      "properties": {
+        "cols": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "schema": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      }
+    },
+    "TerminalSessionStartRequest": {
+      "type": "object",
+      "required": [
+        "cols",
+        "cwd",
+        "env_policy",
+        "rows",
+        "schema",
+        "session_id",
+        "started_by"
+      ],
+      "properties": {
+        "cols": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "env_policy": {
+          "$ref": "#/definitions/TerminalEnvPolicy"
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "schema": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "shell": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started_by": {
+          "$ref": "#/definitions/TerminalSessionStarter"
+        }
+      }
+    },
+    "TerminalSessionStarter": {
+      "type": "string",
+      "enum": [
+        "user",
+        "swift_ui",
+        "cli",
+        "agent",
+        "test",
+        "unknown"
+      ]
+    },
+    "TerminalSessionStopRequest": {
+      "type": "object",
+      "required": [
+        "reason_code",
+        "schema",
+        "session_id"
+      ],
+      "properties": {
+        "reason_code": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      }
+    },
+    "TerminalSuggestionRequest": {
+      "type": "object",
+      "required": [
+        "cursor",
+        "cwd",
+        "include_ai",
+        "input",
+        "max_suggestions",
+        "request_id",
+        "schema"
+      ],
+      "properties": {
+        "context_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cursor": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "include_ai": {
+          "type": "boolean"
+        },
+        "input": {
+          "type": "string"
+        },
+        "last_exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "max_suggestions": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "shell": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "TurnContextSelection": {
       "description": "Context the user explicitly selected for this turn (files, ranges, symbols, diffs, etc.), carried as opaque refs the context assembler resolves.",

@@ -2534,6 +2534,56 @@ mod tests {
     }
 
     #[test]
+    fn applied_patch_is_preserved_but_failure_is_reported_when_final_message_missing() {
+        let ws = temp_workspace("missing-final");
+        let mut driver = FnDriver::new(|obs: &[ToolResult], step: usize| match step {
+            0 => AgentStep::Tools(vec![ToolCall::ProposePatch {
+                path: "RESULT.md".to_string(),
+                content: "ok\n".to_string(),
+            }]),
+            _ => {
+                assert!(matches!(
+                    obs.first(),
+                    Some(ToolResult::Wrote { applied: true, .. })
+                ));
+                AgentStep::Failed {
+                    code: "provider_call_failed".to_string(),
+                    message: "The model call failed: provider response had no message content"
+                        .to_string(),
+                    retryable: true,
+                }
+            }
+        });
+        let sink = CollectingSink::new();
+        let outcome =
+            run_agentic_loop(&request(&ws), &mut driver, &AgenticConfig::default(), &sink).unwrap();
+
+        assert_eq!(outcome.final_state, RunProjectionState::Failed);
+        assert_eq!(outcome.apply_results.len(), 1);
+        assert!(outcome.apply_results[0].applied);
+        assert_eq!(
+            std::fs::read_to_string(ws.join("RESULT.md")).unwrap(),
+            "ok\n"
+        );
+        assert!(
+            outcome
+                .assistant_text
+                .contains("provider response had no message content")
+        );
+        let events = sink.events();
+        assert!(!events.iter().any(|event| {
+            event.kind == AgentEventKind::Warning && event.payload["recovered"] == true
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == AgentEventKind::Error
+                && event.payload["message"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("provider response had no message content"))
+        }));
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
     fn exhausting_the_step_budget_is_an_honest_failure() {
         // A driver that never finishes must NOT silently "complete" — the loop
         // stops at the budget and reports a failure (directive §0.4).

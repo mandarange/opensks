@@ -15,6 +15,8 @@ use opensks_contracts::{
 use opensks_stream::{StreamFramer, encode_frame};
 use thiserror::Error;
 
+mod terminal;
+
 #[derive(Debug, Clone)]
 pub struct DaemonOptions {
     pub workspace: PathBuf,
@@ -468,6 +470,11 @@ fn request_lines(
         lines.push(serde_json::to_string(&request_completed_event(request_id))?);
         return Ok(lines);
     }
+    if let Some((request_id, mut lines)) = terminal::terminal_request_lines(&raw_request, options)?
+    {
+        lines.push(serde_json::to_string(&request_completed_event(request_id))?);
+        return Ok(lines);
+    }
     let request = match serde_json::from_value::<EngineRequest>(raw_request) {
         Ok(request) => request,
         // An unparseable request has no id to correlate a terminal marker to; the
@@ -577,6 +584,20 @@ fn request_lines(
                 error,
             ))?],
         },
+        EngineRequestKind::TerminalSessionStart
+        | EngineRequestKind::TerminalSessionInput
+        | EngineRequestKind::TerminalSessionResize
+        | EngineRequestKind::TerminalSessionStop
+        | EngineRequestKind::TerminalSuggestionRequest
+        | EngineRequestKind::TerminalAgentTurnStart => {
+            match terminal::terminal_engine_request_lines(&request, options) {
+                Ok(terminal_lines) => terminal_lines,
+                Err(error) => vec![serde_json::to_string(&run_start_error_event(
+                    Some(request_id.clone()),
+                    error,
+                ))?],
+            }
+        }
     };
 
     let mut lines = body;
@@ -1457,7 +1478,7 @@ fn project_subscription_events_to_timeline(
     events: &[opensks_contracts::ExecutionEventEnvelope],
     rebuild: bool,
 ) -> Result<(), DaemonError> {
-    if events.is_empty() && !rebuild {
+    if events.is_empty() {
         return Ok(());
     }
     if !workspace
@@ -1898,7 +1919,8 @@ fn apply_live_objective_planner_directive(
     let Some(dispatch) = prepare_objective_planner_provider_dispatch(workspace)? else {
         return Ok(None);
     };
-    let completer = opensks_adapter::OpenAiCompatibleChatCompleter::new(
+    let completer = opensks_adapter::ProviderChatCompleter::new_for_provider(
+        dispatch.connection.kind,
         dispatch.connection.endpoint.base_url.clone(),
         dispatch.bearer_token.clone(),
     )
@@ -2325,7 +2347,12 @@ fn conversation_supervisor_tick_lines(
     let repo = opensks_conversation::ConversationRepository::open_workspace(&options.workspace)?;
     let now_ms = timestamp_ms();
     let recovered = repo.recover_expired_turn_supervisor_leases(now_ms)?;
-    let claimed = repo.claim_next_queued_turn(supervisor_id, lease_ttl_ms, now_ms)?;
+    let target_run_id = request.params.run_id.as_deref();
+    let claimed = if let Some(run_id) = target_run_id {
+        repo.claim_queued_turn_by_run_id(supervisor_id, run_id, lease_ttl_ms, now_ms)?
+    } else {
+        repo.claim_next_queued_turn(supervisor_id, lease_ttl_ms, now_ms)?
+    };
     let (claimed_json, executed_json) = match claimed {
         Some(lease) => {
             let executed =
@@ -2349,6 +2376,7 @@ fn conversation_supervisor_tick_lines(
         "schema": "opensks.turn-supervisor-tick.v1",
         "request_id": request.id,
         "supervisor_id": supervisor_id,
+        "target_run_id": target_run_id,
         "recovered_expired_leases": recovered,
         "claimed": claimed_json,
         "executed": executed_json,
@@ -2460,6 +2488,14 @@ fn execute_claimed_conversation_turn_inner(
         prompt: prompt.clone(),
     };
     let sink = DaemonAgentEventSink::open(workspace).map_err(|error| error.to_string())?;
+    let lease_heartbeat = TurnLeaseHeartbeatGuard::start(
+        repo,
+        workspace,
+        lease,
+        lease_ttl_ms,
+        Arc::clone(&cancellation_token),
+    )
+    .map_err(|error| format!("start turn lease heartbeat: {error}"))?;
     sink.emit_run_started(&request)
         .map_err(|error| error.to_string())?;
     if let Some(isolation) = execution_workspace.isolation.as_ref() {
@@ -2494,14 +2530,6 @@ fn execute_claimed_conversation_turn_inner(
         agentic_config: &agentic_config,
         now_ms,
     };
-    let lease_heartbeat = TurnLeaseHeartbeatGuard::start(
-        repo,
-        workspace,
-        lease,
-        lease_ttl_ms,
-        Arc::clone(&cancellation_token),
-    )
-    .map_err(|error| format!("start turn lease heartbeat: {error}"))?;
     let (outcome, mut final_routing_decision) = if prompt_requires_raw_content(&prompt) {
         opensks_adapter::AgentEventSink::emit(
             &sink,
@@ -3822,7 +3850,8 @@ fn execute_claimed_turn_role_model_call(
         );
     }
     let dispatch = prepare_role_provider_dispatch(context.workspace, item)?;
-    let completer = opensks_adapter::OpenAiCompatibleChatCompleter::new(
+    let completer = opensks_adapter::ProviderChatCompleter::new_for_provider(
+        dispatch.connection.kind,
         dispatch.connection.endpoint.base_url.clone(),
         dispatch.bearer_token.clone(),
     )
@@ -3894,7 +3923,8 @@ fn execute_claimed_turn_code_role_subcontract(
         .lease
         .as_ref()
         .map(opensks_adapter::PatchPathLease::from_scheduler_lease);
-    let completer = opensks_adapter::OpenAiCompatibleChatCompleter::new(
+    let completer = opensks_adapter::ProviderChatCompleter::new_for_provider(
+        dispatch.connection.kind,
         dispatch.connection.endpoint.base_url,
         dispatch.bearer_token,
     )
@@ -4568,7 +4598,8 @@ fn run_claimed_turn_adapter_workload(
         ) {
             Ok(dispatch) => {
                 final_routing_decision = dispatch.routing_decision.clone();
-                match opensks_adapter::OpenAiCompatibleChatCompleter::new(
+                match opensks_adapter::ProviderChatCompleter::new_for_provider(
+                    dispatch.connection.kind,
                     dispatch.connection.endpoint.base_url.clone(),
                     dispatch.bearer_token.clone(),
                 ) {
@@ -10367,6 +10398,56 @@ mod tests {
     }
 
     #[test]
+    fn terminal_suggestion_request_returns_suggestion_and_completion_marker() {
+        let workspace = temp_workspace("terminal-suggestion-request");
+        let request = serde_json::json!({
+            "schema": "opensks.engine-request.v1",
+            "id": "req-term-suggest",
+            "kind": "terminal_suggestion_request",
+            "protocol_version": "opensks.contracts.v1",
+            "params": {
+                "terminal_suggestion_request": {
+                    "schema": "opensks.terminal-suggestion-request.v1",
+                    "request_id": "req-term-suggest",
+                    "cwd": ".",
+                    "input": "git st",
+                    "cursor": 6,
+                    "max_suggestions": 5,
+                    "include_ai": false
+                }
+            }
+        });
+        let output = run_stdio(
+            &(request.to_string() + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("stdio");
+
+        assert!(output.contains("\"schema\":\"opensks.terminal-suggestion.v1\""));
+        assert!(output.contains("\"replacement\":\"git status\""));
+        assert!(output.contains("\"event_type\":\"request_completed\""));
+        let last = output
+            .lines()
+            .rfind(|line| !line.trim().is_empty())
+            .expect("last line");
+        assert!(last.contains("\"event_type\":\"request_completed\""));
+        assert!(last.contains("\"request_id\":\"req-term-suggest\""));
+        assert!(
+            workspace
+                .join(".opensks/runtime/terminal/suggestions/req-term-suggest.json")
+                .exists()
+        );
+        assert!(
+            workspace
+                .join(".opensks/runtime/terminal/mcp-tools.json")
+                .exists()
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
     fn streaming_stdio_routes_health_without_waiting_for_tail_subscribe_completion() {
         let workspace = std::env::temp_dir().join(format!(
             "opensks-daemon-stream-router-{}",
@@ -15872,6 +15953,62 @@ diff --git a/NOTE.md b/NOTE.md
                 .as_deref(),
             Some("queued"),
             "cursor-0 subscribe replay must rebuild from the event journal instead of trusting stale projection state"
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn empty_subscription_rebuild_does_not_demote_running_projection() {
+        let workspace = temp_workspace("subscribe-empty-rebuild-running");
+        let (project_id, conversation_id) = seed_conversation(&workspace);
+        let repo = ConversationRepository::open_workspace(&workspace).expect("repo");
+        let accepted = repo
+            .accept_conversation_turn(
+                &turn_start_request(
+                    &project_id,
+                    &conversation_id,
+                    "req-empty-subscribe-start",
+                    "idem-empty-subscribe-start",
+                ),
+                2_000,
+            )
+            .expect("turn accepted");
+        let claimed = repo
+            .claim_queued_turn_by_run_id(
+                "empty-subscribe-supervisor",
+                &accepted.run_id,
+                30_000,
+                2_010,
+            )
+            .expect("claim query")
+            .expect("run claimed");
+        assert_eq!(
+            repo.run_projection_state(&accepted.run_id)
+                .expect("running state")
+                .as_deref(),
+            Some("running")
+        );
+
+        project_subscription_events_to_timeline(&workspace, &accepted.run_id, &[], true)
+            .expect("empty rebuild is a no-op");
+
+        assert_eq!(
+            repo.run_projection_state(&accepted.run_id)
+                .expect("state after empty rebuild")
+                .as_deref(),
+            Some("running"),
+            "cursor-0 subscribe with no replayed events must not reset an active supervisor lease"
+        );
+        assert!(
+            repo.heartbeat_turn_supervisor_lease(
+                &claimed.run_id,
+                &claimed.lease_owner,
+                claimed.fencing_token,
+                30_000,
+                2_020,
+            )
+            .expect("heartbeat query"),
+            "empty subscription rebuild must leave the claimed lease heartbeatable"
         );
         let _ = std::fs::remove_dir_all(workspace);
     }

@@ -35,6 +35,16 @@
       "notes": "Merge-friendly shared project memory shards."
     },
     {
+      "path": ".opensks/wiki/records/terminal-command-catalog.md",
+      "plane": "shared_durable",
+      "git_tracking": "track",
+      "retention": "keep_until_superseded",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": false,
+      "allows_raw_provider_responses": false,
+      "notes": "Merge-friendly command catalog used by deterministic terminal suggestions."
+    },
+    {
       "path": ".opensks/history/runs/*/summary.json",
       "plane": "shared_durable",
       "git_tracking": "track",
@@ -107,6 +117,16 @@
       "notes": "Engine database, leases, sockets, and process-local state."
     },
     {
+      "path": ".opensks/runtime/terminal/",
+      "plane": "ephemeral_local",
+      "git_tracking": "ignore",
+      "retention": "gc_safe_after_inactive",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": true,
+      "allows_raw_provider_responses": false,
+      "notes": "Local terminal sessions, PTY state, command block digests, and suggestion cache. Raw transcripts must stay local-only."
+    },
+    {
       "path": ".opensks/cache/",
       "plane": "ephemeral_local",
       "git_tracking": "ignore",
@@ -145,6 +165,16 @@
       "allows_machine_absolute_paths": true,
       "allows_raw_provider_responses": true,
       "notes": "Local raw logs derived from structured events."
+    },
+    {
+      "path": ".opensks/logs/terminal/",
+      "plane": "local_durable",
+      "git_tracking": "ignore",
+      "retention": "bounded_retention",
+      "contains_secrets": false,
+      "allows_machine_absolute_paths": true,
+      "allows_raw_provider_responses": false,
+      "notes": "Local terminal logs derived from redacted structured events."
     },
     {
       "path": ".opensks/secrets/",

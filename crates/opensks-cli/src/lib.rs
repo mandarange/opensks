@@ -16,12 +16,14 @@ mod file_command;
 mod graph_command;
 mod provider_registry;
 mod retention;
+mod terminal_command;
 use conversation_args::{
     parse_conversation_filter, parse_conversation_options, parse_conversation_role,
     parse_timeline_kind, require_conversation_field,
 };
 pub use provider_registry::{is_registry_subcommand, run_provider_registry_command};
 pub use retention::{gc_usage, release_usage, run_gc_command, run_release_command};
+pub use terminal_command::{run_terminal_command, terminal_usage};
 
 const DEFAULT_WORKER_LEASE_TTL_SECONDS: u64 = 30;
 
@@ -2710,6 +2712,7 @@ struct CliProviderDispatchTarget {
     connection: opensks_contracts::ProviderConnection,
     model: opensks_contracts::ModelCatalogEntry,
     bearer_token: String,
+    routing_decision: opensks_contracts::RoutingDecision,
 }
 
 fn prepare_cli_provider_dispatch(
@@ -2746,6 +2749,7 @@ fn prepare_cli_provider_dispatch(
         connection,
         model,
         bearer_token,
+        routing_decision: decision,
     }))
 }
 
@@ -2812,6 +2816,90 @@ fn max_output_tokens_for_provider_model(model: &opensks_contracts::ModelCatalogE
         .clamp(1, u32::MAX as u64) as u32
 }
 
+fn persist_cli_routing_status(
+    repo: &opensks_conversation::ConversationRepository,
+    turn_id: &str,
+    mut decision: opensks_contracts::RoutingDecision,
+    status: opensks_contracts::RoutingStatus,
+    reason_code: &str,
+    now_ms: u64,
+) -> Result<opensks_contracts::RoutingDecision, CliError> {
+    decision.status = status;
+    decision.reason_code = reason_code.to_string();
+    if let Some(route_receipt) = decision.route_receipt.as_mut() {
+        route_receipt.reason_code = reason_code.to_string();
+    }
+    let decision_json = serde_json::to_string(&decision)
+        .map_err(|error| CliError::Invalid(format!("serialize routing decision: {error}")))?;
+    repo.set_turn_model_routing_decision(turn_id, &decision_json, now_ms)
+        .map_err(|error| CliError::Invalid(error.to_string()))?;
+    Ok(decision)
+}
+
+struct CliDispatchRecordingCompleter<C> {
+    inner: C,
+    workspace: PathBuf,
+    turn_id: String,
+    pending_decision: std::sync::Mutex<Option<opensks_contracts::RoutingDecision>>,
+}
+
+impl<C> CliDispatchRecordingCompleter<C> {
+    fn new(
+        inner: C,
+        workspace: PathBuf,
+        turn_id: String,
+        routing_decision: opensks_contracts::RoutingDecision,
+    ) -> Self {
+        Self {
+            inner,
+            workspace,
+            turn_id,
+            pending_decision: std::sync::Mutex::new(Some(routing_decision)),
+        }
+    }
+
+    fn record_dispatched_once(&self) -> Result<(), opensks_adapter::AgentAdapterError> {
+        let Some(decision) = self
+            .pending_decision
+            .lock()
+            .map_err(|_| {
+                opensks_adapter::AgentAdapterError::Provider(
+                    "provider dispatch state lock poisoned".to_string(),
+                )
+            })?
+            .take()
+        else {
+            return Ok(());
+        };
+        let repo = opensks_conversation::ConversationRepository::open_workspace(&self.workspace)
+            .map_err(|error| opensks_adapter::AgentAdapterError::Provider(error.to_string()))?;
+        let now_ms = now_unix_millis()
+            .map_err(|error| opensks_adapter::AgentAdapterError::Provider(error.to_string()))?;
+        persist_cli_routing_status(
+            &repo,
+            &self.turn_id,
+            decision,
+            opensks_contracts::RoutingStatus::Dispatched,
+            "provider_request_dispatched",
+            now_ms,
+        )
+        .map_err(|error| opensks_adapter::AgentAdapterError::Provider(error.to_string()))?;
+        Ok(())
+    }
+}
+
+impl<C: opensks_adapter::ChatCompleter> opensks_adapter::ChatCompleter
+    for CliDispatchRecordingCompleter<C>
+{
+    fn complete(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, opensks_adapter::AgentAdapterError> {
+        self.record_dispatched_once()?;
+        self.inner.complete(body)
+    }
+}
+
 /// Persist a user message and an assistant placeholder, start one deterministic
 /// engine run against the workspace, finalize the assistant message from the run
 /// result, link the run, and (when an idempotency key is supplied) record the
@@ -2855,7 +2943,7 @@ fn run_conversation_turn_start(
     let effective_settings_json = serde_json::to_string(&effective_settings)
         .map_err(|error| CliError::Invalid(format!("serialize turn settings: {error}")))?;
     let settings_digest = sha256_v1(&effective_settings_json);
-    let model_routing_decision = opensks_provider::routing_decision_from_turn_settings(
+    let mut model_routing_decision = opensks_provider::routing_decision_from_turn_settings(
         format!("route-{turn_id}"),
         &effective_settings,
     );
@@ -2939,11 +3027,27 @@ fn run_conversation_turn_start(
         .map(opensks_adapter::OpenRouterAdapter::new);
     let agentic_config = opensks_adapter::AgenticConfig::for_turn_settings(&effective_settings);
     let outcome = if let Some(dispatch) = provider_dispatch {
-        let completer = opensks_adapter::OpenAiCompatibleChatCompleter::new(
+        let dispatch_ready = persist_cli_routing_status(
+            repo,
+            &turn_id,
+            dispatch.routing_decision.clone(),
+            opensks_contracts::RoutingStatus::DispatchReady,
+            "provider_dispatch_ready",
+            now_ms,
+        )?;
+        model_routing_decision = dispatch_ready.clone();
+        let completer = opensks_adapter::ProviderChatCompleter::new_for_provider(
+            dispatch.connection.kind,
             dispatch.connection.endpoint.base_url.clone(),
             dispatch.bearer_token.clone(),
         )
         .map_err(|error| CliError::Invalid(format!("provider dispatch setup failed: {error}")))?;
+        let completer = CliDispatchRecordingCompleter::new(
+            completer,
+            workspace.to_path_buf(),
+            turn_id.clone(),
+            dispatch_ready,
+        );
         let mut driver = opensks_adapter::OpenRouterToolDriver::new(
             dispatch.model.remote_model_id.clone(),
             max_output_tokens_for_provider_model(&dispatch.model),
@@ -3011,6 +3115,11 @@ fn run_conversation_turn_start(
     }
     .map_err(|error| CliError::Invalid(format!("agent run failed: {error}")))?;
     let last_event_sequence = journal_sink.finish(&run_id)?;
+    let final_model_routing_decision = repo
+        .turn_model_routing_decision_json(&turn_id)
+        .map_err(|error| CliError::Invalid(error.to_string()))?
+        .and_then(|raw| serde_json::from_str::<opensks_contracts::RoutingDecision>(&raw).ok())
+        .unwrap_or_else(|| model_routing_decision.clone());
 
     use opensks_contracts::projection::RunProjectionState;
     let run_state = match outcome.final_state {
@@ -3092,7 +3201,7 @@ fn run_conversation_turn_start(
         "run_state": run_state,
         "stream_id": stream_id,
         "settings_digest": settings_digest,
-        "model_routing_decision": model_routing_decision,
+        "model_routing_decision": final_model_routing_decision,
         "last_event_sequence": last_event_sequence,
         "reused": false,
     }))
@@ -4902,6 +5011,9 @@ mod conversation_turn_tests;
 mod security_tests;
 
 #[cfg(test)]
+mod provider_dispatch_tests;
+
+#[cfg(test)]
 mod vault_tests;
 
 #[cfg(test)]
@@ -5892,89 +6004,6 @@ mod tests {
         );
         assert!(error.to_string().contains(provider_usage()));
         assert!(!root.join(".opensks").join("providers").exists());
-    }
-
-    #[test]
-    fn cli_provider_dispatch_parts_keep_provider_and_remote_model_separate() {
-        let root = temp_workspace("opensks-cli-provider-model-dispatch");
-        let repo =
-            opensks_provider::ProviderRepository::open_workspace(&root).expect("provider registry");
-        let connection = opensks_contracts::ProviderConnection {
-            schema: opensks_contracts::PROVIDER_CONNECTION_SCHEMA.to_string(),
-            id: "provider-1".to_string(),
-            kind: opensks_contracts::ProviderKind::CodexLb,
-            display_name: "codex-lb".to_string(),
-            enabled: true,
-            endpoint: opensks_contracts::ProviderEndpoint {
-                base_url: "https://codex.hyper-lab.xyz/backend-api/codex".to_string(),
-                allow_insecure_http: false,
-            },
-            auth: opensks_contracts::SecretRef {
-                schema: opensks_contracts::SECRET_REF_SCHEMA.to_string(),
-                store: opensks_contracts::SecretStoreKind::MacosKeychain,
-                service: "ai.opensks.provider.codex_lb".to_string(),
-                account: "provider-1".to_string(),
-                version: 1,
-            },
-            organization_ref: None,
-            project_ref: None,
-            health: opensks_contracts::ProviderHealthSnapshot::unknown(),
-            concurrency: opensks_contracts::ProviderConcurrencyPolicy {
-                max_concurrent_requests: 4,
-                requests_per_minute: None,
-                tokens_per_minute: None,
-            },
-            created_at_ms: 1,
-            updated_at_ms: 1,
-            revision: 1,
-        };
-        repo.upsert_connection(&connection, None, 1)
-            .expect("connection saved");
-
-        let mut role_scores = std::collections::BTreeMap::new();
-        role_scores.insert(
-            opensks_contracts::ModelRole::Code,
-            opensks_contracts::RoleScore {
-                score: 0.91,
-                evidence_refs: vec!["test-catalog".to_string()],
-            },
-        );
-        let model = opensks_contracts::ModelCatalogEntry {
-            schema: opensks_contracts::MODEL_CATALOG_ENTRY_SCHEMA.to_string(),
-            id: "provider-1/gpt-5.5".to_string(),
-            provider_id: "provider-1".to_string(),
-            remote_model_id: "openai/gpt-5.5".to_string(),
-            display_name: "GPT-5.5".to_string(),
-            enabled: true,
-            capabilities: opensks_contracts::ModelCapabilities::text_code(),
-            limits: opensks_contracts::ModelLimits {
-                max_input_tokens: Some(400_000),
-                max_output_tokens: Some(777),
-                requests_per_minute: None,
-                tokens_per_minute: None,
-                max_concurrency: Some(4),
-            },
-            pricing: None,
-            health: opensks_contracts::HealthState::Healthy,
-            role_scores,
-            catalog_revision: "catalog-rev-1".to_string(),
-        };
-        repo.sync_models("provider-1", &[model], 2)
-            .expect("models synced");
-
-        let (resolved_connection, resolved_model) =
-            cli_provider_dispatch_parts_for_model(&repo, "provider-1/gpt-5.5")
-                .expect("dispatch parts");
-        assert_eq!(resolved_connection.id, "provider-1");
-        assert_eq!(
-            resolved_connection.kind,
-            opensks_contracts::ProviderKind::CodexLb
-        );
-        assert_eq!(resolved_model.id, "provider-1/gpt-5.5");
-        assert_eq!(resolved_model.remote_model_id, "openai/gpt-5.5");
-        assert_eq!(max_output_tokens_for_provider_model(&resolved_model), 777);
-
-        fs::remove_dir_all(root).ok();
     }
 
     #[test]

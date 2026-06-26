@@ -1,0 +1,112 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TerminalSession",
+  "type": "object",
+  "required": [
+    "cols",
+    "cwd_redacted",
+    "env_policy",
+    "provider_available",
+    "rows",
+    "schema",
+    "session_id",
+    "started_at_ms",
+    "started_by",
+    "state"
+  ],
+  "properties": {
+    "cols": {
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "cwd_redacted": {
+      "type": "string"
+    },
+    "env_policy": {
+      "$ref": "#/definitions/TerminalEnvPolicy"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "local_transcript_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provider_available": {
+      "type": "boolean"
+    },
+    "rows": {
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "schema": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "shareable_summary_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "shell": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "started_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "started_by": {
+      "$ref": "#/definitions/TerminalSessionStarter"
+    },
+    "state": {
+      "$ref": "#/definitions/TerminalSessionState"
+    }
+  },
+  "definitions": {
+    "TerminalEnvPolicy": {
+      "type": "string",
+      "enum": [
+        "minimal",
+        "inherit_safe",
+        "deny_secrets",
+        "unknown"
+      ]
+    },
+    "TerminalSessionStarter": {
+      "type": "string",
+      "enum": [
+        "user",
+        "swift_ui",
+        "cli",
+        "agent",
+        "test",
+        "unknown"
+      ]
+    },
+    "TerminalSessionState": {
+      "type": "string",
+      "enum": [
+        "starting",
+        "running",
+        "stopped",
+        "failed",
+        "unknown"
+      ]
+    }
+  }
+}

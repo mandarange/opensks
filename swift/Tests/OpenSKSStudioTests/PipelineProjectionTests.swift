@@ -171,6 +171,16 @@ final class PipelineProjectionTests: XCTestCase {
         XCTAssertEqual(store.projection(for: "run-1")?.state, .cancelled)
     }
 
+    func testRunCompletedMarksTerminalCompletedAndIsSticky() {
+        let store = PipelineProjectionStore()
+        store.ingest(event(id: "e1", sequence: 1, kind: "run_started"))
+        store.ingest(event(id: "e2", sequence: 2, kind: "run_completed",
+                           payload: ["message": .string("run completed")]))
+        store.ingest(event(id: "e3", sequence: 3, kind: "work_item_running"))
+
+        XCTAssertEqual(store.projection(for: "run-1")?.state, .completed)
+    }
+
     func testSnapshotWithLowerStateCannotDowngradeFailedNode() {
         let store = PipelineProjectionStore()
         store.ingest(event(id: "e1", sequence: 1, kind: "verification_failed",

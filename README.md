@@ -46,6 +46,9 @@ cargo run -- provider usage
 cargo run -- provider adapter-check
 cargo run -- provider route code
 cargo run -- graph templates
+cargo run -- terminal smoke
+cargo run -- terminal suggest --input "git st" --cwd "$PWD"
+cargo run -- terminal agent "explain the last failing cargo test and suggest next commands"
 cargo run -- daemon --stdio --workspace "$PWD"
 printf '%s\n' '{"schema":"opensks.engine-request.v1","id":"req-run","kind":"run_start","protocol_version":"opensks.contracts.v1","params":{"pipeline_id":"single-model-safe","objective":"Smoke daemon graph run","run_id":"run-readme-daemon"}}' \
   | cargo run -- daemon --stdio --workspace "$PWD"
@@ -97,6 +100,13 @@ also accepts a typed `run_start` request that compiles a graph template or a
 workspace-relative `graph_path`, dispatches deterministic local worker leases
 through the event store, replays execution envelopes, and writes a scheduler
 snapshot;
+the terminal surface now exposes `opensks terminal smoke|start|suggest|agent|explain|history`
+and writes terminal runtime artifacts under `.opensks/runtime/terminal/`. The
+safe smoke path executes a bounded `printf`, `suggest` and `agent` return
+deterministic command proposals, and daemon stdio can route raw terminal
+session/suggestion/agent-turn request kinds while still ending each parseable
+request with `request_completed`. Persistent PTY sessions and live
+provider-backed terminal execution are not yet connected.
 the Composer's Engine action sends that request and applies returned execution
 envelopes to the Runs/Queue stores. The Swift app now owns a per-workspace
 long-lived daemon child process, writes health/run/control/approval/subscribe
@@ -134,6 +144,7 @@ UI. Use `opensks --help` for the CLI command list without launching the app.
 | Workspace contracts | `opensks-contracts` owns typed request/event/execution/work-item DTOs |
 | JSON schemas | Generated under `schemas/` with `cargo run -p xtask -- schemas`, including the data-plane manifest contract that records shared tracked paths and local/runtime-only paths |
 | Engine daemon | PR-004/006/009/014/017 foundation; persistent line-streaming stdio binary, bounded pending request routing, hello/health, `run_start` template or `graph_path`, `subscribe_events` replay/bounded tail, finite run control, finite approval, and outbox dispatch report streams |
+| AI Terminal | PTY-backed local smoke command, deterministic command suggestions, agent command proposals, redacted internal terminal history, MCP-like terminal descriptor artifact, and daemon raw-request routing for terminal session/suggestion/agent-turn NDJSON with explicit `request_completed`; persistent PTY registry, Swift terminal pane, and live provider-backed execution remain gated |
 | Event store | SQLite foundation via `opensks history init`; append/replay with evidence refs and snapshot tests cover PR-003 basics |
 | Model/provider registry | PR-005 foundation via `opensks-provider`; fake/local routing only, no live dispatch |
 | Durable scheduler / worker runtime | PR-006 foundation via `opensks-scheduler`; event-before-state simulation, deterministic local worker dispatch leases/reports, lease heartbeat/expiry/recovery reports, local worker bus/routing artifacts, and replay helpers, no live provider worker pool or live remote provider bus |

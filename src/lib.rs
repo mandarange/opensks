@@ -685,6 +685,7 @@ where
         "provider" => run_provider_command(&args[1..], cwd),
         "capability" => run_capability_command(&args[1..], cwd),
         "daemon" => run_daemon_command(&args[1..], cwd),
+        "terminal" => run_terminal_command(&args[1..], cwd),
         "updater" => run_updater_command(&args[1..], cwd),
         "acceptance" => run_acceptance_command(&args[1..], cwd),
         "app" => run_app_command(&args[1..], cwd),
@@ -734,6 +735,13 @@ pub fn run_daemon_stdio_stream(args: &[String], cwd: &Path) -> Result<(), OpenSk
 
 fn run_daemon_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
     let output = opensks_cli::run_daemon_command(args, cwd).map_err(convert_cli_error)?;
+    Ok(CliOutput {
+        stdout: output.stdout,
+    })
+}
+
+fn run_terminal_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
+    let output = opensks_cli::run_terminal_command(args, cwd).map_err(convert_cli_error)?;
     Ok(CliOutput {
         stdout: output.stdout,
     })
@@ -13751,6 +13759,7 @@ fn usage() -> &'static str {
         "  opensks auth\n",
         "  opensks provider list|probe|usage|adapter-check|route\n",
         "  opensks daemon --stdio --workspace <path>\n",
+        "  opensks terminal <command>\n",
         "  opensks updater plan\n",
         "  opensks acceptance audit\n",
         "  opensks app\n",

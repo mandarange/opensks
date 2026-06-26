@@ -318,6 +318,8 @@ struct PipelineProjectionReducer: Sendable {
             candidate = .paused
         case .runCancelled:
             candidate = .cancelled
+        case .runCompleted:
+            candidate = .completed
         case .snapshotWritten:
             // A snapshot may carry an explicit run state in its projection
             // payload. Honour it ONLY through the monotonic raise below — it

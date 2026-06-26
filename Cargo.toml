@@ -30,6 +30,8 @@ members = [
   "crates/opensks-retention",
   "crates/opensks-scheduler",
   "crates/opensks-stream",
+  "crates/opensks-terminal",
+  "crates/opensks-terminal-suggest",
   "crates/opensks-testkit",
   "crates/opensks-triwiki",
   "crates/opensks-vault",

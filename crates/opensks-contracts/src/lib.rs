@@ -60,6 +60,14 @@ pub const DATA_PLANE_MANIFEST_SCHEMA: &str = "opensks.data-plane-manifest.v1";
 pub const RETENTION_PLAN_SCHEMA: &str = "opensks.retention-plan.v1";
 pub const RELEASE_PROOF_SCHEMA: &str = "opensks.release-proof.v1";
 pub const PERF_STRESS_REPORT_SCHEMA: &str = "opensks.perf-stress-report.v1";
+pub const TERMINAL_SESSION_SCHEMA: &str = "opensks.terminal-session.v1";
+pub const TERMINAL_EVENT_SCHEMA: &str = "opensks.terminal-event.v1";
+pub const TERMINAL_COMMAND_BLOCK_SCHEMA: &str = "opensks.terminal-command-block.v1";
+pub const TERMINAL_SUGGESTION_REQUEST_SCHEMA: &str = "opensks.terminal-suggestion-request.v1";
+pub const TERMINAL_SUGGESTION_SCHEMA: &str = "opensks.terminal-suggestion.v1";
+pub const TERMINAL_AGENT_TURN_SCHEMA: &str = "opensks.terminal-agent-turn.v1";
+pub const TERMINAL_RISK_DECISION_SCHEMA: &str = "opensks.terminal-risk-decision.v1";
+pub const TERMINAL_MCP_TOOL_DESCRIPTOR_SCHEMA: &str = "opensks.terminal-mcp-tool-descriptor.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -81,6 +89,12 @@ pub enum EngineRequestKind {
     ApprovalApprove,
     ApprovalDeny,
     OutboxDispatch,
+    TerminalSessionStart,
+    TerminalSessionInput,
+    TerminalSessionResize,
+    TerminalSessionStop,
+    TerminalSuggestionRequest,
+    TerminalAgentTurnStart,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -262,6 +276,18 @@ pub struct EngineRequestParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_turn_start: Option<ConversationTurnStartRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_session_start: Option<TerminalSessionStartRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_session_input: Option<TerminalSessionInputRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_session_resize: Option<TerminalSessionResizeRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_session_stop: Option<TerminalSessionStopRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_suggestion_request: Option<TerminalSuggestionRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_agent_turn_start: Option<TerminalAgentTurnStartRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supervisor_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_ttl_ms: Option<u64>,
@@ -362,6 +388,17 @@ impl EngineRequest {
                 ..EngineRequestParams::default()
             },
         }
+    }
+
+    pub fn conversation_supervisor_tick_for_run(
+        id: impl Into<String>,
+        supervisor_id: impl Into<String>,
+        lease_ttl_ms: u64,
+        run_id: impl Into<String>,
+    ) -> Self {
+        let mut request = Self::conversation_supervisor_tick(id, supervisor_id, lease_ttl_ms);
+        request.params.run_id = Some(run_id.into());
+        request
     }
 
     pub fn integration_candidate_apply(
@@ -537,6 +574,464 @@ impl EngineRequest {
             },
         }
     }
+
+    pub fn terminal_session_start(
+        id: impl Into<String>,
+        request: TerminalSessionStartRequest,
+    ) -> Self {
+        Self {
+            schema: ENGINE_REQUEST_SCHEMA.to_string(),
+            id: id.into(),
+            kind: EngineRequestKind::TerminalSessionStart,
+            protocol_version: CONTRACT_VERSION.to_string(),
+            params: EngineRequestParams {
+                terminal_session_start: Some(request),
+                ..EngineRequestParams::default()
+            },
+        }
+    }
+
+    pub fn terminal_session_input(
+        id: impl Into<String>,
+        request: TerminalSessionInputRequest,
+    ) -> Self {
+        Self {
+            schema: ENGINE_REQUEST_SCHEMA.to_string(),
+            id: id.into(),
+            kind: EngineRequestKind::TerminalSessionInput,
+            protocol_version: CONTRACT_VERSION.to_string(),
+            params: EngineRequestParams {
+                terminal_session_input: Some(request),
+                ..EngineRequestParams::default()
+            },
+        }
+    }
+
+    pub fn terminal_session_resize(
+        id: impl Into<String>,
+        request: TerminalSessionResizeRequest,
+    ) -> Self {
+        Self {
+            schema: ENGINE_REQUEST_SCHEMA.to_string(),
+            id: id.into(),
+            kind: EngineRequestKind::TerminalSessionResize,
+            protocol_version: CONTRACT_VERSION.to_string(),
+            params: EngineRequestParams {
+                terminal_session_resize: Some(request),
+                ..EngineRequestParams::default()
+            },
+        }
+    }
+
+    pub fn terminal_session_stop(
+        id: impl Into<String>,
+        request: TerminalSessionStopRequest,
+    ) -> Self {
+        Self {
+            schema: ENGINE_REQUEST_SCHEMA.to_string(),
+            id: id.into(),
+            kind: EngineRequestKind::TerminalSessionStop,
+            protocol_version: CONTRACT_VERSION.to_string(),
+            params: EngineRequestParams {
+                terminal_session_stop: Some(request),
+                ..EngineRequestParams::default()
+            },
+        }
+    }
+
+    pub fn terminal_suggestion_request(
+        id: impl Into<String>,
+        request: TerminalSuggestionRequest,
+    ) -> Self {
+        Self {
+            schema: ENGINE_REQUEST_SCHEMA.to_string(),
+            id: id.into(),
+            kind: EngineRequestKind::TerminalSuggestionRequest,
+            protocol_version: CONTRACT_VERSION.to_string(),
+            params: EngineRequestParams {
+                terminal_suggestion_request: Some(request),
+                ..EngineRequestParams::default()
+            },
+        }
+    }
+
+    pub fn terminal_agent_turn_start(
+        id: impl Into<String>,
+        request: TerminalAgentTurnStartRequest,
+    ) -> Self {
+        Self {
+            schema: ENGINE_REQUEST_SCHEMA.to_string(),
+            id: id.into(),
+            kind: EngineRequestKind::TerminalAgentTurnStart,
+            protocol_version: CONTRACT_VERSION.to_string(),
+            params: EngineRequestParams {
+                terminal_agent_turn_start: Some(request),
+                ..EngineRequestParams::default()
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TerminalSession {
+    pub schema: String,
+    pub session_id: String,
+    pub cwd_redacted: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+    pub env_policy: TerminalEnvPolicy,
+    pub cols: u16,
+    pub rows: u16,
+    pub started_by: TerminalSessionStarter,
+    pub started_at_ms: u64,
+    pub state: TerminalSessionState,
+    pub provider_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_transcript_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shareable_summary_ref: Option<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalSessionState {
+    Starting,
+    Running,
+    Stopped,
+    Failed,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TerminalEvent {
+    pub schema: String,
+    pub event_id: String,
+    pub session_id: String,
+    pub event_kind: TerminalEventKind,
+    pub sequence: u64,
+    pub timestamp_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_block: Option<TerminalCommandBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_redacted: Option<String>,
+    pub redacted: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalEventKind {
+    SessionStarted,
+    SessionResized,
+    InputAccepted,
+    CommandStarted,
+    CommandFinished,
+    OutputDigest,
+    SuggestionCreated,
+    RiskDecisionRecorded,
+    AgentTurnStarted,
+    SessionStopped,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TerminalSessionStartRequest {
+    pub schema: String,
+    pub session_id: String,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+    pub env_policy: TerminalEnvPolicy,
+    pub cols: u16,
+    pub rows: u16,
+    pub started_by: TerminalSessionStarter,
+}
+
+impl TerminalSessionStartRequest {
+    pub fn normalized_cols(&self) -> u16 {
+        self.cols.clamp(20, 500)
+    }
+
+    pub fn normalized_rows(&self) -> u16 {
+        self.rows.clamp(5, 200)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TerminalSessionInputRequest {
+    pub schema: String,
+    pub session_id: String,
+    pub text: String,
+    pub input_kind: TerminalInputKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_risk_decision_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TerminalSessionResizeRequest {
+    pub schema: String,
+    pub session_id: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TerminalSessionStopRequest {
+    pub schema: String,
+    pub session_id: String,
+    pub reason_code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TerminalSuggestionRequest {
+    pub schema: String,
+    pub request_id: String,
+    pub cwd: String,
+    pub input: String,
+    pub cursor: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exit_code: Option<i32>,
+    pub max_suggestions: u8,
+    pub include_ai: bool,
+    #[serde(default)]
+    pub context_refs: Vec<String>,
+}
+
+impl TerminalSuggestionRequest {
+    pub fn normalized_max_suggestions(&self) -> u8 {
+        self.max_suggestions.clamp(1, 20)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TerminalSuggestion {
+    pub schema: String,
+    pub id: String,
+    pub replacement: String,
+    pub display: String,
+    pub description: String,
+    pub source: TerminalSuggestionSource,
+    pub confidence: f32,
+    pub risk: TerminalRiskLevel,
+    pub requires_approval: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TerminalCommandBlock {
+    pub schema: String,
+    pub block_id: String,
+    pub session_id: String,
+    pub cwd_redacted: String,
+    pub command_redacted: String,
+    pub started_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_digest: Option<String>,
+    pub redacted: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TerminalRiskDecision {
+    pub schema: String,
+    pub id: String,
+    pub command_redacted: String,
+    pub risk: TerminalRiskLevel,
+    pub decision: TerminalExecutionDecision,
+    pub reason_code: String,
+    pub requires_approval: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+impl TerminalRiskDecision {
+    pub fn default_for_risk(
+        id: impl Into<String>,
+        command_redacted: impl Into<String>,
+        risk: TerminalRiskLevel,
+    ) -> Self {
+        let decision = match &risk {
+            TerminalRiskLevel::Safe => TerminalExecutionDecision::Allow,
+            TerminalRiskLevel::Caution => TerminalExecutionDecision::Warn,
+            TerminalRiskLevel::SecretExposure => TerminalExecutionDecision::Block,
+            TerminalRiskLevel::Destructive
+            | TerminalRiskLevel::Privileged
+            | TerminalRiskLevel::NetworkMutation
+            | TerminalRiskLevel::Unknown => TerminalExecutionDecision::RequireApproval,
+        };
+        Self::new(
+            id,
+            command_redacted,
+            risk,
+            decision,
+            "terminal_risk_policy_default",
+        )
+    }
+
+    pub fn new(
+        id: impl Into<String>,
+        command_redacted: impl Into<String>,
+        risk: TerminalRiskLevel,
+        decision: TerminalExecutionDecision,
+        reason_code: impl Into<String>,
+    ) -> Self {
+        let requires_approval = risk.requires_approval_by_default()
+            || matches!(
+                &decision,
+                TerminalExecutionDecision::RequireApproval | TerminalExecutionDecision::Block
+            );
+        Self {
+            schema: TERMINAL_RISK_DECISION_SCHEMA.to_string(),
+            id: id.into(),
+            command_redacted: command_redacted.into(),
+            risk,
+            decision,
+            reason_code: reason_code.into(),
+            requires_approval,
+            evidence_refs: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TerminalAgentTurnStartRequest {
+    pub schema: String,
+    pub turn_id: String,
+    pub session_id: String,
+    pub cwd: String,
+    pub prompt: String,
+    pub mode: TerminalAgentMode,
+    pub allow_command_proposals: bool,
+    pub allow_auto_execute_safe_commands: bool,
+    #[serde(default)]
+    pub context_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TerminalMcpToolDescriptor {
+    pub schema: String,
+    pub tool_id: String,
+    pub display_name: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema_ref: Option<String>,
+    pub risk: TerminalRiskLevel,
+    pub requires_approval: bool,
+    pub provider_available: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalEnvPolicy {
+    Minimal,
+    InheritSafe,
+    DenySecrets,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalSessionStarter {
+    User,
+    SwiftUi,
+    Cli,
+    Agent,
+    Test,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalInputKind {
+    UserCommand,
+    RawBytes,
+    AgentProposedCommand,
+    Control,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalSuggestionSource {
+    ShellHistory,
+    Completion,
+    ProjectCatalog,
+    FilePath,
+    OpenSksContext,
+    Provider,
+    Fallback,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalRiskLevel {
+    Safe,
+    Caution,
+    Destructive,
+    Privileged,
+    SecretExposure,
+    NetworkMutation,
+    #[serde(other)]
+    Unknown,
+}
+
+impl TerminalRiskLevel {
+    pub fn requires_approval_by_default(&self) -> bool {
+        matches!(
+            self,
+            Self::Destructive
+                | Self::Privileged
+                | Self::SecretExposure
+                | Self::NetworkMutation
+                | Self::Unknown
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalExecutionDecision {
+    Allow,
+    Warn,
+    RequireApproval,
+    Block,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalAgentMode {
+    ExplainOnly,
+    SuggestCommands,
+    DiagnoseFailure,
+    PlanThenSuggest,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -3228,6 +3723,38 @@ pub fn schema_jsons() -> Result<Vec<(&'static str, String)>, serde_json::Error> 
             serde_json::to_string_pretty(&schema_for!(EngineEvent))?,
         ),
         (
+            "terminal-session.schema.json",
+            serde_json::to_string_pretty(&schema_for!(TerminalSession))?,
+        ),
+        (
+            "terminal-event.schema.json",
+            serde_json::to_string_pretty(&schema_for!(TerminalEvent))?,
+        ),
+        (
+            "terminal-command-block.schema.json",
+            serde_json::to_string_pretty(&schema_for!(TerminalCommandBlock))?,
+        ),
+        (
+            "terminal-suggestion-request.schema.json",
+            serde_json::to_string_pretty(&schema_for!(TerminalSuggestionRequest))?,
+        ),
+        (
+            "terminal-suggestion.schema.json",
+            serde_json::to_string_pretty(&schema_for!(TerminalSuggestion))?,
+        ),
+        (
+            "terminal-agent-turn.schema.json",
+            serde_json::to_string_pretty(&schema_for!(TerminalAgentTurnStartRequest))?,
+        ),
+        (
+            "terminal-risk-decision.schema.json",
+            serde_json::to_string_pretty(&schema_for!(TerminalRiskDecision))?,
+        ),
+        (
+            "terminal-mcp-tool-descriptor.schema.json",
+            serde_json::to_string_pretty(&schema_for!(TerminalMcpToolDescriptor))?,
+        ),
+        (
             "execution-event.schema.json",
             serde_json::to_string_pretty(&schema_for!(ExecutionEvent))?,
         ),
@@ -3871,6 +4398,23 @@ mod tests {
     }
 
     #[test]
+    fn conversation_supervisor_tick_for_run_request_roundtrips() {
+        let request = EngineRequest::conversation_supervisor_tick_for_run(
+            "req-supervisor-run",
+            "daemon-supervisor",
+            750,
+            "run-foreground",
+        );
+        let json = serde_json::to_string(&request).expect("supervisor tick request json");
+        assert!(json.contains("\"run_id\":\"run-foreground\""));
+        let decoded: EngineRequest =
+            serde_json::from_str(&json).expect("decode supervisor tick request");
+        assert_eq!(decoded.kind, EngineRequestKind::ConversationSupervisorTick);
+        assert_eq!(decoded.params.run_id.as_deref(), Some("run-foreground"));
+        assert_eq!(decoded.params.lease_ttl_ms, Some(750));
+    }
+
+    #[test]
     fn integration_candidate_apply_request_roundtrips() {
         let request = EngineRequest::integration_candidate_apply(
             "req-apply",
@@ -4434,6 +4978,139 @@ mod tests {
         assert_eq!(decoded.params.since_sequence, Some(7));
         assert_eq!(decoded.params.tail_ms, Some(250));
         assert_eq!(decoded.params.poll_interval_ms, Some(25));
+    }
+
+    #[test]
+    fn terminal_suggestion_roundtrip_preserves_required_fields() {
+        let suggestion = TerminalSuggestion {
+            schema: TERMINAL_SUGGESTION_SCHEMA.to_string(),
+            id: "suggestion-1".to_string(),
+            replacement: "cargo test -p opensks-contracts".to_string(),
+            display: "cargo test -p opensks-contracts".to_string(),
+            description: "Run the focused contract test package.".to_string(),
+            source: TerminalSuggestionSource::ProjectCatalog,
+            confidence: 0.92,
+            risk: TerminalRiskLevel::Safe,
+            requires_approval: false,
+            evidence_refs: vec!["catalog:contracts-tests".to_string()],
+        };
+
+        let json = serde_json::to_string(&suggestion).expect("serialize terminal suggestion");
+        assert!(json.contains("\"schema\":\"opensks.terminal-suggestion.v1\""));
+        assert!(json.contains("\"source\":\"project_catalog\""));
+        let decoded: TerminalSuggestion =
+            serde_json::from_str(&json).expect("decode terminal suggestion");
+        assert_eq!(decoded.id, "suggestion-1");
+        assert_eq!(decoded.replacement, "cargo test -p opensks-contracts");
+        assert_eq!(decoded.source, TerminalSuggestionSource::ProjectCatalog);
+        assert_eq!(decoded.risk, TerminalRiskLevel::Safe);
+        assert!(!decoded.requires_approval);
+        assert_eq!(decoded.evidence_refs, vec!["catalog:contracts-tests"]);
+    }
+
+    #[test]
+    fn terminal_session_start_normalizes_zero_size() {
+        let request = TerminalSessionStartRequest {
+            schema: TERMINAL_SESSION_SCHEMA.to_string(),
+            session_id: "terminal-1".to_string(),
+            cwd: "/workspace".to_string(),
+            shell: Some("zsh".to_string()),
+            env_policy: TerminalEnvPolicy::DenySecrets,
+            cols: 0,
+            rows: 0,
+            started_by: TerminalSessionStarter::SwiftUi,
+        };
+
+        assert_eq!(request.normalized_cols(), 20);
+        assert_eq!(request.normalized_rows(), 5);
+
+        let oversized = TerminalSessionStartRequest {
+            cols: 999,
+            rows: 999,
+            ..request
+        };
+        assert_eq!(oversized.normalized_cols(), 500);
+        assert_eq!(oversized.normalized_rows(), 200);
+    }
+
+    #[test]
+    fn terminal_request_kind_serializes_snake_case() {
+        let request = EngineRequest::terminal_session_start(
+            "req-terminal-start",
+            TerminalSessionStartRequest {
+                schema: TERMINAL_SESSION_SCHEMA.to_string(),
+                session_id: "terminal-1".to_string(),
+                cwd: "/workspace".to_string(),
+                shell: None,
+                env_policy: TerminalEnvPolicy::Minimal,
+                cols: 120,
+                rows: 32,
+                started_by: TerminalSessionStarter::Cli,
+            },
+        );
+
+        let json = serde_json::to_string(&request).expect("serialize terminal request");
+        assert!(json.contains("\"kind\":\"terminal_session_start\""));
+        assert!(json.contains("\"terminal_session_start\""));
+        let decoded: EngineRequest = serde_json::from_str(&json).expect("decode terminal request");
+        assert_eq!(decoded.kind, EngineRequestKind::TerminalSessionStart);
+        assert_eq!(
+            decoded
+                .params
+                .terminal_session_start
+                .as_ref()
+                .map(|payload| payload.started_by.clone()),
+            Some(TerminalSessionStarter::Cli)
+        );
+    }
+
+    #[test]
+    fn terminal_risk_decision_blocks_secret_exposure_by_default() {
+        let decision = TerminalRiskDecision::default_for_risk(
+            "risk-1",
+            "cat <redacted-secret-file>",
+            TerminalRiskLevel::SecretExposure,
+        );
+
+        assert_eq!(decision.schema, TERMINAL_RISK_DECISION_SCHEMA);
+        assert_eq!(decision.risk, TerminalRiskLevel::SecretExposure);
+        assert_eq!(decision.decision, TerminalExecutionDecision::Block);
+        assert!(decision.requires_approval);
+
+        let safe =
+            TerminalRiskDecision::default_for_risk("risk-2", "cargo fmt", TerminalRiskLevel::Safe);
+        assert_eq!(safe.decision, TerminalExecutionDecision::Allow);
+        assert!(!safe.requires_approval);
+    }
+
+    #[test]
+    fn terminal_enums_tolerate_unknown_labels() {
+        let source: TerminalSuggestionSource =
+            serde_json::from_str("\"future_completion_source\"").expect("decode source");
+        let mode: TerminalAgentMode =
+            serde_json::from_str("\"future_agent_mode\"").expect("decode mode");
+        assert_eq!(source, TerminalSuggestionSource::Unknown);
+        assert_eq!(mode, TerminalAgentMode::Unknown);
+    }
+
+    #[test]
+    fn terminal_schemas_are_generated() {
+        let schemas = schema_jsons().expect("schemas");
+        for expected in [
+            "terminal-session.schema.json",
+            "terminal-event.schema.json",
+            "terminal-command-block.schema.json",
+            "terminal-suggestion-request.schema.json",
+            "terminal-suggestion.schema.json",
+            "terminal-agent-turn.schema.json",
+            "terminal-risk-decision.schema.json",
+            "terminal-mcp-tool-descriptor.schema.json",
+        ] {
+            assert!(
+                schemas.iter().any(|(name, _)| *name == expected),
+                "missing generated schema {expected}"
+            );
+        }
     }
 
     #[test]

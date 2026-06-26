@@ -295,6 +295,32 @@ final class ContractsTests: XCTestCase {
         XCTAssertEqual(event.sensitivity, .public)
     }
 
+    @MainActor
+    func testExecutionEventEnvelopeDecodesRunCompletedKind() throws {
+        let json = """
+        {
+          "schema": "opensks.execution-event-envelope.v1",
+          "id": "evt-run-completed",
+          "run_id": "run-typed",
+          "sequence": 2,
+          "occurred_at": "t2",
+          "actor": "opensks-engine",
+          "kind": "run_completed",
+          "payload": {"message": "run completed"},
+          "sensitivity": "public",
+          "evidence_refs": ["event-store:run-completed"]
+        }
+        """.data(using: .utf8)!
+
+        let event = try JSONDecoder.opensks.decode(ExecutionEventEnvelope.self, from: json)
+        XCTAssertEqual(event.kind, .runCompleted)
+        XCTAssertEqual(event.kind.rawValue, "run_completed")
+
+        let store = ExecutionStore()
+        store.apply(event)
+        XCTAssertEqual(store.runs.first?.state, "completed")
+    }
+
     func testExecutionEventEnvelopePreservesUnknownTypedValues() throws {
         let json = """
         {
@@ -651,7 +677,8 @@ final class ContractsTests: XCTestCase {
         let request = EngineRequestEnvelope.conversationSupervisorTick(
             id: "req-supervisor",
             supervisorId: "swift-chat-supervisor",
-            leaseTtlMs: 30_000
+            leaseTtlMs: 30_000,
+            runID: "run-foreground"
         )
         let data = try JSONEncoder.opensks.encode(request)
         let json = String(decoding: data, as: UTF8.self)
@@ -662,6 +689,7 @@ final class ContractsTests: XCTestCase {
         XCTAssertEqual(object["id"] as? String, "req-supervisor")
         XCTAssertEqual(params["supervisor_id"] as? String, "swift-chat-supervisor")
         XCTAssertEqual(params["lease_ttl_ms"] as? Int, 30_000)
+        XCTAssertEqual(params["run_id"] as? String, "run-foreground")
         XCTAssertEqual(params["reason_code"] as? String, "conversation_supervisor_tick_requested")
     }
 

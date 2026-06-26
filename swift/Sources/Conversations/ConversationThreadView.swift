@@ -21,6 +21,13 @@ struct ConversationThreadView: View {
     /// renders in contexts without a git store.
     var gitContext: ChatGitContext = .none
 
+    @State private var activeScrollConversationID: String?
+    @State private var isFollowingLatest = true
+    @State private var latestAnchorVisible = false
+    @State private var pendingInitialLatestScrollConversationID: String?
+
+    private let latestAnchorID = "conversation.thread.latest"
+
     var body: some View {
         Group {
             if let summary = store.selectedSummary {
@@ -138,55 +145,207 @@ struct ConversationThreadView: View {
     }
 
     private func messageList(for conversationID: String) -> some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
-                if store.hasMoreMessages {
-                    Button {
-                        Task { await store.loadOlderMessages() }
-                    } label: {
-                        HStack {
-                            Spacer()
-                            Label("Load older", systemImage: "arrow.up")
-                                .font(Theme.ui(12, .semibold))
-                            Spacer()
+        let latestToken = latestRenderToken(for: conversationID)
+        let localSendToken = store.localSendToken(for: conversationID)
+        let sending = store.isSending(conversationID: conversationID)
+
+        return ScrollViewReader { proxy in
+            ZStack(alignment: .bottomTrailing) {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        if store.hasMoreMessages {
+                            Button {
+                                Task { await store.loadOlderMessages() }
+                            } label: {
+                                HStack {
+                                    Spacer()
+                                    Label("Load older", systemImage: "arrow.up")
+                                        .font(Theme.ui(12, .semibold))
+                                    Spacer()
+                                }
+                            }
+                            .buttonStyle(.quietAction)
+                            .disabled(store.isLoadingMessages)
+                            .accessibilityIdentifier("conversation.loadOlder")
                         }
-                    }
-                    .buttonStyle(.quietAction)
-                    .disabled(store.isLoadingMessages)
-                    .accessibilityIdentifier("conversation.loadOlder")
-                }
-                let timeline = store.timelineItems(for: conversationID)
-                if timeline.isEmpty {
-                    ForEach(store.messages) { message in
-                        MessageCell(message: message)
-                            .id(message.id)
-                        renderRunCards(for: message)
-                    }
-                } else {
-                    ForEach(timeline) { item in
-                        if let message = item.message {
-                            MessageCell(message: message)
-                                .id(item.id)
-                            renderRunCards(for: message, timelineRunID: item.runId)
-                        } else if let card = item.commitCard {
-                            CommitReceiptCard(card: card)
-                                .id(item.id)
-                        } else if let card = item.pushCard {
-                            PushReceiptCard(card: card)
-                                .id(item.id)
-                        } else if item.kind == .assistantMessage {
-                            AssistantTimelineEventCell(item: item)
-                                .id(item.id)
+                        let timeline = store.timelineItems(for: conversationID)
+                        if timeline.isEmpty {
+                            ForEach(store.messages) { message in
+                                MessageCell(message: message)
+                                    .id(message.id)
+                                renderRunCards(for: message)
+                            }
                         } else {
-                            TimelineItemCell(item: item)
-                                .id(item.id)
+                            ForEach(timeline) { item in
+                                if let message = item.message {
+                                    MessageCell(message: message)
+                                        .id(item.id)
+                                    renderRunCards(for: message, timelineRunID: item.runId)
+                                } else if let card = item.commitCard {
+                                    CommitReceiptCard(card: card)
+                                        .id(item.id)
+                                } else if let card = item.pushCard {
+                                    PushReceiptCard(card: card)
+                                        .id(item.id)
+                                } else if item.kind == .assistantMessage {
+                                    AssistantTimelineEventCell(item: item)
+                                        .id(item.id)
+                                } else {
+                                    TimelineItemCell(item: item)
+                                        .id(item.id)
+                                }
+                            }
+                            if let assistantReply = latestAssistantReplyMessage(in: timeline),
+                               shouldRenderPinnedAssistantReply(assistantReply, in: timeline) {
+                                MessageCell(message: assistantReply)
+                                    .id("latest-assistant-reply-\(assistantReply.id)-\(assistantReply.updatedAtMs)")
+                            }
                         }
+                        Color.clear
+                            .frame(height: 1)
+                            .id(latestAnchorID)
+                            .onAppear {
+                                latestAnchorVisible = true
+                                isFollowingLatest = true
+                            }
+                            .onDisappear {
+                                latestAnchorVisible = false
+                                pauseFollowingLatestIfStillAway(conversationID: conversationID)
+                            }
                     }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 16)
+                }
+                .accessibilityIdentifier("conversation.messageList")
+                .onAppear {
+                    resetLatestScrollState(for: conversationID)
+                    scrollToLatest(proxy, animated: false)
+                }
+                .onChange(of: conversationID) { newValue in
+                    resetLatestScrollState(for: newValue)
+                    scrollToLatest(proxy, animated: false)
+                }
+                .onChange(of: latestToken) { _ in
+                    if pendingInitialLatestScrollConversationID == conversationID {
+                        pendingInitialLatestScrollConversationID = nil
+                        isFollowingLatest = true
+                    }
+                    guard isFollowingLatest else { return }
+                    scrollToLatest(proxy, animated: true)
+                }
+                .onChange(of: localSendToken) { _ in
+                    isFollowingLatest = true
+                    scrollToLatest(proxy, animated: true)
+                }
+                .onChange(of: sending) { isSending in
+                    guard !isSending, isFollowingLatest else { return }
+                    scrollToLatest(proxy, animated: true)
+                }
+
+                if !isFollowingLatest {
+                    Button {
+                        isFollowingLatest = true
+                        scrollToLatest(proxy, animated: true)
+                    } label: {
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Theme.accent)
+                    }
+                    .buttonStyle(IconTileButtonStyle(size: 34))
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                            .fill(Theme.panel)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                            .strokeBorder(Theme.stroke, lineWidth: 1)
+                    )
+                    .padding(.trailing, 20)
+                    .padding(.bottom, 14)
+                    .help("Jump to latest")
+                    .accessibilityLabel("Jump to latest message")
+                    .accessibilityIdentifier("conversation.jumpToLatest")
                 }
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 16)
         }
+    }
+
+    private func resetLatestScrollState(for conversationID: String) {
+        activeScrollConversationID = conversationID
+        latestAnchorVisible = false
+        isFollowingLatest = true
+        pendingInitialLatestScrollConversationID = conversationID
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_600_000_000)
+            guard pendingInitialLatestScrollConversationID == conversationID else { return }
+            pendingInitialLatestScrollConversationID = nil
+            if activeScrollConversationID == conversationID, !latestAnchorVisible {
+                isFollowingLatest = false
+            }
+        }
+    }
+
+    private func scrollToLatest(_ proxy: ScrollViewProxy, animated: Bool) {
+        let scroll: () -> Void = {
+            if animated {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    proxy.scrollTo(latestAnchorID, anchor: .bottom)
+                }
+            } else {
+                proxy.scrollTo(latestAnchorID, anchor: .bottom)
+            }
+        }
+        for delay in [0.0, 0.24, 0.72] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                scroll()
+            }
+        }
+    }
+
+    private func pauseFollowingLatestIfStillAway(conversationID: String) {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            guard activeScrollConversationID == conversationID, !latestAnchorVisible else { return }
+            guard pendingInitialLatestScrollConversationID != conversationID else { return }
+            guard !store.isSending(conversationID: conversationID) else { return }
+            isFollowingLatest = false
+        }
+    }
+
+    private func latestRenderToken(for conversationID: String) -> String {
+        let timeline = store.timelineItems(for: conversationID)
+        let assistantReply = latestAssistantReplyMessage(in: timeline)
+        if let last = timeline.last {
+            return [
+                conversationID,
+                "timeline",
+                "\(timeline.count)",
+                last.id,
+                last.state,
+                last.payload.contentRedacted ?? "",
+                last.payload.assistantDelta ?? "",
+                last.payload.assistantText ?? "",
+                last.payload.eventId ?? "",
+                last.payload.responseHash ?? "",
+                assistantReply?.id ?? "",
+                assistantReply?.state.rawValue ?? "",
+                assistantReply?.contentRedacted ?? ""
+            ].joined(separator: "|")
+        }
+
+        if let last = store.messages.last {
+            return [
+                conversationID,
+                "messages",
+                "\(store.messages.count)",
+                last.id,
+                last.state.rawValue,
+                "\(last.updatedAtMs)",
+                "\(last.contentRedacted.count)"
+            ].joined(separator: "|")
+        }
+
+        return "\(conversationID)|empty"
     }
 
     @ViewBuilder
@@ -209,6 +368,60 @@ struct ConversationThreadView: View {
 }
 
 // MARK: - Assistant timeline event cell
+
+func latestAssistantReplyMessage(in timeline: [ConversationTimelineItem]) -> ConversationMessage? {
+    timeline.reversed().compactMap { item -> ConversationMessage? in
+        if let message = item.message,
+           message.role == .assistant,
+           isVisibleAssistantReply(message.contentRedacted) {
+            return message
+        }
+        guard item.kind == .assistantMessage else { return nil }
+        guard let text = item.payload.assistantText
+            ?? item.payload.contentRedacted
+            ?? item.payload.assistantDelta,
+            isVisibleAssistantReply(text)
+        else { return nil }
+        let state: MessageState = item.state == "streaming" ? .streaming : .complete
+        return ConversationMessage(
+            schema: "opensks.conversation-message.v1",
+            id: item.payload.assistantMessageId ?? item.payload.messageId ?? item.id,
+            projectId: item.projectId,
+            conversationId: item.conversationId,
+            turnId: item.turnId,
+            role: .assistant,
+            state: state,
+            contentRedacted: text,
+            sequence: item.sequence,
+            createdAtMs: item.createdAtMs,
+            updatedAtMs: item.updatedAtMs
+        )
+    }.first
+}
+
+func shouldRenderPinnedAssistantReply(
+    _ assistantReply: ConversationMessage,
+    in timeline: [ConversationTimelineItem]
+) -> Bool {
+    guard let last = timeline.last else { return false }
+    if let message = last.message,
+       message.id == assistantReply.id,
+       message.role == .assistant,
+       isVisibleAssistantReply(message.contentRedacted) {
+        return false
+    }
+    if last.kind == .assistantMessage,
+       (last.payload.assistantMessageId == assistantReply.id || last.payload.messageId == assistantReply.id),
+       isVisibleAssistantReply(last.payload.assistantText ?? last.payload.contentRedacted ?? last.payload.assistantDelta ?? "") {
+        return false
+    }
+    return true
+}
+
+private func isVisibleAssistantReply(_ text: String) -> Bool {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    return !trimmed.isEmpty && trimmed != "..."
+}
 
 struct AssistantTimelineEventCell: View {
     let item: ConversationTimelineItem

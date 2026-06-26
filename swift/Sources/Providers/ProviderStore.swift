@@ -108,9 +108,11 @@ final class ProviderStore: ObservableObject {
         if provider.health == .healthy, model.health == .healthy {
             return true
         }
+        let codexLbModelCanRun = model.health == .needsProbe || model.health == .healthy
         return provider.kind == .codexLB
-            && provider.health == .needsProbe
-            && model.health == .needsProbe
+            && !provider.circuitOpen
+            && provider.health != .needsCredential
+            && codexLbModelCanRun
     }
 
     private func preferredTextModel(forProviderAlias alias: String) -> ProviderModelViewModel? {

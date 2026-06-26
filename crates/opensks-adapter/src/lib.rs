@@ -1,9 +1,7 @@
 //! Agent adapter abstraction + a real local test adapter (recovery release §6.4).
-//!
 //! The headline defect of the baseline is that a conversation turn dispatches a
 //! `DeterministicWorker` that returns `ok: true` without doing any work. This
 //! crate replaces that pattern with a real boundary:
-//!
 //! * [`AgentAdapter`] — what the engine drives. An adapter streams typed
 //!   [`AgentEventEnvelope`]s and returns an [`AgentRunOutcome`].
 //! * `LocalTestAdapter` — an explicit deterministic simulation adapter. It
@@ -40,8 +38,9 @@ pub use agentic::{
 };
 pub use openrouter::{
     ChatCompleter, ChatReasoningEffortWire, NativeHttpChatCompleter, OpenAiCompatibleChatCompleter,
-    OpenAiCompatibleImageGenerator, OpenRouterAdapter, OpenRouterToolDriver,
-    openai_reasoning_effort_value, openrouter_reasoning_effort_value, parse_step, tool_definitions,
+    OpenAiCompatibleImageGenerator, OpenAiResponsesChatCompleter, OpenRouterAdapter,
+    OpenRouterToolDriver, ProviderChatCompleter, openai_reasoning_effort_value,
+    openrouter_reasoning_effort_value, parse_step, tool_definitions,
     tool_definitions_with_extra_available_tools,
 };
 pub use patch_write::{PatchPathLease, PlannedWrite, apply_file_writes_with_path_lease};

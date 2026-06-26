@@ -265,6 +265,7 @@ enum ExecutionEventKind: OpenSKSStringEnum {
     case runPaused
     case runResumed
     case runCancelled
+    case runCompleted
     case steeringRequested
     case approvalRequested
     case approvalApproved
@@ -292,6 +293,7 @@ enum ExecutionEventKind: OpenSKSStringEnum {
         case .runPaused: return "run_paused"
         case .runResumed: return "run_resumed"
         case .runCancelled: return "run_cancelled"
+        case .runCompleted: return "run_completed"
         case .steeringRequested: return "steering_requested"
         case .approvalRequested: return "approval_requested"
         case .approvalApproved: return "approval_approved"
@@ -321,6 +323,7 @@ enum ExecutionEventKind: OpenSKSStringEnum {
         case "run_paused": self = .runPaused
         case "run_resumed": self = .runResumed
         case "run_cancelled": self = .runCancelled
+        case "run_completed": self = .runCompleted
         case "steering_requested": self = .steeringRequested
         case "approval_requested": self = .approvalRequested
         case "approval_approved": self = .approvalApproved

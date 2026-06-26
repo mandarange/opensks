@@ -440,7 +440,7 @@ final class PushOutboxTests: XCTestCase {
         let (gitStore, service) = await makeStore()
         let summary = ConversationSummary(
             schema: "opensks.conversation-summary.v1", id: "conv-1", projectId: "p",
-            title: "Thread", titleSource: "manual", status: .idle, pinned: false,
+            title: "Thread", titleSource: .generated, status: .idle, pinned: false,
             archived: false, messageCount: 0, createdAtMs: 1, updatedAtMs: 1, lastMessageAtMs: nil
         )
         let convStore = ConversationStore(service: MockConversationService(summaries: [summary]))

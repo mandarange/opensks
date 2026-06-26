@@ -7,13 +7,13 @@
 //! never placed in process argv. Transport is native HTTP over rustls-backed
 //! `reqwest`, so provider dispatch no longer depends on a subprocess.
 
-use std::{sync::atomic::Ordering, time::Duration};
+use std::{collections::BTreeMap, sync::atomic::Ordering, time::Duration};
 
 use base64::Engine as _;
 use opensks_contracts::projection::RunProjectionState;
 use opensks_contracts::{
-    AGENT_ADAPTER_DESCRIPTOR_SCHEMA, AgentAdapterDescriptor, AgentAdapterKind, ReasoningEffort,
-    default_tool_registry,
+    AGENT_ADAPTER_DESCRIPTOR_SCHEMA, AgentAdapterDescriptor, AgentAdapterKind, ProviderKind,
+    ReasoningEffort, default_tool_registry,
 };
 use opensks_image::{
     ImageError, ImageGenerationClient, ImageInspectionClient, ImageInspectionProviderOutput,
@@ -296,6 +296,41 @@ pub struct OpenAiCompatibleChatCompleter {
     base_url: String,
     bearer_token: String,
     timeout: Duration,
+}
+
+pub enum ProviderChatCompleter {
+    ChatCompletions(OpenAiCompatibleChatCompleter),
+    Responses(OpenAiResponsesChatCompleter),
+}
+
+impl ProviderChatCompleter {
+    pub fn new_for_provider(
+        provider_kind: ProviderKind,
+        base_url: impl Into<String>,
+        bearer_token: impl Into<String>,
+    ) -> Result<Self, AgentAdapterError> {
+        let base_url = base_url.into();
+        let bearer_token = bearer_token.into();
+        if provider_kind == ProviderKind::CodexLb {
+            return Ok(Self::Responses(OpenAiResponsesChatCompleter::new(
+                base_url,
+                bearer_token,
+            )?));
+        }
+        Ok(Self::ChatCompletions(OpenAiCompatibleChatCompleter::new(
+            base_url,
+            bearer_token,
+        )?))
+    }
+}
+
+impl ChatCompleter for ProviderChatCompleter {
+    fn complete(&self, body: &serde_json::Value) -> Result<serde_json::Value, AgentAdapterError> {
+        match self {
+            Self::ChatCompletions(completer) => completer.complete(body),
+            Self::Responses(completer) => completer.complete(body),
+        }
+    }
 }
 
 impl OpenAiCompatibleChatCompleter {
@@ -648,6 +683,443 @@ impl ChatCompleter for OpenAiCompatibleChatCompleter {
     }
 }
 
+/// Responses API transport for Codex LB. The OpenSKS tool loop is written
+/// against Chat Completions-shaped messages, so this adapter translates the
+/// request and response at the provider boundary only.
+pub struct OpenAiResponsesChatCompleter {
+    base_url: String,
+    bearer_token: String,
+    timeout: Duration,
+}
+
+impl OpenAiResponsesChatCompleter {
+    pub fn new(
+        base_url: impl Into<String>,
+        bearer_token: impl Into<String>,
+    ) -> Result<Self, AgentAdapterError> {
+        let base_url = base_url.into();
+        let bearer_token = bearer_token.into();
+        if bearer_token.trim().is_empty() {
+            return Err(AgentAdapterError::Provider(
+                "provider credential resolved empty".to_string(),
+            ));
+        }
+        validate_chat_base_url(&base_url)?;
+        Ok(Self {
+            base_url,
+            bearer_token,
+            timeout: Duration::from_secs(120),
+        })
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    fn responses_endpoint(&self) -> Result<String, AgentAdapterError> {
+        validate_chat_base_url(&self.base_url)?;
+        Ok(format!("{}/responses", self.base_url.trim_end_matches('/')))
+    }
+}
+
+impl ChatCompleter for OpenAiResponsesChatCompleter {
+    fn complete(&self, body: &serde_json::Value) -> Result<serde_json::Value, AgentAdapterError> {
+        let endpoint = self.responses_endpoint()?;
+        let responses_body = responses_body_from_chat_body(body)?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(self.timeout)
+            .user_agent("opensks-adapter/0.1 provider-responses")
+            .build()
+            .map_err(|error| AgentAdapterError::Provider(error.to_string()))?;
+        let response = client
+            .post(endpoint)
+            .bearer_auth(&self.bearer_token)
+            .json(&responses_body)
+            .send()
+            .map_err(|error| {
+                AgentAdapterError::Provider(redact_with_secrets(
+                    &error.to_string(),
+                    &[self.bearer_token.as_str()],
+                ))
+            })?;
+        let status = response.status();
+        let response_body = response.text().map_err(|error| {
+            AgentAdapterError::Provider(redact_with_secrets(
+                &error.to_string(),
+                &[self.bearer_token.as_str()],
+            ))
+        })?;
+        if !status.is_success() {
+            return Err(AgentAdapterError::Provider(format!(
+                "provider HTTP status {}: {}",
+                status.as_u16(),
+                redact_with_secrets(response_body.trim(), &[self.bearer_token.as_str()])
+            )));
+        }
+        let parsed = parse_responses_transport_body(&response_body)?;
+        chat_completion_from_responses_body(&parsed)
+    }
+}
+
+fn parse_responses_transport_body(body: &str) -> Result<serde_json::Value, AgentAdapterError> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        return Ok(value);
+    }
+    let mut output_items = Vec::new();
+    let mut text = String::new();
+    let mut completed_response = None;
+    let mut function_arguments: BTreeMap<String, String> = BTreeMap::new();
+    for line in body.lines() {
+        let Some(payload) = line.trim().strip_prefix("data:") else {
+            continue;
+        };
+        let payload = payload.trim();
+        if payload.is_empty() || payload == "[DONE]" {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(payload) else {
+            continue;
+        };
+        match event.get("type").and_then(serde_json::Value::as_str) {
+            Some("response.completed") => {
+                if let Some(response) = event.get("response") {
+                    completed_response = Some(response.clone());
+                }
+            }
+            Some("response.function_call_arguments.delta") => {
+                if let (Some(key), Some(delta)) = (
+                    response_event_item_key(&event, None),
+                    event.get("delta").and_then(serde_json::Value::as_str),
+                ) {
+                    function_arguments.entry(key).or_default().push_str(delta);
+                }
+            }
+            Some("response.function_call_arguments.done") => {
+                if let (Some(key), Some(arguments)) = (
+                    response_event_item_key(&event, None),
+                    event.get("arguments").and_then(serde_json::Value::as_str),
+                ) {
+                    function_arguments.insert(key, arguments.to_string());
+                }
+            }
+            Some("response.output_item.added") => {
+                // This is a provisional Responses API frame. Function-call
+                // arguments are still empty here and arrive through later
+                // response.function_call_arguments.* + output_item.done events.
+            }
+            Some("response.output_item.done") => {
+                if let Some(item) = event.get("item") {
+                    output_items.push(response_item_with_streamed_arguments(
+                        item,
+                        &event,
+                        &function_arguments,
+                    ));
+                }
+            }
+            Some("response.output_text.delta") => {
+                if let Some(delta) = event.get("delta").and_then(serde_json::Value::as_str) {
+                    text.push_str(delta);
+                }
+            }
+            _ => {
+                if let Some(response) = event.get("response") {
+                    completed_response = Some(response.clone());
+                } else if let Some(item) = event.get("item") {
+                    output_items.push(response_item_with_streamed_arguments(
+                        item,
+                        &event,
+                        &function_arguments,
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(response) = completed_response.filter(response_body_has_output) {
+        return Ok(response);
+    }
+    if !output_items.is_empty() {
+        return Ok(serde_json::json!({ "output": output_items }));
+    }
+    if !text.trim().is_empty() {
+        return Ok(serde_json::json!({ "output_text": text }));
+    }
+    Err(AgentAdapterError::Provider(
+        "provider returned non-JSON".to_string(),
+    ))
+}
+
+fn response_event_item_key(
+    event: &serde_json::Value,
+    item: Option<&serde_json::Value>,
+) -> Option<String> {
+    item.and_then(|value| value.get("id"))
+        .or_else(|| item.and_then(|value| value.get("call_id")))
+        .or_else(|| event.get("item_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            event
+                .get("output_index")
+                .and_then(serde_json::Value::as_u64)
+                .map(|index| format!("output_index:{index}"))
+        })
+}
+
+fn response_item_with_streamed_arguments(
+    item: &serde_json::Value,
+    event: &serde_json::Value,
+    function_arguments: &BTreeMap<String, String>,
+) -> serde_json::Value {
+    let mut item = item.clone();
+    if !matches!(
+        item.get("type").and_then(serde_json::Value::as_str),
+        Some("function_call") | Some("custom_tool_call")
+    ) {
+        return item;
+    }
+    let has_valid_arguments = item
+        .get("arguments")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|arguments| !arguments.trim().is_empty());
+    if has_valid_arguments {
+        return item;
+    }
+    let streamed = response_event_item_key(event, Some(&item))
+        .and_then(|key| function_arguments.get(&key))
+        .or_else(|| {
+            event
+                .get("output_index")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|index| function_arguments.get(&format!("output_index:{index}")))
+        });
+    if let Some(arguments) = streamed {
+        item["arguments"] = serde_json::Value::String(arguments.clone());
+    }
+    item
+}
+
+fn response_body_has_output(response: &serde_json::Value) -> bool {
+    response
+        .get("output")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+        || response
+            .get("output_text")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
+        || response.pointer("/choices/0/message").is_some()
+        || response.pointer("/response/choices/0/message").is_some()
+}
+
+fn responses_body_from_chat_body(
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, AgentAdapterError> {
+    let model = body
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| AgentAdapterError::Provider("chat body missing model".to_string()))?;
+    let messages = body
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| AgentAdapterError::Provider("chat body missing messages".to_string()))?;
+    let mut request = serde_json::json!({
+        "model": model,
+        "stream": false,
+        "input": messages
+            .iter()
+            .map(response_input_from_chat_message)
+            .collect::<Vec<_>>(),
+    });
+    if let Some(max_tokens) = body.get("max_tokens").and_then(serde_json::Value::as_u64) {
+        request["max_output_tokens"] = serde_json::Value::from(max_tokens);
+    }
+    if let Some(tools) = body.get("tools").and_then(serde_json::Value::as_array) {
+        let converted = tools
+            .iter()
+            .filter_map(response_tool_from_chat_tool)
+            .collect::<Vec<_>>();
+        if !converted.is_empty() {
+            request["tools"] = serde_json::Value::Array(converted);
+        }
+    }
+    if let Some(effort) = body
+        .get("reasoning_effort")
+        .and_then(serde_json::Value::as_str)
+    {
+        request["reasoning"] = serde_json::json!({ "effort": effort });
+    } else if let Some(reasoning) = body.get("reasoning") {
+        request["reasoning"] = reasoning.clone();
+    }
+    if let Some(tool_choice) = body.get("tool_choice") {
+        request["tool_choice"] = tool_choice.clone();
+    }
+    Ok(request)
+}
+
+fn response_input_from_chat_message(message: &serde_json::Value) -> serde_json::Value {
+    let role = message
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("user");
+    let content = message
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    serde_json::json!({
+        "role": role,
+        "content": content,
+    })
+}
+
+fn response_tool_from_chat_tool(tool: &serde_json::Value) -> Option<serde_json::Value> {
+    let function = tool.get("function")?;
+    let name = function.get("name")?.clone();
+    let mut converted = serde_json::json!({
+        "type": "function",
+        "name": name,
+    });
+    if let Some(description) = function.get("description") {
+        converted["description"] = description.clone();
+    }
+    if let Some(parameters) = function.get("parameters") {
+        converted["parameters"] = parameters.clone();
+    }
+    Some(converted)
+}
+
+fn chat_completion_from_responses_body(
+    response: &serde_json::Value,
+) -> Result<serde_json::Value, AgentAdapterError> {
+    if response.pointer("/choices/0/message").is_some() {
+        return Ok(response.clone());
+    }
+    if let Some(message) = response.pointer("/response/choices/0/message") {
+        return Ok(serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": message,
+                "finish_reason": "stop"
+            }],
+            "usage": response.get("usage").cloned().unwrap_or(serde_json::Value::Null),
+        }));
+    }
+    let output = response
+        .get("output")
+        .or_else(|| response.pointer("/response/output"))
+        .and_then(serde_json::Value::as_array);
+    let mut text_parts = Vec::new();
+    let mut tool_calls = Vec::new();
+    if let Some(output) = output {
+        for item in output {
+            match item.get("type").and_then(serde_json::Value::as_str) {
+                Some("message") => collect_response_message_text(item, &mut text_parts),
+                Some("function_call") => {
+                    if let Some(call) = chat_tool_call_from_response_item(item) {
+                        tool_calls.push(call);
+                    }
+                }
+                Some("custom_tool_call") => {
+                    if let Some(call) = chat_tool_call_from_response_item(item) {
+                        tool_calls.push(call);
+                    }
+                }
+                Some("output_text") => {
+                    if let Some(text) = item.get("text").and_then(serde_json::Value::as_str) {
+                        text_parts.push(text.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(text) = response
+        .get("output_text")
+        .and_then(serde_json::Value::as_str)
+    {
+        text_parts.push(text.to_string());
+    }
+    let mut message = serde_json::json!({
+        "role": "assistant",
+        "content": text_parts.join("\n").trim().to_string(),
+    });
+    let finish_reason = if tool_calls.is_empty() {
+        if message
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            return Err(AgentAdapterError::Provider(
+                "provider response had no message content".to_string(),
+            ));
+        }
+        "stop"
+    } else {
+        message["content"] = serde_json::Value::Null;
+        message["tool_calls"] = serde_json::Value::Array(tool_calls);
+        "tool_calls"
+    };
+    Ok(serde_json::json!({
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": finish_reason,
+        }],
+        "usage": response.get("usage").cloned().unwrap_or(serde_json::Value::Null),
+    }))
+}
+
+fn collect_response_message_text(item: &serde_json::Value, text_parts: &mut Vec<String>) {
+    if let Some(content) = item.get("content").and_then(serde_json::Value::as_array) {
+        for part in content {
+            match part.get("type").and_then(serde_json::Value::as_str) {
+                Some("output_text") => {
+                    if let Some(text) = part.get("text").and_then(serde_json::Value::as_str) {
+                        text_parts.push(text.to_string());
+                    }
+                }
+                Some("refusal") => {
+                    if let Some(text) = part.get("refusal").and_then(serde_json::Value::as_str) {
+                        text_parts.push(text.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    } else if let Some(text) = item.get("content").and_then(serde_json::Value::as_str) {
+        text_parts.push(text.to_string());
+    }
+}
+
+fn chat_tool_call_from_response_item(item: &serde_json::Value) -> Option<serde_json::Value> {
+    let name = item
+        .get("name")
+        .or_else(|| item.pointer("/function/name"))?
+        .as_str()?;
+    let arguments = item
+        .get("arguments")
+        .or_else(|| item.get("input"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!("{}"));
+    let arguments = match arguments {
+        serde_json::Value::String(value) => value,
+        other => other.to_string(),
+    };
+    Some(serde_json::json!({
+        "id": item
+            .get("call_id")
+            .or_else(|| item.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("call_responses"),
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": arguments,
+        }
+    }))
+}
+
 fn validate_chat_base_url(base_url: &str) -> Result<(), AgentAdapterError> {
     let parsed = reqwest::Url::parse(base_url).map_err(|error| {
         AgentAdapterError::Provider(format!("invalid provider endpoint: {error}"))
@@ -827,9 +1299,7 @@ fn parse_tool_call(tc: &serde_json::Value) -> Result<ToolCall, String> {
         .and_then(|value| value.as_str())
         .ok_or_else(|| "missing function name".to_string())?;
     let args: serde_json::Value = match func.get("arguments") {
-        Some(serde_json::Value::String(s)) => {
-            serde_json::from_str(s).map_err(|_| "arguments were not valid JSON".to_string())?
-        }
+        Some(serde_json::Value::String(s)) => parse_tool_arguments_string(s)?,
         Some(other) => other.clone(),
         None => return Err("missing arguments".to_string()),
     };
@@ -1025,6 +1495,45 @@ fn parse_tool_call(tc: &serde_json::Value) -> Result<ToolCall, String> {
     }
 }
 
+fn parse_tool_arguments_string(raw: &str) -> Result<serde_json::Value, String> {
+    if let Ok(value) = serde_json::from_str(raw) {
+        return Ok(value);
+    }
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    if let Some(unfenced) = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .and_then(|value| value.strip_suffix("```"))
+    {
+        if let Ok(value) = serde_json::from_str(unfenced.trim()) {
+            return Ok(value);
+        }
+    }
+    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+        if start < end {
+            if let Ok(value) = serde_json::from_str(&trimmed[start..=end]) {
+                return Ok(value);
+            }
+        }
+    }
+    Err(format!(
+        "arguments were not valid JSON: {}",
+        diagnostic_snippet(raw)
+    ))
+}
+
+fn diagnostic_snippet(raw: &str) -> String {
+    let redacted = redact(raw);
+    let mut snippet = redacted.chars().take(160).collect::<String>();
+    if redacted.chars().count() > 160 {
+        snippet.push_str("...");
+    }
+    snippet.replace('\n', "\\n")
+}
+
 fn failed_step(code: &str, message: String, retryable: bool) -> AgentStep {
     AgentStep::Failed {
         code: code.to_string(),
@@ -1203,6 +1712,36 @@ impl<C: ChatCompleter> ToolDriver for OpenRouterToolDriver<C> {
                 // Record the assistant turn so the next request carries full context.
                 if let Some(message) = response.pointer("/choices/0/message") {
                     self.messages.push(message.clone());
+                }
+                if let AgentStep::Failed {
+                    code,
+                    message,
+                    retryable: true,
+                } = &step
+                {
+                    if code == "malformed_tool_call" {
+                        self.messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": format!(
+                                "The previous tool call was malformed: {message}. Retry exactly once with valid JSON arguments matching the selected tool schema."
+                            ),
+                        }));
+                        return match self.completer.complete(&self.request_body()) {
+                            Ok(retry_response) => {
+                                let retry_step = parse_step(&retry_response);
+                                if let Some(message) = retry_response.pointer("/choices/0/message")
+                                {
+                                    self.messages.push(message.clone());
+                                }
+                                retry_step
+                            }
+                            Err(error) => failed_step(
+                                "provider_call_failed",
+                                format!("The model call failed: {}", redact(&error.to_string())),
+                                true,
+                            ),
+                        };
+                    }
                 }
                 step
             }
@@ -1398,6 +1937,213 @@ mod tests {
 
     fn final_response(text: &str) -> serde_json::Value {
         serde_json::json!({ "choices": [{ "message": { "role": "assistant", "content": text } }] })
+    }
+
+    #[test]
+    fn tool_driver_retries_one_malformed_tool_call() {
+        let malformed = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_bad",
+                        "type": "function",
+                        "function": {
+                            "name": "workspace__propose_patch",
+                            "arguments": ""
+                        }
+                    }]
+                }
+            }]
+        });
+        let valid = tool_call_response(
+            "workspace__propose_patch",
+            serde_json::json!({"path": "RESULT.md", "content": "ok"}),
+        );
+        let completer = ScriptedCompleter::new(vec![malformed, valid]);
+        let mut driver = OpenRouterToolDriver::new("model", 128, completer, "system", "goal");
+
+        match driver.next_step(&[]) {
+            AgentStep::Tools(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert!(matches!(calls[0], ToolCall::ProposePatch { .. }));
+            }
+            other => panic!("expected retry to recover tool call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn responses_body_maps_chat_messages_tools_and_reasoning() {
+        let chat_body = serde_json::json!({
+            "model": "gpt-5.5",
+            "max_tokens": 42,
+            "reasoning_effort": "xhigh",
+            "messages": [
+                {"role": "system", "content": "Use tools."},
+                {"role": "user", "content": "Write a file."}
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "workspace.propose_patch",
+                    "description": "write a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}}
+                    }
+                }
+            }]
+        });
+
+        let responses = responses_body_from_chat_body(&chat_body).expect("responses body");
+
+        assert_eq!(responses["model"], "gpt-5.5");
+        assert_eq!(responses["stream"], false);
+        assert_eq!(responses["max_output_tokens"], 42);
+        assert_eq!(responses["reasoning"]["effort"], "xhigh");
+        assert_eq!(responses["input"][0]["role"], "system");
+        assert_eq!(responses["input"][1]["content"], "Write a file.");
+        assert_eq!(responses["tools"][0]["type"], "function");
+        assert_eq!(responses["tools"][0]["name"], "workspace.propose_patch");
+        assert!(responses["tools"][0].get("function").is_none());
+    }
+
+    #[test]
+    fn responses_output_text_maps_to_chat_completion_message() {
+        let response = serde_json::json!({
+            "id": "resp_1",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": "done"
+                }]
+            }],
+            "usage": {"total_tokens": 7}
+        });
+
+        let chat = chat_completion_from_responses_body(&response).expect("chat response");
+
+        assert_eq!(chat["choices"][0]["message"]["role"], "assistant");
+        assert_eq!(chat["choices"][0]["message"]["content"], "done");
+        assert_eq!(chat["choices"][0]["finish_reason"], "stop");
+        assert_eq!(chat["usage"]["total_tokens"], 7);
+    }
+
+    #[test]
+    fn responses_function_call_maps_to_chat_tool_call() {
+        let response = serde_json::json!({
+            "id": "resp_1",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_123",
+                "name": "workspace.propose_patch",
+                "arguments": "{\"path\":\"RESULT.md\",\"content\":\"ok\"}"
+            }]
+        });
+
+        let chat = chat_completion_from_responses_body(&response).expect("chat response");
+
+        let message = &chat["choices"][0]["message"];
+        assert!(message["content"].is_null());
+        assert_eq!(chat["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(message["tool_calls"][0]["id"], "call_123");
+        assert_eq!(
+            message["tool_calls"][0]["function"]["name"],
+            "workspace.propose_patch"
+        );
+        assert_eq!(
+            message["tool_calls"][0]["function"]["arguments"],
+            "{\"path\":\"RESULT.md\",\"content\":\"ok\"}"
+        );
+    }
+
+    #[test]
+    fn responses_sse_completed_event_maps_to_chat_completion() {
+        let sse = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}}\n\n",
+            "data: [DONE]\n",
+        );
+
+        let parsed = parse_responses_transport_body(sse).expect("parse sse");
+        let chat = chat_completion_from_responses_body(&parsed).expect("chat response");
+
+        assert_eq!(chat["choices"][0]["message"]["content"], "ok");
+    }
+
+    #[test]
+    fn responses_sse_uses_output_item_when_completed_response_is_empty() {
+        let sse = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"from item\"}]}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[]}}\n\n",
+            "data: [DONE]\n",
+        );
+
+        let parsed = parse_responses_transport_body(sse).expect("parse sse");
+        let chat = chat_completion_from_responses_body(&parsed).expect("chat response");
+
+        assert_eq!(chat["choices"][0]["message"]["content"], "from item");
+    }
+
+    #[test]
+    fn responses_sse_collects_function_call_argument_deltas() {
+        let sse = concat!(
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"path\\\":\"}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"\\\"RESULT.md\\\"}\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"workspace.propose_patch\",\"arguments\":\"\"}}\n\n",
+            "data: [DONE]\n",
+        );
+
+        let parsed = parse_responses_transport_body(sse).expect("parse sse");
+        let chat = chat_completion_from_responses_body(&parsed).expect("chat response");
+
+        assert_eq!(
+            chat["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+            "{\"path\":\"RESULT.md\"}"
+        );
+    }
+
+    #[test]
+    fn responses_sse_ignores_provisional_empty_function_call_items() {
+        let sse = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"workspace.propose_patch\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"output_index\":0,\"arguments\":\"{\\\"path\\\":\\\"RESULT.md\\\",\\\"content\\\":\\\"ok\\\"}\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"workspace.propose_patch\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[]}}\n\n",
+            "data: [DONE]\n",
+        );
+
+        let parsed = parse_responses_transport_body(sse).expect("parse sse");
+        let chat = chat_completion_from_responses_body(&parsed).expect("chat response");
+        let tool_calls = chat["choices"][0]["message"]["tool_calls"]
+            .as_array()
+            .expect("tool calls");
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            tool_calls[0]["function"]["arguments"],
+            "{\"path\":\"RESULT.md\",\"content\":\"ok\"}"
+        );
+    }
+
+    #[test]
+    fn parse_tool_arguments_accepts_fenced_json() {
+        let parsed = parse_tool_arguments_string(
+            "```json\n{\"path\":\"RESULT.md\",\"content\":\"ok\"}\n```",
+        )
+        .expect("parse fenced json");
+
+        assert_eq!(parsed["path"], "RESULT.md");
+        assert_eq!(parsed["content"], "ok");
+    }
+
+    #[test]
+    fn parse_tool_arguments_treats_empty_as_empty_object() {
+        let parsed = parse_tool_arguments_string("").expect("parse empty arguments");
+
+        assert_eq!(parsed, serde_json::json!({}));
     }
 
     fn test_image_generator(

@@ -2482,6 +2482,37 @@ mod tests {
     }
 
     #[test]
+    fn conversation_turn_scheduler_config_honors_parallelism_verifiers_and_resource_caps() {
+        let mut settings = turn_settings(12);
+        settings.verifier_count = 5;
+        let config = conversation_turn_scheduler_config_with_limits(
+            &settings,
+            Some(ConversationTurnSchedulerResourceLimits {
+                provider_max_workers: 8,
+                per_provider_max_workers: 6,
+                per_model_max_workers: 3,
+            }),
+        );
+
+        assert_eq!(config.requested_workers, 12);
+        assert_eq!(config.project_max_workers, 12);
+        assert_eq!(config.provider_max_workers, 8);
+        assert_eq!(config.per_provider_max_workers, 6);
+        assert_eq!(config.per_model_max_workers, 3);
+        assert_eq!(config.worktree_max_workers, 12);
+        assert_eq!(config.verification_max_workers, 5);
+        assert_eq!(config.visible_lane_cap, 6);
+        let decision =
+            DurableScheduler::new("run-config", Vec::new(), config).governor_decision("now");
+        assert_eq!(decision.admitted, 8);
+        assert_eq!(decision.limits["provider"], 8);
+        assert_eq!(decision.limits["per_provider"], 6);
+        assert_eq!(decision.limits["per_model"], 3);
+        assert_eq!(decision.limits["worktree"], 12);
+        assert_eq!(decision.limits["verification"], 5);
+    }
+
+    #[test]
     fn conversation_turn_bootstrap_records_scheduler_root_item_idempotently() {
         let mut store = EventStore::open_memory().expect("event store");
         let settings = turn_settings(4);

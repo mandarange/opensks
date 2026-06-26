@@ -6,7 +6,10 @@
 //! before it is stored in the searchable `content_redacted` column / FTS index;
 //! the original may be held encrypted out of band (content_ciphertext column).
 
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use opensks_contracts::{
     CONVERSATION_DIGEST_SCHEMA, CONVERSATION_MESSAGE_SCHEMA, CONVERSATION_SUMMARY_SCHEMA,
@@ -298,6 +301,48 @@ fn run_projection_state_from_str(raw: &str) -> Result<RunProjectionState> {
             raw.to_string(),
         )),
     }
+}
+
+fn trim_timeline_items(items: Vec<TimelineItem>, limit: usize) -> Vec<TimelineItem> {
+    if items.len() <= limit {
+        return items;
+    }
+
+    let mut selected_ids = HashSet::new();
+    let mut selected = Vec::with_capacity(limit);
+    for preserved_kind in [
+        TimelineItemKind::UserMessage,
+        TimelineItemKind::AssistantMessage,
+    ] {
+        if selected.len() >= limit {
+            break;
+        }
+        if let Some(item) = items
+            .iter()
+            .rev()
+            .find(|item| item.kind == preserved_kind && !selected_ids.contains(&item.id))
+        {
+            selected_ids.insert(item.id.clone());
+            selected.push(item.clone());
+        }
+    }
+
+    for item in items.iter().rev() {
+        if selected.len() >= limit {
+            break;
+        }
+        if selected_ids.insert(item.id.clone()) {
+            selected.push(item.clone());
+        }
+    }
+
+    selected.sort_by(|lhs, rhs| {
+        lhs.created_at_ms
+            .cmp(&rhs.created_at_ms)
+            .then(lhs.sequence.cmp(&rhs.sequence))
+            .then(lhs.id.cmp(&rhs.id))
+    });
+    selected
 }
 
 fn conversation_status_for_projected_run_state(raw: &str) -> &'static str {
@@ -1117,15 +1162,12 @@ impl ConversationRepository {
         }
         items.extend(persisted);
         items.sort_by(|lhs, rhs| {
-            lhs.sequence
-                .cmp(&rhs.sequence)
-                .then(lhs.created_at_ms.cmp(&rhs.created_at_ms))
+            lhs.created_at_ms
+                .cmp(&rhs.created_at_ms)
+                .then(lhs.sequence.cmp(&rhs.sequence))
                 .then(lhs.id.cmp(&rhs.id))
         });
-        if items.len() > limit {
-            items = items.split_off(items.len() - limit);
-        }
-        Ok(items)
+        Ok(trim_timeline_items(items, limit))
     }
 
     pub fn append_timeline_item(
@@ -2226,6 +2268,105 @@ impl ConversationRepository {
 	                         fencing_token = ?3,
 	                         updated_at_ms = ?4
 	                     WHERE id = ?5",
+                params![
+                    supervisor_id,
+                    lease_expires_at_ms as i64,
+                    claimed.fencing_token as i64,
+                    now_ms as i64,
+                    claimed.run_id
+                ],
+            )?;
+            self.conn.execute(
+                "UPDATE run_projections
+                 SET state = 'running',
+                     updated_at_ms = ?1
+                 WHERE run_id = ?2",
+                params![now_ms as i64, claimed.run_id],
+            )?;
+            Ok(Some(claimed))
+        })();
+        match result {
+            Ok(value) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Atomically claim one specific queued run for a foreground supervisor.
+    /// This keeps an interactive Chat send attached to the run the user just
+    /// started instead of being delayed behind older durable queued turns.
+    pub fn claim_queued_turn_by_run_id(
+        &self,
+        supervisor_id: &str,
+        run_id: &str,
+        lease_ttl_ms: u64,
+        now_ms: u64,
+    ) -> Result<Option<TurnSupervisorLease>> {
+        let lease_ttl_ms = lease_ttl_ms.max(1);
+        let lease_expires_at_ms = now_ms.saturating_add(lease_ttl_ms);
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<Option<TurnSupervisorLease>> {
+            let claimed = {
+                let mut stmt = self.conn.prepare(
+                    "SELECT
+                         t.id,
+                         r.id,
+                         t.project_id,
+                         t.conversation_id,
+                         cr.message_id,
+                         t.effective_settings_json,
+                         t.model_routing_decision_json,
+                         r.fencing_token
+                     FROM turns t
+                     JOIN runs r ON r.turn_id = t.id
+                     JOIN conversation_runs cr
+                       ON cr.turn_id = t.id
+                      AND cr.run_id = r.id
+                      AND cr.relation = 'primary'
+                     JOIN run_projections rp
+                       ON rp.run_id = r.id
+                     WHERE r.id = ?1
+                       AND rp.state = 'queued'
+                       AND (r.lease_expires_at_ms IS NULL OR r.lease_expires_at_ms <= ?2)
+                     LIMIT 1",
+                )?;
+                let mut rows = stmt.query(params![run_id, now_ms as i64])?;
+                rows.next()?
+                    .map(|row| {
+                        Ok::<TurnSupervisorLease, rusqlite::Error>(TurnSupervisorLease {
+                            turn_id: row.get(0)?,
+                            run_id: row.get(1)?,
+                            project_id: row.get(2)?,
+                            conversation_id: row.get(3)?,
+                            assistant_message_id: row.get(4)?,
+                            effective_settings_json: row.get(5)?,
+                            model_routing_decision_json: row.get(6)?,
+                            lease_owner: supervisor_id.to_string(),
+                            lease_expires_at_ms,
+                            fencing_token: row.get::<_, i64>(7)? as u64 + 1,
+                        })
+                    })
+                    .transpose()?
+            };
+            let Some(claimed) = claimed else {
+                return Ok(None);
+            };
+            self.conn.execute(
+                "UPDATE turns SET updated_at_ms = ?1 WHERE id = ?2",
+                params![now_ms as i64, claimed.turn_id],
+            )?;
+            self.conn.execute(
+                "UPDATE runs
+                     SET lease_owner = ?1,
+                         lease_expires_at_ms = ?2,
+                         fencing_token = ?3,
+                         updated_at_ms = ?4
+                     WHERE id = ?5",
                 params![
                     supervisor_id,
                     lease_expires_at_ms as i64,
@@ -4264,6 +4405,100 @@ mod tests {
     }
 
     #[test]
+    fn turn_supervisor_claims_target_run_before_older_queued_turn() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let (pid, cid) = project_and_conversation(&repo);
+        let first = repo
+            .accept_conversation_turn(
+                &sample_turn_start_request(
+                    &pid,
+                    &cid,
+                    "req-target-supervisor-1",
+                    "idem-target-supervisor-1",
+                ),
+                2_000,
+            )
+            .unwrap();
+        let second = repo
+            .accept_conversation_turn(
+                &sample_turn_start_request(
+                    &pid,
+                    &cid,
+                    "req-target-supervisor-2",
+                    "idem-target-supervisor-2",
+                ),
+                2_010,
+            )
+            .unwrap();
+
+        let claimed = repo
+            .claim_queued_turn_by_run_id("supervisor-target", &second.run_id, 100, 2_020)
+            .unwrap()
+            .expect("target queued run should be claimed");
+
+        assert_eq!(claimed.run_id, second.run_id);
+        assert_eq!(
+            repo.run_projection_state(&first.run_id).unwrap().as_deref(),
+            Some("queued")
+        );
+        assert_eq!(
+            repo.run_projection_state(&second.run_id)
+                .unwrap()
+                .as_deref(),
+            Some("running")
+        );
+        let next = repo
+            .claim_next_queued_turn("supervisor-next", 100, 2_030)
+            .unwrap()
+            .expect("older turn remains claimable");
+        assert_eq!(next.run_id, first.run_id);
+    }
+
+    #[test]
+    fn turn_supervisor_target_claim_can_heartbeat_immediately() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let (pid, cid) = project_and_conversation(&repo);
+        let accepted = repo
+            .accept_conversation_turn(
+                &sample_turn_start_request(
+                    &pid,
+                    &cid,
+                    "req-target-supervisor-heartbeat",
+                    "idem-target-supervisor-heartbeat",
+                ),
+                2_000,
+            )
+            .unwrap();
+        let claimed = repo
+            .claim_queued_turn_by_run_id(
+                "supervisor-target-heartbeat",
+                &accepted.run_id,
+                30_000,
+                2_010,
+            )
+            .unwrap()
+            .expect("target queued run should be claimed");
+
+        assert_eq!(
+            repo.run_projection_state(&accepted.run_id)
+                .unwrap()
+                .as_deref(),
+            Some("running")
+        );
+        assert!(
+            repo.heartbeat_turn_supervisor_lease(
+                &claimed.run_id,
+                &claimed.lease_owner,
+                claimed.fencing_token,
+                30_000,
+                2_020,
+            )
+            .unwrap(),
+            "fresh target lease must be heartbeatable before event projection"
+        );
+    }
+
+    #[test]
     fn turn_supervisor_claims_queued_turn_once_and_recovers_expired_lease() {
         let repo = ConversationRepository::open_memory().unwrap();
         let (pid, cid) = project_and_conversation(&repo);
@@ -4492,6 +4727,122 @@ mod tests {
         assert_eq!(items[1].state, "completed");
         assert_eq!(items[1].payload["message_state"], "streaming");
         assert_eq!(items[1].sequence, 2);
+    }
+
+    #[test]
+    fn timeline_limit_preserves_recent_messages_when_event_window_is_full() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let (pid, cid) = project_and_conversation(&repo);
+        let accepted = repo
+            .accept_conversation_turn(
+                &sample_turn_start_request(
+                    &pid,
+                    &cid,
+                    "req-timeline-event-window",
+                    "idem-timeline-event-window",
+                ),
+                2_000,
+            )
+            .unwrap();
+        let events = (1..=6)
+            .map(|sequence| {
+                execution_event(
+                    &accepted.run_id,
+                    &format!("evt-window-{sequence}"),
+                    sequence,
+                    EventKind::WorkItemRunning,
+                    serde_json::json!({
+                        "message": format!("worker event {sequence}"),
+                        "work_item_id": "wi-window",
+                        "to": "Running"
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+        repo.project_execution_events_into_timeline(&accepted.run_id, &events, 2_020)
+            .unwrap();
+
+        let items = repo.timeline_items_for_conversation(&cid, 3).unwrap();
+        assert!(
+            items.len() <= 3,
+            "timeline limit must be enforced: {items:#?}"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| item.kind == TimelineItemKind::UserMessage),
+            "message items must not be dropped behind high-sequence worker events: {items:#?}"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| item.kind == TimelineItemKind::AssistantMessage),
+            "assistant placeholder must remain visible with the latest event window: {items:#?}"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| item.kind == TimelineItemKind::Worker),
+            "the latest event window should still be included: {items:#?}"
+        );
+    }
+
+    #[test]
+    fn timeline_orders_newer_messages_after_older_high_sequence_events() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let (pid, cid) = project_and_conversation(&repo);
+        let first = repo
+            .accept_conversation_turn(
+                &sample_turn_start_request(
+                    &pid,
+                    &cid,
+                    "req-timeline-order-first",
+                    "idem-timeline-order-first",
+                ),
+                1_699_999_999_000,
+            )
+            .unwrap();
+        let first_events = (1..=6)
+            .map(|sequence| {
+                execution_event(
+                    &first.run_id,
+                    &format!("evt-order-first-{sequence}"),
+                    sequence,
+                    EventKind::WorkItemRunning,
+                    serde_json::json!({
+                        "message": format!("older worker event {sequence}"),
+                        "work_item_id": "wi-order",
+                        "to": "Running"
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+        repo.project_execution_events_into_timeline(&first.run_id, &first_events, 2_050)
+            .unwrap();
+
+        let second = repo
+            .accept_conversation_turn(
+                &sample_turn_start_request(
+                    &pid,
+                    &cid,
+                    "req-timeline-order-second",
+                    "idem-timeline-order-second",
+                ),
+                1_700_000_010_000,
+            )
+            .unwrap();
+
+        let items = repo.timeline_items_for_conversation(&cid, 20).unwrap();
+        let last = items
+            .last()
+            .expect("newer queued assistant message should be visible");
+        assert_eq!(last.kind, TimelineItemKind::AssistantMessage);
+        assert_eq!(last.turn_id.as_deref(), Some(second.turn_id.as_str()));
+        assert_eq!(
+            last.run_id.as_deref(),
+            Some(second.run_id.as_str()),
+            "older high-sequence worker events must not sort below a newer queued turn: {items:#?}"
+        );
     }
 
     #[test]

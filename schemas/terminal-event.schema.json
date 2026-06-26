@@ -1,0 +1,159 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TerminalEvent",
+  "type": "object",
+  "required": [
+    "event_id",
+    "event_kind",
+    "redacted",
+    "schema",
+    "sequence",
+    "session_id",
+    "timestamp_ms"
+  ],
+  "properties": {
+    "command_block": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/TerminalCommandBlock"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "event_id": {
+      "type": "string"
+    },
+    "event_kind": {
+      "$ref": "#/definitions/TerminalEventKind"
+    },
+    "evidence_refs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "message_redacted": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "output_digest": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "redacted": {
+      "type": "boolean"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "sequence": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "timestamp_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "TerminalCommandBlock": {
+      "type": "object",
+      "required": [
+        "block_id",
+        "command_redacted",
+        "cwd_redacted",
+        "redacted",
+        "schema",
+        "session_id",
+        "started_at_ms"
+      ],
+      "properties": {
+        "block_id": {
+          "type": "string"
+        },
+        "command_redacted": {
+          "type": "string"
+        },
+        "cwd_redacted": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "finished_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "redacted": {
+          "type": "boolean"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "started_at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "stderr_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stdout_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "TerminalEventKind": {
+      "type": "string",
+      "enum": [
+        "session_started",
+        "session_resized",
+        "input_accepted",
+        "command_started",
+        "command_finished",
+        "output_digest",
+        "suggestion_created",
+        "risk_decision_recorded",
+        "agent_turn_started",
+        "session_stopped",
+        "unknown"
+      ]
+    }
+  }
+}

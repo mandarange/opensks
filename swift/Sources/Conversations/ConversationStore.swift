@@ -61,6 +61,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     // independently.
     @Published private(set) var sendingConversationIDs: Set<String> = []
     @Published private(set) var savingThreadSettingsConversationIDs: Set<String> = []
+    @Published private(set) var localSendTokensByConversation: [String: String] = [:]
 
     // Filter / search.
     @Published var filter: ConversationFilter = .all
@@ -77,10 +78,11 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     /// Manual diagnostic queue drains use a hard cap so a bad supervisor state
     /// cannot pin the main actor.
     private let supervisorDrainMaxTicks = 8
-    private let runEventSubscriptionTailMs: UInt64 = 30_000
+    private let runEventSubscriptionTailMs: UInt64 = 500
     private let runEventSubscriptionPollMs: UInt64 = 100
     private var isDrainingSupervisor = false
     private var runEventSubscriptions: [String: Task<Void, Never>] = [:]
+    private var foregroundSupervisorDrains: [String: Task<Void, Never>] = [:]
     private var runEventCursors: [String: UInt64] = [:]
 
     /// The conversation whose HEAVY message page is retained. Only this one holds
@@ -124,7 +126,23 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
 
     func draft(for id: String) -> String { drafts[id] ?? "" }
 
-    func setDraft(_ text: String, for id: String) { drafts[id] = text }
+    func localSendToken(for id: String) -> String { localSendTokensByConversation[id] ?? "" }
+
+    func setDraft(_ text: String, for id: String) {
+        var updated = drafts
+        if text.isEmpty {
+            updated.removeValue(forKey: id)
+        } else {
+            updated[id] = text
+        }
+        drafts = updated
+    }
+
+    private func markLocalSend(for id: String) {
+        var updated = localSendTokensByConversation
+        updated[id] = "\(nowMs())-\(UUID().uuidString)"
+        localSendTokensByConversation = updated
+    }
 
     var isSending: Bool {
         if let id = selectedConversationID {
@@ -534,10 +552,10 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     // MARK: - Send (PR-027)
 
     /// Start ONE turn for `conversationID`: generate an idempotency key, call
-    /// `turnStart` for the durable accepted handle, subscribe to its run event
-    /// stream, then reconcile the accepted read models. The resident daemon owns
-    /// execution; Swift observes and can explicitly request supervisor ticks via
-    /// `drainSupervisorQueue`, but send itself is not the executor.
+    /// `turnStart` for the durable accepted handle, reconcile the accepted read
+    /// models, then run the foreground supervisor and event stream together so a
+    /// UI send behaves like an interactive coding session instead of leaving the
+    /// turn in a queue.
     func send(conversationID: String, text: String) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isSending(conversationID: conversationID) else { return }
@@ -549,6 +567,8 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
             errorMessage = "conversation not loaded: \(conversationID)"
             return
         }
+        setDraft("", for: conversationID)
+        markLocalSend(for: conversationID)
         do {
             let threadSettings = threadSettings(for: conversationID)
             let context = turnContextSelection(for: conversationID)
@@ -561,19 +581,103 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
                 context: context,
                 idempotencyKey: key
             )
+            await refreshConversationReadModels(for: conversationID)
             startRunEventSubscription(
                 runID: turn.runId,
                 conversationID: conversationID,
                 projectID: summary.projectId,
                 turnID: turn.turnId
             )
-            drafts[conversationID] = nil
-            await refreshConversationReadModels(for: conversationID)
+            _ = try await drainSupervisorQueue(
+                maxTicks: supervisorDrainMaxTicks,
+                refreshAfterDrain: true,
+                preferredRunID: turn.runId
+            )
             if let streamFailureMessage = latestLiveStreamFailureMessage(for: conversationID) {
                 errorMessage = streamFailureMessage
             }
         } catch {
+            await refreshConversationReadModels(for: conversationID)
+            if let recoveredRun = acceptedRunForUserMessage(in: conversationID, matching: trimmed) {
+                do {
+                    startRunEventSubscription(
+                        runID: recoveredRun.runId,
+                        conversationID: conversationID,
+                        projectID: summary.projectId,
+                        turnID: recoveredRun.turnId
+                    )
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    await refreshConversationReadModels(for: conversationID)
+                    if runState(in: conversationID, runID: recoveredRun.runId) == .queued {
+                        _ = try await drainSupervisorQueue(
+                            maxTicks: supervisorDrainMaxTicks,
+                            refreshAfterDrain: true,
+                            preferredRunID: recoveredRun.runId
+                        )
+                    }
+                    if let streamFailureMessage = latestLiveStreamFailureMessage(for: conversationID) {
+                        errorMessage = streamFailureMessage
+                    }
+                    return
+                } catch {
+                    errorMessage = "foreground supervisor failed: \(error.localizedDescription)"
+                    return
+                }
+            }
+            if draft(for: conversationID).isEmpty,
+               !acceptedUserMessageExists(in: conversationID, matching: trimmed) {
+                setDraft(trimmed, for: conversationID)
+            }
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func acceptedRunForUserMessage(
+        in conversationID: String,
+        matching text: String
+    ) -> ConversationRunRef? {
+        guard selectedConversationID == conversationID,
+              let userMessage = messages.last(where: { message in
+                  message.role == .user && message.contentRedacted == text
+              })
+        else {
+            return nil
+        }
+        return runsByConversation[conversationID]?.last { run in
+            run.turnId == userMessage.turnId
+        }
+    }
+
+    private func runState(in conversationID: String, runID: String) -> RunState? {
+        runsByConversation[conversationID]?.first { $0.runId == runID }?.runState
+    }
+
+    private func acceptedUserMessageExists(in conversationID: String, matching text: String) -> Bool {
+        guard selectedConversationID == conversationID else { return false }
+        return messages.contains { message in
+            message.role == .user && message.contentRedacted == text
+        }
+    }
+
+    private func startForegroundSupervisorDrain(runID: String) {
+        guard foregroundSupervisorDrains[runID] == nil else { return }
+        let maxTicks = supervisorDrainMaxTicks
+        foregroundSupervisorDrains[runID] = Task { [weak self] in
+            do {
+                guard let self else { return }
+                _ = try await self.drainSupervisorQueue(
+                    maxTicks: maxTicks,
+                    refreshAfterDrain: true,
+                    preferredRunID: runID
+                )
+            } catch {
+                await MainActor.run { [weak self] in
+                    self?.errorMessage = "foreground supervisor failed: \(error.localizedDescription)"
+                }
+            }
+            await MainActor.run { [weak self] in
+                self?.foregroundSupervisorDrains[runID] = nil
+            }
         }
     }
 
@@ -636,6 +740,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
                         break
                     }
                     if events.contains(where: liveExecutionEventTerminatesRun) {
+                        await self?.refreshConversationReadModels(for: conversationID)
                         break
                     }
                     if events.isEmpty {
@@ -662,17 +767,38 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     /// stuck in the sidebar as forever-running. This is a diagnostic/manual
     /// controller action, not part of the primary send/load observer path.
     @discardableResult
-    func drainSupervisorQueue(maxTicks: Int = 8, refreshAfterDrain: Bool = true) async throws -> Int {
-        guard maxTicks > 0, !isDrainingSupervisor else { return 0 }
+    func drainSupervisorQueue(
+        maxTicks: Int = 8,
+        refreshAfterDrain: Bool = true,
+        preferredRunID: String? = nil
+    ) async throws -> Int {
+        guard maxTicks > 0 else { return 0 }
+        if isDrainingSupervisor, let preferredRunID {
+            let tick = try await service.supervisorTick(runID: preferredRunID)
+            guard tick.claimed != nil || tick.executed != nil else {
+                if refreshAfterDrain {
+                    await refreshConversationReadModels()
+                }
+                return 0
+            }
+            applySupervisorTickResult(tick)
+            if refreshAfterDrain {
+                await refreshConversationReadModels()
+            }
+            return 1
+        }
+        guard !isDrainingSupervisor else { return 0 }
         isDrainingSupervisor = true
         defer { isDrainingSupervisor = false }
 
         var claimedTurns = 0
-        for _ in 0..<maxTicks {
-            let tick = try await service.supervisorTick()
+        for index in 0..<maxTicks {
+            let targetRunID = index == 0 ? preferredRunID : nil
+            let tick = try await service.supervisorTick(runID: targetRunID)
             guard tick.claimed != nil || tick.executed != nil else { break }
             claimedTurns += 1
             applySupervisorTickResult(tick)
+            if preferredRunID != nil { break }
         }
 
         if refreshAfterDrain {
@@ -752,7 +878,9 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
 
     private func conversationStatus(for runState: RunState) -> ConversationStatus {
         switch runState {
-        case .queued, .running:
+        case .queued:
+            return .queued
+        case .running:
             return .running
         case .paused:
             return .paused
@@ -799,8 +927,12 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     ) {
         guard !events.isEmpty else { return }
         var items = timelineByConversation[conversationID] ?? []
-        for event in events.sorted(by: { $0.sequence == $1.sequence ? $0.id < $1.id : $0.sequence < $1.sequence }) {
+        let sortedEvents = events.sorted {
+            $0.sequence == $1.sequence ? $0.id < $1.id : $0.sequence < $1.sequence
+        }
+        for event in sortedEvents {
             let id = "timeline-event-\(event.id)"
+            let alreadySeen = items.contains { $0.id == id }
             let sequence: Int64
             if let existing = items.first(where: { $0.id == id }) {
                 sequence = existing.sequence
@@ -826,11 +958,157 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
             } else {
                 items.append(item)
             }
+            applyLiveAssistantMessageEvent(
+                event,
+                conversationID: conversationID,
+                alreadySeen: alreadySeen,
+                items: &items
+            )
+            applyLiveRunTerminalEvent(event, conversationID: conversationID)
         }
         items.sort { lhs, rhs in
             lhs.sequence == rhs.sequence ? lhs.id < rhs.id : lhs.sequence < rhs.sequence
         }
         timelineByConversation[conversationID] = items
+    }
+
+    private func applyLiveAssistantMessageEvent(
+        _ event: ExecutionEventEnvelope,
+        conversationID: String,
+        alreadySeen: Bool,
+        items: inout [ConversationTimelineItem]
+    ) {
+        guard event.sensitivity != .secret,
+              let agentKind = event.payload["agent_event_kind"]?.stringValue,
+              agentKind == "assistant_text_delta" || agentKind == "assistant_text_completed",
+              let textValue = assistantEventTextValue(in: event.payload),
+              let assistantMessageID = liveAssistantMessageID(for: event, conversationID: conversationID)
+        else { return }
+
+        let messageIndex = selectedConversationID == conversationID
+            ? messages.firstIndex(where: { $0.id == assistantMessageID })
+            : nil
+        let timelineIndex = items.firstIndex { item in
+            item.payload.messageId == assistantMessageID
+                || item.id == "timeline-\(assistantMessageID)"
+        }
+        guard messageIndex != nil || timelineIndex != nil else { return }
+
+        let existingContent = messageIndex.map { messages[$0].contentRedacted }
+            ?? timelineIndex.flatMap { items[$0].payload.contentRedacted }
+            ?? "..."
+        let isDelta = agentKind == "assistant_text_delta" || textValue.target == "assistant_delta"
+        if alreadySeen, isDelta, !existingContent.isEmpty, existingContent != "..." {
+            return
+        }
+
+        let redacted = redactTimelineSecrets(textValue.value)
+        let content: String
+        let state: MessageState
+        if isDelta {
+            let base = existingContent == "..." ? "" : existingContent
+            content = base + redacted
+            state = .streaming
+        } else {
+            content = redacted
+            state = .complete
+        }
+
+        let updatedAtMs = nowMs()
+        if let messageIndex {
+            let existing = messages[messageIndex]
+            messages[messageIndex] = ConversationMessage(
+                schema: existing.schema,
+                id: existing.id,
+                projectId: existing.projectId,
+                conversationId: existing.conversationId,
+                turnId: existing.turnId,
+                role: existing.role,
+                state: state,
+                contentRedacted: content,
+                sequence: existing.sequence,
+                createdAtMs: existing.createdAtMs,
+                updatedAtMs: updatedAtMs
+            )
+        }
+        if let timelineIndex {
+            let existing = items[timelineIndex]
+            var payload = existing.payload
+            payload.contentRedacted = content
+            payload.messageState = state
+            items[timelineIndex] = ConversationTimelineItem(
+                schema: existing.schema,
+                id: existing.id,
+                projectId: existing.projectId,
+                conversationId: existing.conversationId,
+                turnId: existing.turnId,
+                runId: existing.runId,
+                sequence: existing.sequence,
+                kind: existing.kind,
+                state: state.rawValue,
+                payload: payload,
+                createdAtMs: existing.createdAtMs,
+                updatedAtMs: updatedAtMs
+            )
+        }
+    }
+
+    private func applyLiveRunTerminalEvent(_ event: ExecutionEventEnvelope, conversationID: String) {
+        guard let terminalState = terminalRunState(for: event) else { return }
+        let now = nowMs()
+        if var runs = runsByConversation[conversationID],
+           let runIndex = runs.firstIndex(where: { $0.runId == event.runId }) {
+            let existing = runs[runIndex]
+            runs[runIndex] = ConversationRunRef(
+                turnId: existing.turnId,
+                runId: existing.runId,
+                messageId: existing.messageId,
+                relation: existing.relation,
+                runState: terminalState
+            )
+            runsByConversation[conversationID] = runs
+
+            if selectedConversationID == conversationID,
+               let messageIndex = messages.firstIndex(where: { $0.id == existing.messageId }) {
+                let message = messages[messageIndex]
+                messages[messageIndex] = ConversationMessage(
+                    schema: message.schema,
+                    id: message.id,
+                    projectId: message.projectId,
+                    conversationId: message.conversationId,
+                    turnId: message.turnId,
+                    role: message.role,
+                    state: messageState(for: terminalState),
+                    contentRedacted: message.contentRedacted == "..." ? liveTimelineText(for: event) : message.contentRedacted,
+                    sequence: message.sequence,
+                    createdAtMs: message.createdAtMs,
+                    updatedAtMs: now
+                )
+            }
+        }
+
+        if let summaryIndex = summaries.firstIndex(where: { $0.id == conversationID }) {
+            let summary = summaries[summaryIndex]
+            summaries[summaryIndex] = ConversationSummary(
+                schema: summary.schema,
+                id: summary.id,
+                projectId: summary.projectId,
+                title: summary.title,
+                titleSource: summary.titleSource,
+                status: conversationStatus(for: terminalState),
+                pinned: summary.pinned,
+                archived: summary.archived,
+                messageCount: summary.messageCount,
+                createdAtMs: summary.createdAtMs,
+                updatedAtMs: now,
+                lastMessageAtMs: summary.lastMessageAtMs
+            )
+        }
+    }
+
+    private func liveAssistantMessageID(for event: ExecutionEventEnvelope, conversationID: String) -> String? {
+        timelinePayloadString(event.payload, "assistant_message_id")
+            ?? runsByConversation[conversationID]?.first { $0.runId == event.runId }?.messageId
     }
 
     func applyLiveStreamFailure(
@@ -1011,7 +1289,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
         errorMessage = nil
         do {
             try await service.delete(id: id)
-            drafts[id] = nil
+            setDraft("", for: id)
             runsByConversation[id] = nil
             removeCachedThreadSettings(for: id)
             contextAttachmentsByConversation[id] = nil
@@ -1212,11 +1490,19 @@ private func redactTimelineSecrets(_ value: String) -> String {
 }
 
 private func liveExecutionEventTerminatesRun(_ event: ExecutionEventEnvelope) -> Bool {
+    terminalRunState(for: event) != nil
+}
+
+private func terminalRunState(for event: ExecutionEventEnvelope) -> RunState? {
     switch event.kind {
-    case .snapshotWritten, .verificationFailed, .runCancelled:
-        return true
+    case .runCompleted, .snapshotWritten:
+        return .completed
+    case .verificationFailed:
+        return .failed
+    case .runCancelled:
+        return .cancelled
     default:
-        return false
+        return nil
     }
 }
 

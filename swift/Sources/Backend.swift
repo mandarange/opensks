@@ -631,7 +631,8 @@ actor EngineProcess {
         cwd: URL,
         requestId: String,
         supervisorId: String,
-        leaseTtlMs: UInt64
+        leaseTtlMs: UInt64,
+        runID: String? = nil
     ) async -> EngineTurnSupervisorTickResult {
         let stream = await sendRequest(
             cli: cli,
@@ -639,7 +640,8 @@ actor EngineProcess {
             request: EngineRequestEnvelope.conversationSupervisorTick(
                 id: requestId,
                 supervisorId: supervisorId,
-                leaseTtlMs: leaseTtlMs
+                leaseTtlMs: leaseTtlMs,
+                runID: runID
             )
         )
         let tick = Self.decodeTurnSupervisorTickResult(stream.rawLines)
@@ -922,7 +924,8 @@ struct EngineRequestEnvelope: Encodable {
     static func conversationSupervisorTick(
         id: String,
         supervisorId: String,
-        leaseTtlMs: UInt64
+        leaseTtlMs: UInt64,
+        runID: String? = nil
     ) -> EngineRequestEnvelope {
         EngineRequestEnvelope(
             schema: "opensks.engine-request.v1",
@@ -932,6 +935,7 @@ struct EngineRequestEnvelope: Encodable {
             params: EngineRequestParams(
                 supervisorId: supervisorId,
                 leaseTtlMs: leaseTtlMs,
+                runId: runID,
                 reasonCode: "conversation_supervisor_tick_requested"
             )
         )

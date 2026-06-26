@@ -9,7 +9,10 @@ import Foundation
 
 enum ConversationStatus: String, Codable, Sendable, Equatable, CaseIterable {
     case idle
+    case queued
     case running
+    case waitingForInput = "waiting_for_input"
+    case waitingForApproval = "waiting_for_approval"
     case paused
     case completed
     case failed
@@ -24,10 +27,10 @@ enum ConversationStatus: String, Codable, Sendable, Equatable, CaseIterable {
     /// Status as surfaced by a `StatusPill` (glyph + tint, never colour alone).
     var pillKind: StatusPill.Kind {
         switch self {
-        case .running: return .running
+        case .running, .queued: return .running
         case .completed: return .success
         case .failed: return .danger
-        case .paused, .archived: return .warning
+        case .waitingForInput, .waitingForApproval, .paused, .archived: return .warning
         case .idle, .unknown: return .neutral
         }
     }
@@ -35,13 +38,29 @@ enum ConversationStatus: String, Codable, Sendable, Equatable, CaseIterable {
     var displayLabel: String {
         switch self {
         case .idle: return "Idle"
+        case .queued: return "Queued"
         case .running: return "Running"
+        case .waitingForInput: return "Waiting for input"
+        case .waitingForApproval: return "Waiting for approval"
         case .paused: return "Paused"
         case .completed: return "Done"
         case .failed: return "Failed"
         case .archived: return "Archived"
         case .unknown: return "Unknown"
         }
+    }
+}
+
+enum ConversationTitleSource: String, Codable, Sendable, Equatable, CaseIterable {
+    case generated
+    case user
+    case agent
+    case imported
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = ConversationTitleSource(rawValue: raw) ?? .unknown
     }
 }
 
@@ -60,10 +79,13 @@ enum MessageRole: String, Codable, Sendable, Equatable {
 }
 
 enum MessageState: String, Codable, Sendable, Equatable {
+    case draft
+    case queued
     case pending
     case streaming
     case complete
     case failed
+    case cancelled
     case unknown
 
     init(from decoder: Decoder) throws {
@@ -80,7 +102,7 @@ struct ConversationSummary: Codable, Sendable, Identifiable, Equatable {
     let id: String
     let projectId: String
     let title: String
-    let titleSource: String
+    let titleSource: ConversationTitleSource
     let status: ConversationStatus
     let pinned: Bool
     let archived: Bool
@@ -185,8 +207,8 @@ enum ConversationTimelineItemKind: String, Codable, Sendable, Equatable {
 struct ConversationTimelinePayload: Codable, Sendable, Equatable {
     let messageId: String?
     let role: MessageRole?
-    let messageState: MessageState?
-    let contentRedacted: String?
+    var messageState: MessageState?
+    var contentRedacted: String?
     let runRelation: String?
     let commit: String?
     let paths: [String]?
