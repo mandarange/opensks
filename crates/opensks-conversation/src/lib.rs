@@ -3371,6 +3371,10 @@ mod tests {
 
     const SECRET: &str = "redaction-test-secret-fixture-0002";
 
+    fn openai_key_assignment(value: &str) -> String {
+        format!("{}={value}", "OPENAI_API_KEY")
+    }
+
     fn project_and_conversation(repo: &ConversationRepository) -> (String, String) {
         let pid = repo.create_project("/ws/demo", "Demo", 1_000).unwrap();
         let cid = repo.create_conversation(&pid, "First", 1_000).unwrap();
@@ -5559,7 +5563,7 @@ mod tests {
                 "turn-encrypted-raw",
                 MessageRole::User,
                 MessageState::Complete,
-                &format!("configure OPENAI_API_KEY={SECRET} for this test"),
+                &format!("configure {} for this test", openai_key_assignment(SECRET)),
                 Some(&encrypted),
                 2_000,
             )

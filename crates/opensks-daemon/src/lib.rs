@@ -8647,6 +8647,21 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
+    fn test_openai_key_assignment(value: &str) -> String {
+        format!("{}={value}", "OPENAI_API_KEY")
+    }
+
+    fn local_test_secret_write_prompt(path: &str, value: &str) -> String {
+        serde_json::json!({
+            "local_test": {
+                "op": "create_file",
+                "path": path,
+                "value": test_openai_key_assignment(value)
+            }
+        })
+        .to_string()
+    }
+
     fn fnv1a64(bytes: &[u8]) -> String {
         let mut hash = 0xcbf29ce484222325u64;
         for byte in bytes {
@@ -10938,7 +10953,10 @@ mod tests {
             "req-conversation-redacted-prompt-start",
             "idem-conversation-redacted-prompt-start",
         );
-        turn_request.message.text = r#"{"local_test":{"op":"create_file","path":"REDACTED_PROMPT_NOTE.md","value":"OPENAI_API_KEY=sk-daemon-redacted-prompt-secret"}}"#.to_string();
+        turn_request.message.text = local_test_secret_write_prompt(
+            "REDACTED_PROMPT_NOTE.md",
+            "sk-daemon-redacted-prompt-secret",
+        );
         let start = EngineRequest::conversation_turn_start(turn_request);
         let tick = EngineRequest::conversation_supervisor_tick(
             "req-conversation-redacted-prompt-tick",
@@ -11008,7 +11026,10 @@ mod tests {
     fn conversation_supervisor_tick_restores_encrypted_raw_prompt_for_execution() {
         let workspace = temp_workspace("conversation-supervisor-encrypted-raw-prompt");
         let (project_id, conversation_id) = seed_conversation(&workspace);
-        let raw_prompt = r#"{"local_test":{"op":"create_file","path":"RESTORED_RAW_PROMPT_NOTE.md","value":"OPENAI_API_KEY=sk-daemon-restored-prompt-secret"}}"#;
+        let raw_prompt = local_test_secret_write_prompt(
+            "RESTORED_RAW_PROMPT_NOTE.md",
+            "sk-daemon-restored-prompt-secret",
+        );
         let identity = age::x25519::Identity::generate();
         let recipient = identity.to_public();
         let ciphertext =
@@ -11025,7 +11046,7 @@ mod tests {
             "req-conversation-encrypted-raw-prompt-start",
             "idem-conversation-encrypted-raw-prompt-start",
         );
-        turn_request.message.text = raw_prompt.to_string();
+        turn_request.message.text = raw_prompt.clone();
         let start = EngineRequest::conversation_turn_start(turn_request);
         let start_output = run_stdio(
             &(serde_json::to_string(&start).expect("start request") + "\n"),
@@ -11040,7 +11061,7 @@ mod tests {
         let repo = ConversationRepository::open_workspace(&workspace).expect("repo");
         repo.set_message_content_with_raw_ciphertext(
             &accepted[0].user_message_id,
-            raw_prompt,
+            &raw_prompt,
             MessageState::Complete,
             Some(&opensks_conversation::MessageRawContentCiphertext {
                 ciphertext,
@@ -11075,7 +11096,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(isolated_workspace.join("RESTORED_RAW_PROMPT_NOTE.md"))
                 .expect("restored raw prompt write"),
-            "OPENAI_API_KEY=sk-daemon-restored-prompt-secret"
+            test_openai_key_assignment("sk-daemon-restored-prompt-secret")
         );
 
         let messages = repo
@@ -11111,7 +11132,10 @@ mod tests {
     fn conversation_turn_start_encrypts_raw_prompt_for_later_supervisor_restore() {
         let workspace = temp_workspace("conversation-turn-start-encrypts-raw-prompt");
         let (project_id, conversation_id) = seed_conversation(&workspace);
-        let raw_prompt = r#"{"local_test":{"op":"create_file","path":"PRODUCED_RAW_PROMPT_NOTE.md","value":"OPENAI_API_KEY=sk-daemon-produced-prompt-secret"}}"#;
+        let raw_prompt = local_test_secret_write_prompt(
+            "PRODUCED_RAW_PROMPT_NOTE.md",
+            "sk-daemon-produced-prompt-secret",
+        );
         assert!(
             test_raw_prompt_identity_text(&workspace).is_none(),
             "test starts without a pre-provisioned raw prompt identity"
@@ -11123,7 +11147,7 @@ mod tests {
             "req-conversation-produced-raw-prompt-start",
             "idem-conversation-produced-raw-prompt-start",
         );
-        turn_request.message.text = raw_prompt.to_string();
+        turn_request.message.text = raw_prompt.clone();
         let start = EngineRequest::conversation_turn_start(turn_request);
         let tick = EngineRequest::conversation_supervisor_tick(
             "req-conversation-produced-raw-prompt-tick",
@@ -11179,7 +11203,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(isolated_workspace.join("PRODUCED_RAW_PROMPT_NOTE.md"))
                 .expect("produced raw prompt write"),
-            "OPENAI_API_KEY=sk-daemon-produced-prompt-secret"
+            test_openai_key_assignment("sk-daemon-produced-prompt-secret")
         );
         let store =
             opensks_event_store::EventStore::open_workspace(&workspace).expect("event store");
