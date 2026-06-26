@@ -86,6 +86,9 @@ struct ConversationComposer: View {
             .padding(.vertical, 12)
         }
         .background(Theme.bg)
+        .task(id: conversationID) {
+            await store.loadThreadSettings(for: conversationID)
+        }
     }
 
     private var settingsBar: some View {

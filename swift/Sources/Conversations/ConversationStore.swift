@@ -163,6 +163,30 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
         threadSettingsByConversation[id] ?? ConversationThreadSettings.defaultFor(conversationID: id)
     }
 
+    private func cacheThreadSettings(_ settings: ConversationThreadSettings, for id: String) {
+        var next = threadSettingsByConversation
+        next[id] = settings
+        threadSettingsByConversation = next
+    }
+
+    private func removeCachedThreadSettings(for id: String) {
+        var next = threadSettingsByConversation
+        next.removeValue(forKey: id)
+        threadSettingsByConversation = next
+    }
+
+    private func markSavingThreadSettings(for id: String) {
+        var next = savingThreadSettingsConversationIDs
+        next.insert(id)
+        savingThreadSettingsConversationIDs = next
+    }
+
+    private func clearSavingThreadSettings(for id: String) {
+        var next = savingThreadSettingsConversationIDs
+        next.remove(id)
+        savingThreadSettingsConversationIDs = next
+    }
+
     func contextAttachments(for id: String) -> [ConversationContextAttachment] {
         contextAttachmentsByConversation[id] ?? []
     }
@@ -439,7 +463,9 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
                 hasMoreMessages = false
                 timelineByConversation[selected] = nil
             }
-            if selectedConversationID == nil, let first = summaries.first {
+            if let selected = selectedConversationID {
+                await loadThreadSettings(for: selected)
+            } else if let first = summaries.first {
                 await select(first.id)
             }
         } catch {
@@ -890,7 +916,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     func loadThreadSettings(for id: String) async {
         do {
             let settings = try await service.threadSettings(conversationID: id)
-            threadSettingsByConversation[id] = settings
+            cacheThreadSettings(settings, for: id)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -904,21 +930,21 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
         mutate: (inout ConversationThreadSettings) -> Void
     ) async {
         guard !isSavingThreadSettings(for: id) else { return }
-        savingThreadSettingsConversationIDs.insert(id)
+        markSavingThreadSettings(for: id)
         errorMessage = nil
-        defer { savingThreadSettingsConversationIDs.remove(id) }
+        defer { clearSavingThreadSettings(for: id) }
         let previous = threadSettingsByConversation[id]
         var next = threadSettings(for: id)
         mutate(&next)
-        threadSettingsByConversation[id] = next
+        cacheThreadSettings(next, for: id)
         do {
             let saved = try await service.setThreadSettings(next, conversationID: id)
-            threadSettingsByConversation[id] = saved
+            cacheThreadSettings(saved, for: id)
         } catch {
             if let previous {
-                threadSettingsByConversation[id] = previous
+                cacheThreadSettings(previous, for: id)
             } else {
-                threadSettingsByConversation.removeValue(forKey: id)
+                removeCachedThreadSettings(for: id)
             }
             errorMessage = error.localizedDescription
         }
@@ -987,7 +1013,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
             try await service.delete(id: id)
             drafts[id] = nil
             runsByConversation[id] = nil
-            threadSettingsByConversation[id] = nil
+            removeCachedThreadSettings(for: id)
             contextAttachmentsByConversation[id] = nil
             timelineByConversation[id] = nil
             commitCardsByConversation[id] = nil

@@ -622,6 +622,25 @@ struct ModelSelection: Codable, Sendable, Equatable {
     var mode: ModelSelectionMode
     var modelId: String?
     var fallbackModelIds: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case mode
+        case modelId
+        case fallbackModelIds
+    }
+
+    init(mode: ModelSelectionMode, modelId: String?, fallbackModelIds: [String]) {
+        self.mode = mode
+        self.modelId = modelId
+        self.fallbackModelIds = fallbackModelIds
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try container.decode(ModelSelectionMode.self, forKey: .mode)
+        modelId = try container.decodeIfPresent(String.self, forKey: .modelId)
+        fallbackModelIds = try container.decodeIfPresent([String].self, forKey: .fallbackModelIds) ?? []
+    }
 }
 
 enum ReasoningEffort: String, Codable, Sendable, Equatable, CaseIterable {

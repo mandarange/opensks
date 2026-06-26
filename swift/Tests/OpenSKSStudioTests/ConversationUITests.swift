@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import XCTest
 @testable import OpenSKSStudio
 
@@ -104,6 +105,16 @@ final class ConversationUITests: XCTestCase {
         XCTAssertEqual(event.kind, .error)
         XCTAssertNil(event.message)
         XCTAssertEqual(event.payload.contentRedacted, "Needs setup")
+    }
+
+    func testThreadSettingsDecodesCliModelSelectionWithoutFallbackIds() throws {
+        let json = """
+        {"schema":"opensks.thread-settings.v1","conversation_id":"c1","model_selection":{"mode":"pinned","model_id":"provider-1/code-model"},"reasoning_effort":"standard","execution_mode":"worktree","pipeline_id":"auto","max_parallelism":4,"verifier_count":1,"tool_policy_id":"project-default","approval_policy_id":"safe-interactive","updated_at_ms":10}
+        """
+        let decoded = try JSONDecoder.opensks.decode(ConversationThreadSettings.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.modelSelection.mode, .pinned)
+        XCTAssertEqual(decoded.modelSelection.modelId, "provider-1/code-model")
+        XCTAssertEqual(decoded.modelSelection.fallbackModelIds, [])
     }
 
     func testMessagePageDecodesHasMore() throws {
@@ -264,6 +275,50 @@ final class ConversationUITests: XCTestCase {
         XCTAssertEqual(persisted.pipelineId, "parallel-build")
         XCTAssertEqual(persisted.maxParallelism, 8)
         XCTAssertEqual(persisted.toolPolicyId, "read-only")
+    }
+
+    func testLoadHydratesThreadSettingsForExistingSelection() async throws {
+        let mock = MockConversationService(summaries: [summary(id: "a", title: "Alpha")])
+        var pinned = ConversationThreadSettings.defaultFor(conversationID: "a")
+        pinned.modelSelection = ModelSelection(
+            mode: .pinned,
+            modelId: "provider-1/code-model",
+            fallbackModelIds: []
+        )
+        _ = try await mock.setThreadSettings(pinned, conversationID: "a")
+
+        let store = ConversationStore(service: mock, messagePageSize: 50)
+        store.selectedConversationID = "a"
+
+        await store.load()
+
+        XCTAssertEqual(store.threadSettings(for: "a").modelSelection.mode, .pinned)
+        XCTAssertEqual(store.threadSettings(for: "a").modelSelection.modelId, "provider-1/code-model")
+    }
+
+    func testThreadSettingsModelSelectionPublishesComposerRefresh() async {
+        let mock = MockConversationService(summaries: [summary(id: "a", title: "Alpha")])
+        let store = ConversationStore(service: mock, messagePageSize: 50)
+        await store.load()
+
+        var publishCount = 0
+        let cancellable = store.objectWillChange.sink {
+            publishCount += 1
+        }
+
+        await store.updateThreadSettings(for: "a") { settings in
+            settings.modelSelection = ModelSelection(
+                mode: .pinned,
+                modelId: "provider-1/code-model",
+                fallbackModelIds: []
+            )
+        }
+
+        withExtendedLifetime(cancellable) {
+            XCTAssertGreaterThan(publishCount, 0)
+            XCTAssertEqual(store.threadSettings(for: "a").modelSelection.mode, .pinned)
+            XCTAssertEqual(store.threadSettings(for: "a").modelSelection.modelId, "provider-1/code-model")
+        }
     }
 
     // MARK: - Pagination
