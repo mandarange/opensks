@@ -54,10 +54,7 @@ pub fn runtime_capability_report(
         cap.maturity = opensks_contracts::CapabilityMaturity::Foundation;
         cap.available = false;
         cap.reason_code = provider_posture.chat_answer_reason();
-        cap.evidence_refs = vec![
-            "runtime:capability-registry".to_string(),
-            "adapter:openrouter-native-http".to_string(),
-        ];
+        cap.evidence_refs = provider_posture.chat_evidence_refs();
         cap.evidence_refs.extend(
             provider_posture
                 .evidence_refs()
@@ -88,9 +85,10 @@ pub fn runtime_capability_report(
             "patch-engine:read-back-verified".to_string(),
             "patch-engine:fsynced-transaction-journal".to_string(),
             "patch-engine:transactional-delete-rename".to_string(),
-            "driver:openrouter-tools".to_string(),
             "driver:provider-failure-terminal".to_string(),
         ];
+        cap.evidence_refs
+            .extend(provider_posture.code_edit_provider_evidence_refs());
         cap.evidence_refs.extend(
             provider_posture
                 .evidence_refs()
@@ -105,10 +103,7 @@ pub fn runtime_capability_report(
         cap.maturity = opensks_contracts::CapabilityMaturity::Foundation;
         cap.available = false;
         cap.reason_code = provider_posture.model_dispatch_reason();
-        cap.evidence_refs = vec![
-            "provider:openrouter-native-reqwest".to_string(),
-            "registry:runtime-overlay".to_string(),
-        ];
+        cap.evidence_refs = provider_posture.model_dispatch_evidence_refs();
         cap.evidence_refs.extend(
             provider_posture
                 .evidence_refs()
@@ -303,6 +298,43 @@ impl ProviderRegistryDispatchPosture {
             Self::NoEnabledProvider => vec!["provider-registry:no-enabled-provider"],
             Self::NoRegistryDb => vec!["provider-registry:not-materialized"],
         }
+    }
+
+    fn chat_evidence_refs(self) -> Vec<String> {
+        let mut refs = vec!["runtime:capability-registry".to_string()];
+        if self == Self::NoRegistryDb {
+            refs.push("adapter:openrouter-native-http".to_string());
+        } else if self.has_enabled_provider() {
+            refs.push("adapter:openai-compatible-native-http".to_string());
+        }
+        refs
+    }
+
+    fn code_edit_provider_evidence_refs(self) -> Vec<String> {
+        if self == Self::NoRegistryDb {
+            vec!["driver:openrouter-tools".to_string()]
+        } else if self.has_enabled_provider() {
+            vec!["driver:openai-compatible-tools".to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn model_dispatch_evidence_refs(self) -> Vec<String> {
+        let mut refs = vec!["registry:runtime-overlay".to_string()];
+        if self == Self::NoRegistryDb {
+            refs.insert(0, "provider:openrouter-native-reqwest".to_string());
+        } else if self.has_enabled_provider() {
+            refs.insert(0, "provider:openai-compatible-native-reqwest".to_string());
+        }
+        refs
+    }
+
+    fn has_enabled_provider(self) -> bool {
+        matches!(
+            self,
+            Self::CodeRoutePresent | Self::EnabledProviderNeedsModelCatalog
+        )
     }
 
     fn actions(self) -> Vec<String> {

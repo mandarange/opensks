@@ -196,6 +196,18 @@ fn capability_report_prefers_provider_registry_code_route_truth() {
             .any(|item| item == "provider-registry:enabled-code-model")
     );
     assert!(
+        chat.evidence_refs
+            .iter()
+            .any(|item| item == "adapter:openai-compatible-native-http")
+    );
+    assert!(
+        !chat
+            .evidence_refs
+            .iter()
+            .any(|item| item == "adapter:openrouter-native-http"),
+        "codex-lb registry route must not be reported as OpenRouter-only evidence"
+    );
+    assert!(
         chat.actions
             .iter()
             .any(|item| item == "run_provider_adapter_check")
@@ -216,6 +228,19 @@ fn capability_report_prefers_provider_registry_code_route_truth() {
             .iter()
             .any(|item| item == "provider-registry:secret-ref-only")
     );
+    assert!(
+        dispatch
+            .evidence_refs
+            .iter()
+            .any(|item| item == "provider:openai-compatible-native-reqwest")
+    );
+    assert!(
+        !dispatch
+            .evidence_refs
+            .iter()
+            .any(|item| item == "provider:openrouter-native-reqwest"),
+        "codex-lb registry route must not be reported as OpenRouter-only transport"
+    );
 
     let code_edit = report
         .capabilities
@@ -232,6 +257,19 @@ fn capability_report_prefers_provider_registry_code_route_truth() {
             .actions
             .iter()
             .any(|item| item == "review_patch_policy")
+    );
+    assert!(
+        code_edit
+            .evidence_refs
+            .iter()
+            .any(|item| item == "driver:openai-compatible-tools")
+    );
+    assert!(
+        !code_edit
+            .evidence_refs
+            .iter()
+            .any(|item| item == "driver:openrouter-tools"),
+        "codex-lb registry route must not be reported as OpenRouter-only tool driver"
     );
 
     assert!(!out.stdout.contains("sk-"));

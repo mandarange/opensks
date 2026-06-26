@@ -1574,6 +1574,17 @@ Follow-up evidence: `cargo test provider_commands_write_zero_leak_registry_probe
 - removal/deletion: no provider dispatch adapter, legacy env fallback, or compatibility CLI path was removed. Missing-registry reports keep the prior env-aware reason codes while adding `provider-registry:not-materialized` evidence.
 - final evidence: the added tests prove both sides of the truth boundary: a workspace without a provider registry remains DB-free after reporting, while a workspace with an enabled registry provider/code model reports registry-backed dispatch posture and does not serialize a fake secret value or `sk-` token in the capability JSON.
 
+### Cross-cutting - Capability Report Registry Provider Evidence Genericization
+
+- status: Verified
+- owner file/module: `crates/opensks-cli/src/capability.rs`, `crates/opensks-cli/src/capability_tests.rs`, `docs/runtime-truth-matrix.generated.md`, `docs/implementation/0e9dad0-provider-hyperparallel-ledger.md`
+- current evidence: after the provider-registry dispatch truth slice, `opensks capability report` correctly used registry state for `chat.answer`, `agent.code_edit`, and `model.dispatch` reason codes, but the evidence refs still named OpenRouter-only adapter/driver/transport strings even when the enabled registry provider was `codex-lb`. This made the remaining live-probe-required status honest, but the proof trail provider-specific in the wrong direction.
+- target change: keep OpenRouter-specific evidence only for the no-registry legacy fallback path, and publish generic OpenAI-compatible adapter/tool/transport evidence for registry-backed enabled providers such as `codex-lb`, OpenAI, OpenRouter, or OpenAI-compatible endpoints.
+- tests: `sks proof-field scan --intent "Make capability report provider evidence generic for registry-backed OpenAI-compatible providers instead of OpenRouter-only" --changed crates/opensks-cli/src/capability.rs --changed crates/opensks-cli/src/capability_tests.rs --changed docs/runtime-truth-matrix.generated.md --changed docs/implementation/0e9dad0-provider-hyperparallel-ledger.md` reported `Mode: balanced`, `Eligible: no`, `Contract clarity: 0.7`, and `Workflow complexity: focused (0.22)`, so this slice stayed parent-owned under the user's explicit continuation request. `cargo fmt --all --check` passed. `cargo test -p opensks-cli capability --locked` passed with 4 focused capability tests. `cargo run -- capability report` now reports the current registry-backed route with `adapter:openai-compatible-native-http`, `driver:openai-compatible-tools`, and `provider:openai-compatible-native-reqwest` while preserving provider-registry enabled-provider, enabled-code-model, and secret-ref-only evidence. `cargo run -p xtask -- capability-matrix --runtime-fixture release` regenerated `docs/runtime-truth-matrix.generated.md` with the generic provider evidence.
+- migration: no schema or DB migration. Runtime truth evidence strings changed only in capability report/matrix output.
+- removal/deletion: no OpenRouter adapter or legacy env fallback was removed. The no-registry fallback still emits the existing OpenRouter evidence refs for the old env-based path.
+- final evidence: the codex-lb fixture regression asserts that registry-backed capability output contains the generic OpenAI-compatible evidence refs and no longer reports `adapter:openrouter-native-http`, `driver:openrouter-tools`, or `provider:openrouter-native-reqwest` for a codex-lb route.
+
 ### Architecture - CLI Vault Test Module Split And Path Hygiene
 
 - status: Verified
