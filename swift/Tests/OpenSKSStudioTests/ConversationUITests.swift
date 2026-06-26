@@ -321,6 +321,45 @@ final class ConversationUITests: XCTestCase {
         }
     }
 
+    func testComposerModelSelectionNormalizesProviderAliasBeforePersisting() async throws {
+        let mock = MockConversationService(summaries: [summary(id: "a", title: "Alpha")])
+        let store = ConversationStore(service: mock, messagePageSize: 50)
+        await store.load()
+
+        await store.updateThreadSettings(for: "a") { settings in
+            settings.modelSelection = ModelSelection(
+                mode: .pinned,
+                modelId: "codex-lb",
+                fallbackModelIds: []
+            )
+        }
+
+        let providers = ProviderStore(secretStore: InMemoryProviderSecretStore())
+        var draft = ProviderDraft(kind: .codexLB)
+        draft.displayName = "codex-lb"
+        draft.codexLbDomain = "codex.hyper-lab.xyz"
+        let providerID = try await providers.connect(draft, credential: SecureCredential(value: "test-secret"))
+
+        let current = store.threadSettings(for: "a").modelSelection
+        let normalized = providers.normalizedTextModelSelection(from: current)
+        await store.updateThreadSettings(for: "a") { settings in
+            settings.modelSelection = normalized
+        }
+
+        let persisted = store.threadSettings(for: "a").modelSelection
+        XCTAssertEqual(persisted.mode, .pinned)
+        XCTAssertEqual(persisted.modelId, "\(providerID)/auto-code")
+        XCTAssertEqual(
+            persisted.fallbackModelIds,
+            [
+                "\(providerID)/gpt-5.4-mini",
+                "\(providerID)/gpt-5.4-nano",
+                "\(providerID)/gpt-5.5"
+            ]
+        )
+        XCTAssertEqual(providers.modelDisplayLabel(for: persisted.modelId ?? ""), "codex-lb / Default code model")
+    }
+
     // MARK: - Pagination
 
     func testMessagePaginationAppendsOlderPages() async {

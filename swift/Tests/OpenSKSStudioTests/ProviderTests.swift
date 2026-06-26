@@ -623,12 +623,115 @@ final class ProviderTests: XCTestCase {
         let encoded = String(decoding: try JSONEncoder.opensks.encode(saved), as: UTF8.self)
         XCTAssertTrue(encoded.contains("\"kind\":\"codex_lb\""))
         XCTAssertTrue(encoded.contains("\"schema\":\"opensks.secret-ref.v1\""))
-        XCTAssertEqual(store.models(for: provider.id).count, 2)
+        XCTAssertEqual(store.models(for: provider.id).count, 5)
         XCTAssertTrue(store.models(for: provider.id).allSatisfy { $0.health == .needsProbe })
         XCTAssertTrue(store.hasEligibleTextModel)
         XCTAssertTrue(store.hasEligibleImageModel)
-        XCTAssertEqual(store.eligibleTextModels.map(\.id), ["\(provider.id)/auto-code"])
+        XCTAssertEqual(
+            store.eligibleTextModels.map(\.id),
+            [
+                "\(provider.id)/auto-code",
+                "\(provider.id)/gpt-5.4-mini",
+                "\(provider.id)/gpt-5.4-nano",
+                "\(provider.id)/gpt-5.5"
+            ]
+        )
         XCTAssertEqual(store.eligibleImageModels.map(\.id), ["\(provider.id)/auto-image"])
+    }
+
+    func testProviderStoreNormalizesCodexLbAliasToConcreteDefaultModel() async throws {
+        let service = RecordingProviderRegistryService()
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore(), service: service)
+
+        let providerID = try await store.connect(
+            ProviderDraft(
+                kind: .codexLB,
+                displayName: "codex-lb",
+                codexLbDomain: "codex-lb.example.com",
+                enabled: true,
+                maxConcurrentRequests: 2
+            ),
+            credential: SecureCredential(value: "sk-live-secret-never-persist")
+        )
+
+        let normalized = store.normalizedTextModelSelection(from: ModelSelection(
+            mode: .pinned,
+            modelId: "codex-lb",
+            fallbackModelIds: []
+        ))
+
+        XCTAssertEqual(normalized.mode, .pinned)
+        XCTAssertEqual(normalized.modelId, "\(providerID)/auto-code")
+        XCTAssertEqual(
+            normalized.fallbackModelIds,
+            [
+                "\(providerID)/gpt-5.4-mini",
+                "\(providerID)/gpt-5.4-nano",
+                "\(providerID)/gpt-5.5"
+            ]
+        )
+        XCTAssertEqual(store.modelDisplayLabel(for: "\(providerID)/auto-code"), "codex-lb / Default code model")
+    }
+
+    func testProviderStoreNormalizesOpenRouterDisplayAliasToCatalogModel() async throws {
+        let service = RecordingProviderRegistryService()
+        service.state.providers = [Self.providerRecord(health: "healthy", displayName: "OpenRouter")]
+        service.state.models = [
+            Self.modelRecord(health: "healthy", providerID: "provider-1")
+        ]
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore(), service: service)
+
+        await store.refresh()
+
+        let normalized = store.normalizedTextModelSelection(from: ModelSelection(
+            mode: .pinned,
+            modelId: "OpenRouter",
+            fallbackModelIds: []
+        ))
+
+        XCTAssertEqual(normalized.mode, .pinned)
+        XCTAssertEqual(normalized.modelId, "provider-1/code-model")
+        XCTAssertEqual(store.modelDisplayLabel(for: "provider-1/code-model"), "OpenRouter / Code Model")
+    }
+
+    func testProviderStoreBackfillsMissingCodexLbSeedModelsOnRefresh() async throws {
+        let service = RecordingProviderRegistryService()
+        service.state.providers = [
+            Self.providerRecord(
+                kind: .codexLB,
+                id: "provider-1",
+                displayName: "codex-lb",
+                endpoint: "https://codex.hyper-lab.xyz/backend-api/codex"
+            )
+        ]
+        var existingAuto = Self.modelRecord(health: "unknown", providerID: "provider-1")
+        existingAuto.id = "provider-1/auto-code"
+        existingAuto.remoteModelId = "auto-code"
+        existingAuto.displayName = "Auto code model"
+        service.state.models = [existingAuto]
+        let store = ProviderStore(secretStore: InMemoryProviderSecretStore(), service: service)
+
+        await store.refresh()
+
+        XCTAssertEqual(
+            service.syncedModels.map(\.id).sorted(),
+            [
+                "provider-1/auto-image",
+                "provider-1/gpt-5.4-mini",
+                "provider-1/gpt-5.4-nano",
+                "provider-1/gpt-5.5"
+            ]
+        )
+        XCTAssertEqual(
+            store.eligibleTextModels.map(\.id),
+            [
+                "provider-1/auto-code",
+                "provider-1/gpt-5.4-mini",
+                "provider-1/gpt-5.4-nano",
+                "provider-1/gpt-5.5"
+            ]
+        )
+        XCTAssertEqual(store.modelDisplayLabel(for: "provider-1/gpt-5.5"), "codex-lb / GPT-5.5")
     }
 
     func testProviderStoreMakesSavedCodexLbRegistryModelsSelectableBeforeProbe() async throws {
@@ -652,8 +755,8 @@ final class ProviderTests: XCTestCase {
         XCTAssertEqual(store.connections.first?.health, .needsProbe)
         XCTAssertTrue(store.hasEligibleTextModel)
         XCTAssertTrue(store.hasEligibleImageModel)
-        XCTAssertEqual(store.eligibleTextModels.map(\.id), ["provider-1/code-model"])
-        XCTAssertEqual(store.eligibleImageModels.map(\.id), ["provider-1/image-model"])
+        XCTAssertTrue(store.eligibleTextModels.map(\.id).contains("provider-1/code-model"))
+        XCTAssertTrue(store.eligibleImageModels.map(\.id).contains("provider-1/image-model"))
     }
 
     func testProviderSecretRefDefaultsSchemaWhenDecodingOlderRecords() throws {
@@ -1057,7 +1160,8 @@ private final class RecordingProviderRegistryService: ProviderRegistryService, @
 
     func syncModels(providerID: String, models: [ProviderModelRecord]) async throws -> ProviderRegistryCommandResult {
         syncedModels = models
-        state.models.removeAll { $0.providerId == providerID }
+        let syncedIDs = Set(models.map(\.id))
+        state.models.removeAll { $0.providerId == providerID && syncedIDs.contains($0.id) }
         state.models.append(contentsOf: models)
         return result(providerID: providerID, mutation: "models_synced", revision: 1)
     }

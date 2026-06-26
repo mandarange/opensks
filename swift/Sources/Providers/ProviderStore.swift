@@ -44,6 +44,22 @@ final class ProviderStore: ObservableObject {
         )
     }
 
+    func normalizedTextModelSelection(from selection: ModelSelection) -> ModelSelection {
+        guard selection.mode == .pinned else { return selection }
+        guard let rawModelID = selection.modelId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawModelID.isEmpty
+        else {
+            return ModelSelection(mode: .auto, modelId: nil, fallbackModelIds: [])
+        }
+        if let model = model(id: rawModelID), modelIsSelectable(model, requiring: .code) {
+            return textModelSelection(pinning: model.id)
+        }
+        if let model = preferredTextModel(forProviderAlias: rawModelID) {
+            return textModelSelection(pinning: model.id)
+        }
+        return selection
+    }
+
     func fallbackTextModelIDs(excluding modelID: String?) -> [String] {
         eligibleTextModels
             .filter { $0.id != modelID }
@@ -97,6 +113,30 @@ final class ProviderStore: ObservableObject {
             && model.health == .needsProbe
     }
 
+    private func preferredTextModel(forProviderAlias alias: String) -> ProviderModelViewModel? {
+        let normalizedAlias = normalizedProviderAlias(alias)
+        guard let provider = connections.first(where: { connection in
+            [
+                connection.id,
+                connection.displayName,
+                connection.kind.rawValue,
+                connection.kind.displayLabel
+            ].contains { normalizedProviderAlias($0) == normalizedAlias }
+        }) else {
+            return nil
+        }
+        return eligibleTextModels.first { $0.providerID == provider.id }
+    }
+
+    private func normalizedProviderAlias(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+    }
+
     var enabledProviderCount: Int {
         connections.filter(\.enabled).count
     }
@@ -137,7 +177,11 @@ final class ProviderStore: ObservableObject {
         }
         syncState = .syncing
         do {
-            applyRegistryState(try await service.registryState())
+            let state = try await service.registryState()
+            applyRegistryState(state)
+            if try await backfillSeededCodexLbModelsIfNeeded(state, service: service) {
+                applyRegistryState(try await service.registryState())
+            }
             syncState = .idle
         } catch {
             syncState = .failed(error.localizedDescription)
@@ -330,6 +374,11 @@ final class ProviderStore: ObservableObject {
         models.first { $0.id == id }
     }
 
+    func modelDisplayLabel(for id: String) -> String? {
+        guard let model = model(id: id) else { return nil }
+        return "\(providerDisplayName(for: model.providerID)) / \(model.displayName)"
+    }
+
     func providerDisplayName(for id: String) -> String {
         connections.first { $0.id == id }?.displayName ?? id
     }
@@ -352,6 +401,24 @@ final class ProviderStore: ObservableObject {
         models.append(contentsOf: seeded)
         updateEnabledModelCount(for: providerID)
         syncState = .idle
+    }
+
+    private func backfillSeededCodexLbModelsIfNeeded(
+        _ state: ProviderRegistryState,
+        service: ProviderRegistryService
+    ) async throws -> Bool {
+        let modelsByProvider = Dictionary(grouping: state.models, by: \.providerId)
+        var backfilled = false
+        for provider in state.providers where provider.kind == .codexLB {
+            let existingIDs = Set(modelsByProvider[provider.id, default: []].map(\.id))
+            let missing = seededModelRecords(providerID: provider.id, kind: provider.kind)
+                .filter { !existingIDs.contains($0.id) }
+            if !missing.isEmpty {
+                _ = try await service.syncModels(providerID: provider.id, models: missing)
+                backfilled = true
+            }
+        }
+        return backfilled
     }
 
     private func applyRegistryState(_ state: ProviderRegistryState) {
@@ -381,34 +448,80 @@ final class ProviderStore: ObservableObject {
 
     private func seededLocalModels(providerID: String, kind: ProviderKind) -> [ProviderModelViewModel] {
         switch kind {
-        case .openRouter, .openAI, .codexLB, .openAICompatible, .localOpenAICompatible:
+        case .codexLB:
             return [
-                ProviderModelViewModel(
-                    id: "\(providerID)/auto-code",
+                seededCodeModel(
+                    providerID: providerID,
+                    remoteModelID: "auto-code",
+                    displayName: "Default code model",
+                    contextWindow: 128_000
+                ),
+                seededCodeModel(
+                    providerID: providerID,
+                    remoteModelID: "gpt-5.5",
+                    displayName: "GPT-5.5",
+                    contextWindow: 400_000
+                ),
+                seededCodeModel(
+                    providerID: providerID,
+                    remoteModelID: "gpt-5.4-mini",
+                    displayName: "GPT-5.4 mini",
+                    contextWindow: 400_000
+                ),
+                seededCodeModel(
+                    providerID: providerID,
+                    remoteModelID: "gpt-5.4-nano",
+                    displayName: "GPT-5.4 nano",
+                    contextWindow: 400_000
+                ),
+                seededImageModel(providerID: providerID)
+            ]
+        case .openRouter, .openAI, .openAICompatible, .localOpenAICompatible:
+            return [
+                seededCodeModel(
                     providerID: providerID,
                     remoteModelID: "auto-code",
                     displayName: "Auto code model",
-                    enabled: true,
-                    health: .needsProbe,
-                    capabilities: [.code, .tools, .longContext],
-                    contextWindow: 128_000,
-                    priceSummary: nil
+                    contextWindow: 128_000
                 ),
-                ProviderModelViewModel(
-                    id: "\(providerID)/auto-image",
-                    providerID: providerID,
-                    remoteModelID: "auto-image",
-                    displayName: "Auto image model",
-                    enabled: true,
-                    health: .needsProbe,
-                    capabilities: [.vision, .image],
-                    contextWindow: nil,
-                    priceSummary: nil
-                )
+                seededImageModel(providerID: providerID)
             ]
         case .anthropicCompatible, .googleCompatible, .custom:
             return []
         }
+    }
+
+    private func seededCodeModel(
+        providerID: String,
+        remoteModelID: String,
+        displayName: String,
+        contextWindow: Int
+    ) -> ProviderModelViewModel {
+        ProviderModelViewModel(
+            id: "\(providerID)/\(remoteModelID)",
+            providerID: providerID,
+            remoteModelID: remoteModelID,
+            displayName: displayName,
+            enabled: true,
+            health: .needsProbe,
+            capabilities: [.code, .tools, .longContext],
+            contextWindow: contextWindow,
+            priceSummary: nil
+        )
+    }
+
+    private func seededImageModel(providerID: String) -> ProviderModelViewModel {
+        ProviderModelViewModel(
+            id: "\(providerID)/auto-image",
+            providerID: providerID,
+            remoteModelID: "auto-image",
+            displayName: "Auto image model",
+            enabled: true,
+            health: .needsProbe,
+            capabilities: [.vision, .image],
+            contextWindow: nil,
+            priceSummary: nil
+        )
     }
 
     private func seededModelRecords(providerID: String, kind: ProviderKind) -> [ProviderModelRecord] {

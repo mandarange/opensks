@@ -2705,6 +2705,113 @@ fn stable_id_fragment(value: &str) -> String {
         .collect()
 }
 
+#[derive(Debug, Clone)]
+struct CliProviderDispatchTarget {
+    connection: opensks_contracts::ProviderConnection,
+    model: opensks_contracts::ModelCatalogEntry,
+    bearer_token: String,
+}
+
+fn prepare_cli_provider_dispatch(
+    workspace: &Path,
+    settings: &opensks_contracts::ConversationTurnSettings,
+) -> Result<Option<CliProviderDispatchTarget>, CliError> {
+    if settings
+        .model
+        .model_id
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Ok(None);
+    }
+    let repo = opensks_provider::ProviderRepository::open_workspace(workspace)
+        .map_err(|error| CliError::Invalid(error.to_string()))?;
+    let decision = opensks_provider::resolve_routing_decision_from_repository(
+        &repo,
+        "cli-turn-dispatch",
+        settings,
+    )
+    .map_err(|error| CliError::Invalid(error.to_string()))?;
+    if !decision.status.has_resolved_model() {
+        return Ok(None);
+    }
+    let Some(model_id) = decision.selected_model_id.as_deref() else {
+        return Ok(None);
+    };
+    let (connection, model) = cli_provider_dispatch_parts_for_model(&repo, model_id)?;
+    let bearer_token = provider_registry::resolve_provider_secret(&connection, None)?;
+    Ok(Some(CliProviderDispatchTarget {
+        connection,
+        model,
+        bearer_token,
+    }))
+}
+
+fn cli_provider_dispatch_parts_for_model(
+    repo: &opensks_provider::ProviderRepository,
+    model_id: &str,
+) -> Result<
+    (
+        opensks_contracts::ProviderConnection,
+        opensks_contracts::ModelCatalogEntry,
+    ),
+    CliError,
+> {
+    let model = repo
+        .get_model(model_id)
+        .map_err(|error| CliError::Invalid(error.to_string()))?;
+    let connection = repo
+        .get_connection(&model.provider_id)
+        .map_err(|error| CliError::Invalid(error.to_string()))?;
+    if !connection.enabled {
+        return Err(CliError::Invalid(
+            "selected provider is disabled".to_string(),
+        ));
+    }
+    if !supports_openai_compatible_dispatch(connection.kind) {
+        return Err(CliError::Invalid(format!(
+            "provider kind `{:?}` is not supported by chat dispatch",
+            connection.kind
+        )));
+    }
+    Ok((connection, model))
+}
+
+fn supports_openai_compatible_dispatch(kind: opensks_contracts::ProviderKind) -> bool {
+    matches!(
+        kind,
+        opensks_contracts::ProviderKind::OpenRouter
+            | opensks_contracts::ProviderKind::OpenAi
+            | opensks_contracts::ProviderKind::CodexLb
+            | opensks_contracts::ProviderKind::OpenAiCompatible
+            | opensks_contracts::ProviderKind::LocalOpenAiCompatible
+    )
+}
+
+fn chat_reasoning_effort_wire_for_provider(
+    kind: opensks_contracts::ProviderKind,
+) -> Option<opensks_adapter::ChatReasoningEffortWire> {
+    match kind {
+        opensks_contracts::ProviderKind::OpenRouter => {
+            Some(opensks_adapter::ChatReasoningEffortWire::OpenRouterReasoningObject)
+        }
+        opensks_contracts::ProviderKind::OpenAi => {
+            Some(opensks_adapter::ChatReasoningEffortWire::OpenAiReasoningEffort)
+        }
+        _ => None,
+    }
+}
+
+fn max_output_tokens_for_provider_model(model: &opensks_contracts::ModelCatalogEntry) -> u32 {
+    model
+        .limits
+        .max_output_tokens
+        .unwrap_or(1024)
+        .clamp(1, u32::MAX as u64) as u32
+}
+
 /// Persist a user message and an assistant placeholder, start one deterministic
 /// engine run against the workspace, finalize the assistant message from the run
 /// result, link the run, and (when an idempotency key is supplied) record the
@@ -2818,15 +2925,43 @@ fn run_conversation_turn_start(
     // are updated; the future daemon subscriber path replays this same store.
     let journal_sink = DurableAgentEventSink::open(workspace)?;
     journal_sink.emit_run_started(&request)?;
+    let explicit_local_test = opensks_adapter::LocalTestInstruction::from_prompt(text).is_some();
+    let provider_dispatch = if explicit_local_test {
+        None
+    } else {
+        prepare_cli_provider_dispatch(workspace, &effective_settings)?
+    };
     let model = model_routing_decision
         .status
         .has_resolved_model()
         .then(|| model_routing_decision.selected_model_id.clone())
         .flatten()
         .map(opensks_adapter::OpenRouterAdapter::new);
-    let explicit_local_test = opensks_adapter::LocalTestInstruction::from_prompt(text).is_some();
     let agentic_config = opensks_adapter::AgenticConfig::for_turn_settings(&effective_settings);
-    let outcome = if let Some(model) = model.filter(opensks_adapter::OpenRouterAdapter::is_configured) {
+    let outcome = if let Some(dispatch) = provider_dispatch {
+        let completer = opensks_adapter::OpenAiCompatibleChatCompleter::new(
+            dispatch.connection.endpoint.base_url.clone(),
+            dispatch.bearer_token.clone(),
+        )
+        .map_err(|error| CliError::Invalid(format!("provider dispatch setup failed: {error}")))?;
+        let mut driver = opensks_adapter::OpenRouterToolDriver::new(
+            dispatch.model.remote_model_id.clone(),
+            max_output_tokens_for_provider_model(&dispatch.model),
+            completer,
+            "You are a coding agent. Use workspace tools for file changes; final text alone must not claim files changed.",
+            text,
+        )
+        .with_chat_reasoning_effort_if_some(
+            chat_reasoning_effort_wire_for_provider(dispatch.connection.kind),
+            agentic_config.reasoning_effort,
+        );
+        opensks_adapter::run_agentic_loop(
+            &request,
+            &mut driver,
+            &agentic_config,
+            &journal_sink,
+        )
+    } else if let Some(model) = model.filter(opensks_adapter::OpenRouterAdapter::is_configured) {
         let completer = opensks_adapter::NativeHttpChatCompleter::new(model.clone());
         let mut driver = opensks_adapter::OpenRouterToolDriver::new(
             model.model.clone(),
@@ -5754,6 +5889,89 @@ mod tests {
         );
         assert!(error.to_string().contains(provider_usage()));
         assert!(!root.join(".opensks").join("providers").exists());
+    }
+
+    #[test]
+    fn cli_provider_dispatch_parts_keep_provider_and_remote_model_separate() {
+        let root = temp_workspace("opensks-cli-provider-model-dispatch");
+        let repo =
+            opensks_provider::ProviderRepository::open_workspace(&root).expect("provider registry");
+        let connection = opensks_contracts::ProviderConnection {
+            schema: opensks_contracts::PROVIDER_CONNECTION_SCHEMA.to_string(),
+            id: "provider-1".to_string(),
+            kind: opensks_contracts::ProviderKind::CodexLb,
+            display_name: "codex-lb".to_string(),
+            enabled: true,
+            endpoint: opensks_contracts::ProviderEndpoint {
+                base_url: "https://codex.hyper-lab.xyz/backend-api/codex".to_string(),
+                allow_insecure_http: false,
+            },
+            auth: opensks_contracts::SecretRef {
+                schema: opensks_contracts::SECRET_REF_SCHEMA.to_string(),
+                store: opensks_contracts::SecretStoreKind::MacosKeychain,
+                service: "ai.opensks.provider.codex_lb".to_string(),
+                account: "provider-1".to_string(),
+                version: 1,
+            },
+            organization_ref: None,
+            project_ref: None,
+            health: opensks_contracts::ProviderHealthSnapshot::unknown(),
+            concurrency: opensks_contracts::ProviderConcurrencyPolicy {
+                max_concurrent_requests: 4,
+                requests_per_minute: None,
+                tokens_per_minute: None,
+            },
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            revision: 1,
+        };
+        repo.upsert_connection(&connection, None, 1)
+            .expect("connection saved");
+
+        let mut role_scores = std::collections::BTreeMap::new();
+        role_scores.insert(
+            opensks_contracts::ModelRole::Code,
+            opensks_contracts::RoleScore {
+                score: 0.91,
+                evidence_refs: vec!["test-catalog".to_string()],
+            },
+        );
+        let model = opensks_contracts::ModelCatalogEntry {
+            schema: opensks_contracts::MODEL_CATALOG_ENTRY_SCHEMA.to_string(),
+            id: "provider-1/gpt-5.5".to_string(),
+            provider_id: "provider-1".to_string(),
+            remote_model_id: "openai/gpt-5.5".to_string(),
+            display_name: "GPT-5.5".to_string(),
+            enabled: true,
+            capabilities: opensks_contracts::ModelCapabilities::text_code(),
+            limits: opensks_contracts::ModelLimits {
+                max_input_tokens: Some(400_000),
+                max_output_tokens: Some(777),
+                requests_per_minute: None,
+                tokens_per_minute: None,
+                max_concurrency: Some(4),
+            },
+            pricing: None,
+            health: opensks_contracts::HealthState::Healthy,
+            role_scores,
+            catalog_revision: "catalog-rev-1".to_string(),
+        };
+        repo.sync_models("provider-1", &[model], 2)
+            .expect("models synced");
+
+        let (resolved_connection, resolved_model) =
+            cli_provider_dispatch_parts_for_model(&repo, "provider-1/gpt-5.5")
+                .expect("dispatch parts");
+        assert_eq!(resolved_connection.id, "provider-1");
+        assert_eq!(
+            resolved_connection.kind,
+            opensks_contracts::ProviderKind::CodexLb
+        );
+        assert_eq!(resolved_model.id, "provider-1/gpt-5.5");
+        assert_eq!(resolved_model.remote_model_id, "openai/gpt-5.5");
+        assert_eq!(max_output_tokens_for_provider_model(&resolved_model), 777);
+
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

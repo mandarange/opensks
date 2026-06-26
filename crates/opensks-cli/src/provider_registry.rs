@@ -309,7 +309,7 @@ fn required(value: Option<&str>) -> Result<&str, CliError> {
     value.ok_or_else(|| CliError::Usage(provider_usage().to_string()))
 }
 
-fn resolve_provider_secret(
+pub(crate) fn resolve_provider_secret(
     connection: &opensks_contracts::ProviderConnection,
     keychain_command: Option<&Path>,
 ) -> Result<String, CliError> {

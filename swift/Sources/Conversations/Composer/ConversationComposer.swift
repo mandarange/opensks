@@ -89,6 +89,9 @@ struct ConversationComposer: View {
         .task(id: conversationID) {
             await store.loadThreadSettings(for: conversationID)
         }
+        .task(id: modelSelectionNormalizationKey) {
+            await normalizeTextModelSelectionIfNeeded()
+        }
     }
 
     private var settingsBar: some View {
@@ -343,13 +346,23 @@ struct ConversationComposer: View {
         case .auto: return "Auto"
         case .pinned:
             guard let id = settings.modelSelection.modelId, !id.isEmpty else { return "Pinned" }
-            return providers.model(id: id)?.displayName ?? id
+            return providers.modelDisplayLabel(for: id) ?? id
         }
     }
 
     private var imageModelLabel: String {
         guard let id = settings.imageModelId, !id.isEmpty else { return "Auto" }
-        return providers.model(id: id)?.displayName ?? id
+        return providers.modelDisplayLabel(for: id) ?? id
+    }
+
+    private var modelSelectionNormalizationKey: String {
+        [
+            conversationID,
+            settings.modelSelection.mode.rawValue,
+            settings.modelSelection.modelId ?? "",
+            providers.eligibleTextModels.map(\.id).joined(separator: "|"),
+            providers.connections.map { "\($0.id):\($0.displayName):\($0.kind.rawValue)" }.joined(separator: "|")
+        ].joined(separator: "||")
     }
 
     private var providerReadinessLabel: String {
@@ -390,6 +403,15 @@ struct ConversationComposer: View {
 
     private func updateSettings(_ mutate: @escaping (inout ConversationThreadSettings) -> Void) {
         Task { await store.updateThreadSettings(for: conversationID, mutate: mutate) }
+    }
+
+    private func normalizeTextModelSelectionIfNeeded() async {
+        let current = settings.modelSelection
+        let normalized = providers.normalizedTextModelSelection(from: current)
+        guard normalized != current else { return }
+        await store.updateThreadSettings(for: conversationID) { settings in
+            settings.modelSelection = normalized
+        }
     }
 
     private func send() {
