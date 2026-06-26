@@ -43,9 +43,17 @@ func classifyLine(_ s: String) -> LineKind {
 
 // MARK: - Process runner (off the main actor)
 
+struct CLICaptureResult: Sendable {
+    let stdout: Data
+    let stderr: String
+    let exitCode: Int32?
+    let timedOut: Bool
+    let launchError: String?
+}
+
 actor CLIRunner {
     /// Run `cli args` capturing all stdout. Used for the quick `app-data` read.
-    func capture(cli: URL, cwd: URL, args: [String]) async -> Data {
+    func capture(cli: URL, cwd: URL, args: [String]) async -> CLICaptureResult {
         do {
             let result = try await ProcessSupervisor().run(
                 ProcessSupervisor.Spec(
@@ -57,10 +65,21 @@ actor CLIRunner {
                     maxCaptureBytes: 4 * 1024 * 1024
                 )
             )
-            guard result.exitCode == 0, !result.timedOut else { return Data() }
-            return result.stdout
+            return CLICaptureResult(
+                stdout: result.stdout,
+                stderr: String(decoding: result.stderr, as: UTF8.self),
+                exitCode: result.exitCode,
+                timedOut: result.timedOut,
+                launchError: nil
+            )
         } catch {
-            return Data()
+            return CLICaptureResult(
+                stdout: Data(),
+                stderr: "",
+                exitCode: nil,
+                timedOut: false,
+                launchError: error.localizedDescription
+            )
         }
     }
 
@@ -1396,13 +1415,13 @@ final class AppState: ObservableObject {
         let ws = self.workspace
         let runner = self.runner
         Task {
-            let raw = await runner.capture(cli: cli, cwd: ws, args: ["app-data", ws.path])
-            if raw.isEmpty {
-                self.loadError = "opensks-cli app-data returned no output"
+            let result = await runner.capture(cli: cli, cwd: ws, args: ["app-data", ws.path])
+            if result.exitCode != 0 || result.timedOut || result.stdout.isEmpty {
+                self.loadError = Self.appDataLoadError(result)
                 return
             }
             do {
-                let data = try JSONDecoder.opensks.decode(AppData.self, from: raw)
+                let data = try JSONDecoder.opensks.decode(AppData.self, from: result.stdout)
                 let fingerprint = await Self.proofArtifactFingerprint(workspace: ws)
                 self.data = data
                 self.lastProofArtifactFingerprint = fingerprint
@@ -1411,6 +1430,36 @@ final class AppState: ObservableObject {
                 self.loadError = "could not decode app-data: \(error.localizedDescription)"
             }
         }
+    }
+
+    static func appDataLoadError(_ result: CLICaptureResult) -> String {
+        var message: String
+        if let launchError = result.launchError {
+            message = "opensks-cli app-data launch failed: \(singleLineDiagnostic(launchError))"
+        } else if result.timedOut {
+            message = "opensks-cli app-data timed out after \(Int(OpenSKSCLIProcess.commandTimeoutSeconds))s"
+        } else if let exitCode = result.exitCode, exitCode != 0 {
+            message = "opensks-cli app-data exited \(exitCode)"
+        } else {
+            message = "opensks-cli app-data returned no output"
+        }
+
+        let stderr = singleLineDiagnostic(result.stderr)
+        if !stderr.isEmpty {
+            message += " - \(stderr)"
+        }
+        return message
+    }
+
+    private static func singleLineDiagnostic(_ raw: String, limit: Int = 180) -> String {
+        let normalized = raw
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard normalized.count > limit else { return normalized }
+        let end = normalized.index(normalized.startIndex, offsetBy: limit)
+        return String(normalized[..<end]) + "..."
     }
 
     func startProofArtifactRefresh(intervalNanoseconds: UInt64 = 2_000_000_000) {

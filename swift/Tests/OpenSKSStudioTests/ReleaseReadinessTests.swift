@@ -258,6 +258,45 @@ final class ReleaseReadinessTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testAppDataLoadErrorCarriesExitTimeoutAndStderr() {
+        let exited = AppState.appDataLoadError(
+            CLICaptureResult(
+                stdout: Data(),
+                stderr: "permission denied\nwhile reading workspace",
+                exitCode: 15,
+                timedOut: false,
+                launchError: nil
+            )
+        )
+        XCTAssertTrue(exited.contains("exited 15"))
+        XCTAssertTrue(exited.contains("permission denied"))
+        XCTAssertTrue(exited.contains("while reading workspace"))
+
+        let timedOut = AppState.appDataLoadError(
+            CLICaptureResult(
+                stdout: Data(),
+                stderr: "",
+                exitCode: 15,
+                timedOut: true,
+                launchError: nil
+            )
+        )
+        XCTAssertTrue(timedOut.contains("timed out"))
+
+        let launched = AppState.appDataLoadError(
+            CLICaptureResult(
+                stdout: Data(),
+                stderr: "",
+                exitCode: nil,
+                timedOut: false,
+                launchError: "Operation not permitted"
+            )
+        )
+        XCTAssertTrue(launched.contains("launch failed"))
+        XCTAssertTrue(launched.contains("Operation not permitted"))
+    }
+
     // MARK: - Keyboard shortcuts help surface (PR-045)
 
     /// The discoverable shortcuts reference renders non-nil.
