@@ -142,6 +142,35 @@ final class ReleaseReadinessTests: XCTestCase {
                     )
                 ]
             ),
+            providerAdapterCheck: ProviderAdapterCheckReport(
+                schema: "opensks.provider-adapter-check.v1",
+                remoteProbeOptIn: false,
+                secretValueExposed: false,
+                summary: ProviderAdapterCheckSummary(total: 2, attempted: 0, reachable: 0),
+                blockers: [
+                    "set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1"
+                ],
+                remediationActions: [
+                    ProviderAdapterRemediationAction(
+                        blocker: "set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1",
+                        action: "Set OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1 before running live remote provider checks.",
+                        scope: "operator_environment"
+                    )
+                ],
+                adapters: [
+                    ProviderAdapterCheckRow(
+                        name: "OpenRouter",
+                        configured: false,
+                        attempted: false,
+                        status: "not_configured",
+                        blockers: ["configure_OPENROUTER_API_KEY_credential"],
+                        credentialSource: "none",
+                        endpoint: "https://openrouter.ai/api/v1/models",
+                        httpCode: nil,
+                        secretValueExposed: false
+                    )
+                ]
+            ),
             providerMockE2E: ProviderMockE2eSummary(
                 status: "verified",
                 fixtureKind: "openai_compatible_registry_fixture",

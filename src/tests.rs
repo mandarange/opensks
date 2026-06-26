@@ -2817,6 +2817,84 @@ fn app_data_exposes_provider_mock_e2e_proof_summary() {
 }
 
 #[test]
+fn app_data_exposes_provider_adapter_check_summary() {
+    let root = temp_workspace("app-data-provider-adapter-check");
+    let open = root.join(OPEN_SKSDIR);
+    fs::create_dir_all(open.join("providers")).expect("provider dir");
+    fs::write(
+        open.join("providers/provider-adapter-check.json"),
+        r#"{
+          "schema": "opensks.provider-adapter-check.v1",
+          "generated_at": {"unix_seconds": 1782400000, "nanos": 0},
+          "remote_probe_opt_in": false,
+          "secret_value_exposed": false,
+          "summary": {"total": 2, "attempted": 0, "reachable": 0},
+          "blockers": [
+            "set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1",
+            "configure_OPENROUTER_API_KEY_credential"
+          ],
+          "remediation_actions": [
+            {
+              "blocker": "set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1",
+              "action": "Set OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1 before running live remote provider checks.",
+              "scope": "operator_environment"
+            }
+          ],
+          "adapters": [
+            {
+              "name": "OpenRouter",
+              "configured": false,
+              "attempted": false,
+              "status": "not_configured",
+              "blockers": ["configure_OPENROUTER_API_KEY_credential"],
+              "credential_source": "none",
+              "endpoint": "https://openrouter.ai/api/v1/models",
+              "http_code": null,
+              "duration_ms": 0,
+              "transport": "native_reqwest_blocking_http",
+              "secret_value_exposed": false,
+              "stderr": ""
+            }
+          ]
+        }"#,
+    )
+    .expect("provider adapter check proof");
+
+    let output = run_cli(
+        vec!["app-data".to_string(), root.display().to_string()],
+        &root,
+    )
+    .expect("app data");
+    let json: serde_json::Value =
+        serde_json::from_str(&output.stdout).expect("app-data json should parse");
+
+    assert_eq!(json["provider_adapter_check"]["remote_probe_opt_in"], false);
+    assert_eq!(
+        json["provider_adapter_check"]["secret_value_exposed"],
+        false
+    );
+    assert_eq!(json["provider_adapter_check"]["summary"]["total"], 2);
+    assert_eq!(json["provider_adapter_check"]["summary"]["attempted"], 0);
+    assert_eq!(json["provider_adapter_check"]["summary"]["reachable"], 0);
+    assert_eq!(
+        json["provider_adapter_check"]["blockers"][0],
+        "set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1"
+    );
+    assert_eq!(
+        json["provider_adapter_check"]["remediation_actions"][0]["scope"],
+        "operator_environment"
+    );
+    assert_eq!(
+        json["provider_adapter_check"]["adapters"][0]["name"],
+        "OpenRouter"
+    );
+    assert_eq!(
+        json["provider_adapter_check"]["adapters"][0]["endpoint"],
+        "https://openrouter.ai/api/v1/models"
+    );
+}
+
+#[test]
 fn worker_runtime_writes_lease_recovery_and_routing_artifacts() {
     let root = temp_workspace("worker-runtime");
     let output = run_cli(["worker", "runtime", "recover stale worker lease"], &root)

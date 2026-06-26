@@ -46,6 +46,9 @@ struct EvidenceWorkspaceView: View {
                 if let release = data.release, release.hasEvidence {
                     releaseProofCard(release)
                 }
+                if let adapterCheck = data.providerAdapterCheck, providerAdapterCheckHasEvidence(adapterCheck) {
+                    providerAdapterCheckCard(adapterCheck)
+                }
                 if let providerMockE2e = data.providerMockE2E, providerMockE2e.hasEvidence {
                     providerMockE2eCard(providerMockE2e)
                 }
@@ -254,6 +257,130 @@ struct EvidenceWorkspaceView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(action.blocker): \(action.action)")
+    }
+
+    // MARK: - Provider live check
+
+    private func providerAdapterCheckCard(_ report: ProviderAdapterCheckReport) -> some View {
+        card {
+            VStack(alignment: .leading, spacing: Theme.s12) {
+                HStack(spacing: Theme.s8) {
+                    Text("Provider adapter live check")
+                        .font(Theme.ui(13, .semibold))
+                        .foregroundStyle(Theme.text)
+                    Spacer()
+                    StatusPill(kind: providerAdapterCheckPillKind(report), label: providerAdapterCheckStatusLabel(report))
+                }
+                VStack(alignment: .leading, spacing: Theme.s8) {
+                    providerProofRow(label: "Required", value: "\(report.summary.total)", systemImage: "checklist")
+                    providerProofRow(label: "Attempted", value: "\(report.summary.attempted)", systemImage: "play.circle")
+                    providerProofRow(label: "Reachable", value: "\(report.summary.reachable)", systemImage: "network")
+                    providerProofRow(label: "Remote probe", value: report.remoteProbeOptIn ? "true" : "false", systemImage: "antenna.radiowaves.left.and.right")
+                    providerProofRow(label: "Secret leak", value: report.secretValueExposed ? "true" : "false", systemImage: "lock.shield")
+                }
+                if !report.remediationActions.isEmpty {
+                    VStack(alignment: .leading, spacing: Theme.s8) {
+                        Text("Actions")
+                            .font(Theme.ui(11.5, .semibold))
+                            .foregroundStyle(Theme.textSoft)
+                        ForEach(report.remediationActions, id: \.blocker) { action in
+                            providerAdapterActionRow(action)
+                        }
+                    }
+                }
+                if !report.adapters.isEmpty {
+                    VStack(alignment: .leading, spacing: Theme.s8) {
+                        Text("Adapters")
+                            .font(Theme.ui(11.5, .semibold))
+                            .foregroundStyle(Theme.textSoft)
+                        ForEach(report.adapters, id: \.name) { adapter in
+                            providerAdapterRow(adapter)
+                        }
+                    }
+                }
+            }
+        }
+        .accessibilityIdentifier("evidence.provider.adapter.check.card")
+        .accessibilityElement(children: .contain)
+    }
+
+    private func providerAdapterCheckHasEvidence(_ report: ProviderAdapterCheckReport) -> Bool {
+        report.summary.total > 0 || !report.blockers.isEmpty || !report.adapters.isEmpty
+    }
+
+    private func providerAdapterCheckStatusLabel(_ report: ProviderAdapterCheckReport) -> String {
+        if report.secretValueExposed { return "Secret Guard" }
+        if report.blockers.isEmpty && report.remoteProbeOptIn && report.summary.reachable >= report.summary.total {
+            return "Reachable"
+        }
+        if !report.blockers.isEmpty || report.summary.reachable < report.summary.total {
+            return "Needs Setup"
+        }
+        return "Not Audited"
+    }
+
+    private func providerAdapterCheckPillKind(_ report: ProviderAdapterCheckReport) -> StatusPill.Kind {
+        if report.secretValueExposed { return .danger }
+        if report.blockers.isEmpty && report.remoteProbeOptIn && report.summary.reachable >= report.summary.total {
+            return .success
+        }
+        if !report.blockers.isEmpty || report.summary.reachable < report.summary.total {
+            return .warning
+        }
+        return .neutral
+    }
+
+    private func providerAdapterActionRow(_ action: ProviderAdapterRemediationAction) -> some View {
+        HStack(alignment: .top, spacing: Theme.s10) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 16, height: 18)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(action.scope)
+                    .font(Theme.ui(10.5, .medium))
+                    .foregroundStyle(Theme.muted)
+                Text(action.action)
+                    .font(Theme.ui(12))
+                    .foregroundStyle(Theme.textSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(action.scope): \(action.action)")
+    }
+
+    private func providerAdapterRow(_ adapter: ProviderAdapterCheckRow) -> some View {
+        HStack(alignment: .top, spacing: Theme.s10) {
+            Image(systemName: adapter.secretValueExposed ? "exclamationmark.triangle.fill" : "server.rack")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(adapter.secretValueExposed ? Theme.coral : Theme.muted)
+                .frame(width: 16, height: 18)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: Theme.s8) {
+                    Text(adapter.name)
+                        .font(Theme.mono(11.5, .medium))
+                        .foregroundStyle(Theme.text)
+                    Text(adapter.status)
+                        .font(Theme.ui(10.5, .medium))
+                        .foregroundStyle(Theme.muted)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Theme.input))
+                }
+                Text("\(adapter.endpoint) · configured \(adapter.configured ? "true" : "false") · attempted \(adapter.attempted ? "true" : "false")")
+                    .font(Theme.ui(12))
+                    .foregroundStyle(Theme.textSoft)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(adapter.name): \(adapter.status)")
     }
 
     // MARK: - Provider proof

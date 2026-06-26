@@ -1419,3 +1419,14 @@ Follow-up evidence: `cargo test provider_commands_write_zero_leak_registry_probe
 - migration: local generated app bundles self-heal on the next `opensks` app generation. No tracked runtime data migration.
 - removal/deletion: stale generated `_CodeSignature` directories inside `.opensks/macos/OpenSKS.app` are removed and regenerated during bundle generation.
 - final evidence: the native bundle generation path no longer preserves stale local signing metadata and refreshes the local ad-hoc seal. Production Developer ID signing and notarization remain explicit release-proof blockers.
+
+### Cross-cutting - Provider Adapter Check Evidence Surface
+
+- status: Verified locally; live remote provider smoke remains partial
+- owner file/module: `src/lib.rs`, `src/tests.rs`, `swift/Sources/Models.swift`, `swift/Sources/Runs/EvidenceWorkspaceView.swift`, `swift/Tests/OpenSKSStudioTests/ContractsTests.swift`, `swift/Tests/OpenSKSStudioTests/ReleaseReadinessTests.swift`
+- current evidence: `provider-adapter-check.json` already recorded the `mvp-004` live OpenRouter/OpenAI adapter blockers and remediation actions, but native app-data/Evidence only showed release proof and provider mock E2E proof, so the one remaining acceptance partial was not visible on the Evidence screen.
+- target change: expose `provider_adapter_check` in `opensks app-data` when `.opensks/providers/provider-adapter-check.json` has schema `opensks.provider-adapter-check.v1`, decode it through the existing Swift `ProviderAdapterCheckReport` contract, and render a dedicated Evidence card with required/attempted/reachable counts, remote probe opt-in, secret-leak guard, remediation actions, and adapter rows.
+- tests: `cargo test app_data_exposes_provider_adapter_check_summary --locked -- --test-threads=1`, `CLANG_MODULE_CACHE_PATH=/tmp/opensks-clang-module-cache MODULE_CACHE_DIR=/tmp/opensks-clang-module-cache swift test --disable-sandbox --package-path swift --scratch-path /tmp/opensks-swift-build-provider-adapter-evidence --filter OpenSKSStudioTests.ContractsTests/testAppDataDecodesReleaseProofRemediationActions`, and `CLANG_MODULE_CACHE_PATH=/tmp/opensks-clang-module-cache MODULE_CACHE_DIR=/tmp/opensks-clang-module-cache swift test --disable-sandbox --package-path swift --scratch-path /tmp/opensks-swift-build-provider-adapter-evidence-render --filter OpenSKSStudioTests.ReleaseReadinessTests/testEvidenceWorkspaceRendersReleaseProofActions` cover this slice.
+- migration: additive app-data JSON field only; existing consumers can ignore `provider_adapter_check`.
+- removal/deletion: none.
+- final evidence: app-data/Evidence can now show why `mvp-004` remains partial without exposing credential values. The live adapter check still requires real OpenRouter/OpenAI credentials and `OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1`.

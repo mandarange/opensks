@@ -15,6 +15,7 @@ struct AppData: Codable, Sendable {
     let cliPath: String
     let acceptance: Acceptance
     let release: ReleaseProofSummary?
+    let providerAdapterCheck: ProviderAdapterCheckReport?
     let providerMockE2E: ProviderMockE2eSummary?
     let gui: Gui
     let workerLanes: [WorkerLane]

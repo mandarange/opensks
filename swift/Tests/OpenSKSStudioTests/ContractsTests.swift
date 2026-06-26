@@ -859,6 +859,41 @@ final class ContractsTests: XCTestCase {
               }
             ]
           },
+          "provider_adapter_check": {
+            "schema": "opensks.provider-adapter-check.v1",
+            "remote_probe_opt_in": false,
+            "secret_value_exposed": false,
+            "summary": {
+              "total": 2,
+              "attempted": 0,
+              "reachable": 0
+            },
+            "blockers": [
+              "set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1"
+            ],
+            "remediation_actions": [
+              {
+                "blocker": "set_OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE_1",
+                "action": "Set OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1 before running live remote provider checks.",
+                "scope": "operator_environment"
+              }
+            ],
+            "adapters": [
+              {
+                "name": "OpenRouter",
+                "configured": false,
+                "attempted": false,
+                "status": "not_configured",
+                "blockers": [
+                  "configure_OPENROUTER_API_KEY_credential"
+                ],
+                "credential_source": "none",
+                "endpoint": "https://openrouter.ai/api/v1/models",
+                "http_code": null,
+                "secret_value_exposed": false
+              }
+            ]
+          },
           "provider_mock_e2e": {
             "status": "verified",
             "fixture_kind": "openai_compatible_registry_fixture",
@@ -904,6 +939,12 @@ final class ContractsTests: XCTestCase {
         XCTAssertEqual(data.release?.displayStatus, "Not Verified")
         XCTAssertEqual(data.release?.blockers.first?.code, "signed_app_missing")
         XCTAssertEqual(data.release?.remediationActions.first?.scope, "release_signing")
+        XCTAssertEqual(data.providerAdapterCheck?.remoteProbeOptIn, false)
+        XCTAssertEqual(data.providerAdapterCheck?.summary.total, 2)
+        XCTAssertEqual(data.providerAdapterCheck?.summary.reachable, 0)
+        XCTAssertEqual(data.providerAdapterCheck?.remediationActions.first?.scope, "operator_environment")
+        XCTAssertEqual(data.providerAdapterCheck?.adapters.first?.name, "OpenRouter")
+        XCTAssertEqual(data.providerAdapterCheck?.adapters.first?.endpoint, "https://openrouter.ai/api/v1/models")
         XCTAssertEqual(data.providerMockE2E?.status, "verified")
         XCTAssertEqual(data.providerMockE2E?.registryRouteStatus, "resolved")
         XCTAssertEqual(data.providerMockE2E?.selectedModelId, "mock-openai-compatible/code-model")

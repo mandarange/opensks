@@ -339,6 +339,7 @@ struct NativeAppDashboard {
     cli_path: PathBuf,
     acceptance: NativeAcceptanceStatus,
     release: NativeReleaseStatus,
+    provider_adapter_check: Option<String>,
     provider_mock_e2e: Option<NativeProviderMockE2eStatus>,
     gui: GuiSnapshot,
 }
@@ -1954,6 +1955,7 @@ fn render_app_data_json(d: &NativeAppDashboard) -> String {
         None => "null",
     };
     let release = render_native_release_json(&d.release);
+    let provider_adapter_check = d.provider_adapter_check.as_deref().unwrap_or("null");
     let provider_mock_e2e = d
         .provider_mock_e2e
         .as_ref()
@@ -1974,6 +1976,7 @@ fn render_app_data_json(d: &NativeAppDashboard) -> String {
             "  \"acceptance\": {{\"total\": {total}, \"passed\": {passed}, ",
             "\"partial\": {partial}, \"failed\": {failed}, \"goal_complete\": {goal_complete}}},\n",
             "  \"release\": {release},\n",
+            "  \"provider_adapter_check\": {provider_adapter_check},\n",
             "  \"provider_mock_e2e\": {provider_mock_e2e},\n",
             "  \"gui\": {{\"prd_total\": {prd_total}, \"prd_implemented\": {prd_implemented}, ",
             "\"prd_artifact_mvp\": {prd_artifact_mvp}, \"prd_planned\": {prd_planned}, ",
@@ -2006,6 +2009,7 @@ fn render_app_data_json(d: &NativeAppDashboard) -> String {
         failed = a.failed,
         goal_complete = goal_complete,
         release = release,
+        provider_adapter_check = provider_adapter_check,
         provider_mock_e2e = provider_mock_e2e,
         prd_total = g.prd_total,
         prd_implemented = g.prd_implemented,
@@ -14253,9 +14257,30 @@ fn native_app_dashboard(workspace: &Path) -> Result<NativeAppDashboard, OpenSksE
             goal_complete,
         },
         release: collect_native_release_status(workspace),
+        provider_adapter_check: collect_native_provider_adapter_check_json(workspace),
         provider_mock_e2e: collect_native_provider_mock_e2e_status(workspace),
         gui: collect_gui_snapshot(workspace),
     })
+}
+
+fn collect_native_provider_adapter_check_json(workspace: &Path) -> Option<String> {
+    let proof_path = workspace
+        .join(OPEN_SKSDIR)
+        .join("providers")
+        .join("provider-adapter-check.json");
+    let raw = fs::read_to_string(proof_path).unwrap_or_default();
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return None;
+    };
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        != Some("opensks.provider-adapter-check.v1")
+    {
+        return None;
+    }
+    Some(value.to_string())
 }
 
 fn collect_native_provider_mock_e2e_status(
