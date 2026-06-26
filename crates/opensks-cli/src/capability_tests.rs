@@ -84,6 +84,20 @@ fn capability_report_emits_valid_json_and_matrix() {
             .any(|e| e == "toolgateway:policy-enforced"),
         "agent.code_edit evidence must come from runtime ToolGateway state"
     );
+    let image_generate = report
+        .capabilities
+        .iter()
+        .find(|c| c.id == "image.generate")
+        .expect("image.generate");
+    assert_eq!(
+        image_generate.maturity,
+        opensks_contracts::CapabilityMaturity::Foundation
+    );
+    assert!(!image_generate.available);
+    assert_eq!(
+        image_generate.reason_code,
+        "provider_image_lane_present_needs_enabled_image_route"
+    );
     let stream = report
         .capabilities
         .iter()

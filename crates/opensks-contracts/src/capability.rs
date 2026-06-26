@@ -371,7 +371,7 @@ pub fn baseline_capability_report() -> RuntimeCapabilityReport {
             capability_with_available(
                 "image.generate",
                 "Image generation",
-                Degraded,
+                Foundation,
                 false,
                 "provider_image_lane_present_needs_enabled_image_route",
                 &[
@@ -385,7 +385,7 @@ pub fn baseline_capability_report() -> RuntimeCapabilityReport {
             capability_with_available(
                 "image.inspect",
                 "Image inspection",
-                Degraded,
+                Foundation,
                 false,
                 "provider_vision_lane_present_needs_enabled_vision_route",
                 &[
@@ -568,6 +568,26 @@ mod tests {
             .find(|c| c.id == "agent.code_edit")
             .expect("agent.code_edit present");
         assert_eq!(code_edit.maturity, CapabilityMaturity::Foundation);
+        let image_generate = report
+            .capabilities
+            .iter()
+            .find(|c| c.id == "image.generate")
+            .expect("image.generate present");
+        assert_eq!(image_generate.maturity, CapabilityMaturity::Foundation);
+        assert!(
+            !image_generate.available,
+            "image generation must not be shown as available until an image-capable route is enabled"
+        );
+        let image_inspect = report
+            .capabilities
+            .iter()
+            .find(|c| c.id == "image.inspect")
+            .expect("image.inspect present");
+        assert_eq!(image_inspect.maturity, CapabilityMaturity::Foundation);
+        assert!(
+            !image_inspect.available,
+            "image inspection must not be shown as available until a vision-capable route is enabled"
+        );
         let stream = report
             .capabilities
             .iter()

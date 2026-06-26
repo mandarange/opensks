@@ -1375,3 +1375,14 @@ Follow-up evidence: `cargo test provider_commands_write_zero_leak_registry_probe
 - migration: generated `docs/runtime-truth-matrix.generated.md` changed only capability truth text for `stream.protocol`; no schema or data migration.
 - removal/deletion: removed stale missing-v2 capability reason. No streaming code paths were removed.
 - final evidence: runtime truth now reports `stream.protocol` as Live/Available with explicit v2 frame evidence. Overall acceptance remains 23 total, 22 passed, 1 partial, 0 failed because `mvp-004` still requires live OpenRouter/OpenAI credentials plus explicit remote-probe opt-in.
+
+### Cross-cutting - Image/Vision Capability Truth
+
+- status: Verified
+- owner file/module: `crates/opensks-contracts/src/capability.rs`, `crates/opensks-cli/src/capability_tests.rs`, `docs/runtime-truth-matrix.generated.md`
+- current evidence: runtime truth reported `image.generate` and `image.inspect` as Degraded/Limited while also setting `available: false`. The tool registry correctly exposes `image.generate` and `image.inspect` descriptors for schema/executor construction, but the user-facing capability is not actually dependable until an image-capable or vision-capable model route is enabled.
+- target change: keep the image/vision tool descriptors available in the canonical ToolRegistry, but classify the user-facing image generation and image inspection capabilities as Foundation/Needs setup with `available: false` until the relevant provider/model route is enabled. This prevents the app from presenting disabled image/vision paths as limited-live surfaces.
+- tests: `cargo fmt --all --check`, `cargo test -p opensks-contracts capability --locked`, `cargo test -p opensks-cli capability --locked`, `cargo run -p xtask -- capability-matrix --runtime-fixture release`, `cargo clippy -p opensks-contracts -p opensks-cli --all-targets -- -D warnings`, `bash scripts/check-architecture-ownership.sh`, `cargo run -p xtask -- direct-io-audit --check`, `cargo run -- acceptance audit`, `cargo run -- security audit`, and `git diff --check` passed. The regenerated runtime truth matrix now shows both `image.generate` and `image.inspect` as Foundation / Needs setup / no, while the ToolRegistry rows remain Available with the existing executor-route-required reasons.
+- migration: generated runtime truth matrix only; no schema or data migration.
+- removal/deletion: no image or vision executor code was removed.
+- final evidence: image/vision capability truth no longer claims a limited-live user surface before an enabled provider route exists. Overall acceptance remains 23 total, 22 passed, 1 partial, 0 failed because `mvp-004` still requires live OpenRouter/OpenAI credentials plus explicit remote-probe opt-in.
