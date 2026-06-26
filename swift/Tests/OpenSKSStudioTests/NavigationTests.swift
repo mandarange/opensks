@@ -10,20 +10,19 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(
             WorkspaceRoute.allCases.map(\.label),
             [
-                "Home", "Chat", "Code", "Pipeline", "Runs", "Changes", "Design",
+                "Home", "Chat", "Code", "Terminal", "Pipeline", "Runs", "Changes", "Design",
                 "Intel", "Vault", "Evidence", "Settings", "Project",
             ]
         )
     }
 
-    func testPrimaryRailIsFiveDestinations() {
-        // The primary rail is exactly the five §3.4 destinations.
+    func testPrimaryRailIncludesTerminalDestination() {
         XCTAssertEqual(
             WorkspaceRoute.primaryRailRoutes,
-            [.chat, .code, .git, .graph, .project]
+            [.chat, .code, .terminal, .git, .graph, .project]
         )
         XCTAssertEqual(WorkspaceRoute.primaryRailRoutes.map(\.label),
-            ["Chat", "Code", "Changes", "Pipeline", "Project"])
+            ["Chat", "Code", "Terminal", "Changes", "Pipeline", "Project"])
     }
 
     func testEachRouteHasADistinctCentralIdentifier() {
@@ -46,6 +45,7 @@ final class NavigationTests: XCTestCase {
             _ = route.legacySection
         }
         XCTAssertEqual(WorkspaceRoute.code.legacySection, .files)
+        XCTAssertEqual(WorkspaceRoute.terminal.legacySection, .files)
         XCTAssertEqual(WorkspaceRoute.home.legacySection, .home)
     }
 

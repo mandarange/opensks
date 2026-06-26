@@ -8,14 +8,13 @@
 import Foundation
 
 enum WorkspaceRoute: String, CaseIterable, Hashable, Identifiable, Codable {
-    case home, chat, code, graph, runs, git, design, intelligence, vault, evidence, settings, project
+    case home, chat, code, terminal, graph, runs, git, design, intelligence, vault, evidence, settings, project
 
     var id: String { rawValue }
 
-    /// The five PRIMARY rail destinations (recovery directive §3.4). The rest
-    /// (Intelligence, Design, Evidence, Vault, Settings, Runs, Home) are reached
-    /// through the Project hub, keeping the rail uncluttered.
-    static let primaryRailRoutes: [WorkspaceRoute] = [.chat, .code, .git, .graph, .project]
+    /// The primary rail destinations. Terminal is first-class because it is a
+    /// live daemon-backed operator surface rather than a project metadata page.
+    static let primaryRailRoutes: [WorkspaceRoute] = [.chat, .code, .terminal, .git, .graph, .project]
 
     /// Visible rail label (English).
     var label: String {
@@ -23,6 +22,7 @@ enum WorkspaceRoute: String, CaseIterable, Hashable, Identifiable, Codable {
         case .home: return "Home"
         case .chat: return "Chat"
         case .code: return "Code"
+        case .terminal: return "Terminal"
         case .graph: return "Pipeline"
         case .runs: return "Runs"
         case .git: return "Changes"
@@ -40,6 +40,7 @@ enum WorkspaceRoute: String, CaseIterable, Hashable, Identifiable, Codable {
         case .home: return "house"
         case .chat: return "bubble.left.and.bubble.right"
         case .code: return "chevron.left.forwardslash.chevron.right"
+        case .terminal: return "terminal"
         case .graph: return "point.3.connected.trianglepath.dotted"
         case .runs: return "sparkles"
         case .git: return "arrow.triangle.branch"
@@ -65,6 +66,7 @@ enum WorkspaceRoute: String, CaseIterable, Hashable, Identifiable, Codable {
         case .home: return .home
         case .chat: return .home
         case .code: return .files
+        case .terminal: return .files
         case .graph: return .graph
         case .runs: return .runs
         case .git: return .git

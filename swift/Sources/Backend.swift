@@ -651,6 +651,14 @@ actor EngineProcess {
         return EngineTurnSupervisorTickResult(tick: tick, stream: finalStream)
     }
 
+    func terminalRequest(
+        cli: URL,
+        cwd: URL,
+        request: EngineRequestEnvelope
+    ) async -> EngineRunStream {
+        await sendRequest(cli: cli, cwd: cwd, request: request)
+    }
+
     private func ensureSession(cli: URL, cwd: URL) throws -> EngineDaemonSession {
         let key = EngineSessionKey(cliPath: cli.path, cwdPath: cwd.path)
         if let existing = session, existing.key == key, existing.isRunning {
@@ -1047,10 +1055,147 @@ struct EngineRequestEnvelope: Encodable {
             )
         )
     }
+
+    static func terminalSessionStart(
+        id: String,
+        sessionId: String,
+        cwd: String,
+        shell: String?
+    ) -> EngineRequestEnvelope {
+        EngineRequestEnvelope(
+            schema: "opensks.engine-request.v1",
+            id: id,
+            kind: "terminal_session_start",
+            protocolVersion: "opensks.contracts.v1",
+            params: EngineRequestParams(
+                terminalSessionStart: TerminalSessionStartRequest(
+                    requestId: id,
+                    sessionId: sessionId,
+                    cwd: cwd,
+                    shell: shell
+                )
+            )
+        )
+    }
+
+    static func terminalInput(
+        id: String,
+        sessionId: String,
+        text: String,
+        inputKind: String
+    ) -> EngineRequestEnvelope {
+        EngineRequestEnvelope(
+            schema: "opensks.engine-request.v1",
+            id: id,
+            kind: "terminal_input",
+            protocolVersion: "opensks.contracts.v1",
+            params: EngineRequestParams(
+                terminalInput: TerminalInputRequest(
+                    requestId: id,
+                    sessionId: sessionId,
+                    text: text,
+                    inputKind: inputKind
+                )
+            )
+        )
+    }
+
+    static func terminalResize(
+        id: String,
+        sessionId: String,
+        cols: Int,
+        rows: Int
+    ) -> EngineRequestEnvelope {
+        EngineRequestEnvelope(
+            schema: "opensks.engine-request.v1",
+            id: id,
+            kind: "terminal_resize",
+            protocolVersion: "opensks.contracts.v1",
+            params: EngineRequestParams(
+                terminalResize: TerminalResizeRequest(
+                    requestId: id,
+                    sessionId: sessionId,
+                    cols: cols,
+                    rows: rows
+                )
+            )
+        )
+    }
+
+    static func terminalSessionStop(id: String, sessionId: String) -> EngineRequestEnvelope {
+        EngineRequestEnvelope(
+            schema: "opensks.engine-request.v1",
+            id: id,
+            kind: "terminal_session_stop",
+            protocolVersion: "opensks.contracts.v1",
+            params: EngineRequestParams(
+                terminalSessionStop: TerminalSessionStopRequest(
+                    requestId: id,
+                    sessionId: sessionId
+                )
+            )
+        )
+    }
+
+    static func terminalSuggestionRequest(
+        id: String,
+        input: String,
+        cursor: Int,
+        cwd: String,
+        includeAI: Bool
+    ) -> EngineRequestEnvelope {
+        EngineRequestEnvelope(
+            schema: "opensks.engine-request.v1",
+            id: id,
+            kind: "terminal_suggestion_request",
+            protocolVersion: "opensks.contracts.v1",
+            params: EngineRequestParams(
+                terminalSuggestionRequest: TerminalSuggestionRequest(
+                    requestId: id,
+                    cwd: cwd,
+                    input: input,
+                    cursor: cursor,
+                    maxSuggestions: 8,
+                    includeAI: includeAI,
+                    contextRefs: []
+                )
+            )
+        )
+    }
+
+    static func terminalAgentTurnStart(
+        id: String,
+        prompt: String,
+        sessionId: String,
+        cwd: String
+    ) -> EngineRequestEnvelope {
+        EngineRequestEnvelope(
+            schema: "opensks.engine-request.v1",
+            id: id,
+            kind: "terminal_agent_turn_start",
+            protocolVersion: "opensks.contracts.v1",
+            params: EngineRequestParams(
+                terminalAgentTurnStart: TerminalAgentTurnStartRequest(
+                    requestId: id,
+                    prompt: prompt,
+                    sessionId: sessionId,
+                    cwd: cwd,
+                    maxSuggestions: 8,
+                    contextRefs: []
+                )
+            )
+        )
+    }
 }
 
 struct EngineRequestParams: Encodable {
     var conversationTurnStart: ConversationTurnStartRequest? = nil
+    var terminalSessionStart: TerminalSessionStartRequest? = nil
+    var terminalInput: TerminalInputRequest? = nil
+    var terminalResize: TerminalResizeRequest? = nil
+    var terminalSessionStop: TerminalSessionStopRequest? = nil
+    var terminalSuggestionRequest: TerminalSuggestionRequest? = nil
+    var terminalAgentTurnStart: TerminalAgentTurnStartRequest? = nil
     var supervisorId: String? = nil
     var leaseTtlMs: UInt64? = nil
     var pipelineId: String? = nil
@@ -1430,6 +1575,10 @@ final class AppState: ObservableObject {
                 self.loadError = "could not decode app-data: \(error.localizedDescription)"
             }
         }
+    }
+
+    func makeTerminalDaemonClient() -> TerminalDaemonClient {
+        TerminalDaemonClient(engine: engine, cli: cli, workspace: workspace)
     }
 
     static func appDataLoadError(_ result: CLICaptureResult) -> String {

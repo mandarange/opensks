@@ -18,6 +18,8 @@ struct PrimaryWorkspaceRouter: View {
                 HomeView()
             case .code:
                 CodeWorkspaceView()
+            case .terminal:
+                TerminalWorkspaceView()
             case .chat:
                 // UX-101: the chat thread carries a compact top context bar with the
                 // project's REAL git context, so the wrapper observes the git store.
