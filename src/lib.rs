@@ -13763,6 +13763,7 @@ fn create_native_app_bundle(cwd: &Path) -> Result<PathBuf, OpenSksError> {
     let contents = bundle.join("Contents");
     let macos_dir = contents.join("MacOS");
     let resources_dir = contents.join("Resources");
+    let _ = fs::remove_dir_all(contents.join("_CodeSignature"));
     fs::create_dir_all(&macos_dir)?;
     fs::create_dir_all(&resources_dir)?;
 
@@ -13776,6 +13777,7 @@ fn create_native_app_bundle(cwd: &Path) -> Result<PathBuf, OpenSksError> {
     let cli_copy = resources_dir.join("opensks-cli");
     fs::copy(&current_exe, &cli_copy)?;
     make_executable(&cli_copy)?;
+    adhoc_sign_executable(&cli_copy)?;
 
     write_text_atomic(
         &resources_dir.join("workspace-path.txt"),
@@ -13786,7 +13788,48 @@ fn create_native_app_bundle(cwd: &Path) -> Result<PathBuf, OpenSksError> {
 
     write_text_atomic(&contents.join("Info.plist"), &render_macos_app_info_plist())?;
     write_text_atomic(&contents.join("PkgInfo"), "APPL????")?;
+    adhoc_sign_native_app_bundle(&bundle)?;
     Ok(bundle)
+}
+
+#[cfg(target_os = "macos")]
+fn adhoc_sign_native_app_bundle(bundle: &Path) -> Result<(), OpenSksError> {
+    adhoc_sign_path(bundle, "app bundle")
+}
+
+#[cfg(target_os = "macos")]
+fn adhoc_sign_executable(executable: &Path) -> Result<(), OpenSksError> {
+    adhoc_sign_path(executable, "executable")
+}
+
+#[cfg(target_os = "macos")]
+fn adhoc_sign_path(path: &Path, kind: &str) -> Result<(), OpenSksError> {
+    let signed = process::Command::new("codesign")
+        .arg("--force")
+        .arg("--sign")
+        .arg("-")
+        .arg(path)
+        .output()?;
+    if !signed.status.success() {
+        return Err(OpenSksError::Invalid(format!(
+            "codesign failed for {kind} `{}`:\n{}",
+            path.display(),
+            String::from_utf8_lossy(&signed.stderr)
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn adhoc_sign_native_app_bundle(bundle: &Path) -> Result<(), OpenSksError> {
+    let _ = bundle;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn adhoc_sign_executable(executable: &Path) -> Result<(), OpenSksError> {
+    let _ = executable;
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

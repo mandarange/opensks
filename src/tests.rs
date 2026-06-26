@@ -886,10 +886,24 @@ fn default_cli_cwd_prefers_workspace_environment() {
 #[test]
 fn empty_args_creates_native_app_bundle() {
     let root = temp_workspace("empty-args-native-app");
+    let stale_signature = native_app_bundle_path(&root)
+        .join("Contents")
+        .join("_CodeSignature");
+    fs::create_dir_all(&stale_signature).expect("stale signature dir");
+    fs::write(stale_signature.join("CodeResources"), b"stale").expect("stale signature");
     let output = run_cli(Vec::<String>::new(), &root).expect("empty launch");
     assert!(output.stdout.contains("created OpenSKS macOS app launcher"));
     assert!(output.stdout.contains("OpenSKS.app"));
     let bundle = native_app_bundle_path(&root);
+    let code_resources = bundle
+        .join("Contents")
+        .join("_CodeSignature")
+        .join("CodeResources");
+    assert!(code_resources.exists());
+    assert_ne!(
+        fs::read(code_resources).expect("CodeResources"),
+        b"stale".to_vec()
+    );
     assert!(bundle.join("Contents").join("Info.plist").exists());
     assert_eq!(
         fs::read_to_string(bundle.join("Contents").join("PkgInfo")).expect("read PkgInfo"),

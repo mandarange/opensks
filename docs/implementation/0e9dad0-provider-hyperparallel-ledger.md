@@ -1408,3 +1408,14 @@ Follow-up evidence: `cargo test provider_commands_write_zero_leak_registry_probe
 - migration: additive app-data JSON field and Swift decode/render surface only. Existing app-data consumers can ignore `provider_mock_e2e`.
 - removal/deletion: none.
 - final evidence: app-data now reports the provider mock proof as `verified`, selected model `mock-openai-compatible/code-model`, five verified checks, `live_vendor_calls_performed:false`, and `secret_value_exposed:false`. The live `mvp-004` remote provider smoke remains partial until real OpenRouter/OpenAI credentials and `OPENSKS_ALLOW_REMOTE_PROVIDER_PROBE=1` are available.
+
+### Cross-cutting - Native App Bundle Local Signature Refresh
+
+- status: Verified locally
+- owner file/module: `src/lib.rs`, `src/tests.rs`
+- current evidence: rebuilding `.opensks/macos/OpenSKS.app` over an existing bundle could leave an old `Contents/_CodeSignature` directory behind after resources and executables were replaced. That stale signature made LaunchServices report `kLSNoExecutableErr` and made the embedded `opensks-cli` fail local execution under the invalid bundle seal.
+- target change: remove `Contents/_CodeSignature` before recreating the native app bundle contents, explicitly ad-hoc sign the embedded `opensks-cli`, then ad-hoc sign the app bundle so the local development bundle has a fresh seal that matches the generated executable/resources. This keeps the app launchable locally without satisfying the separate production Developer ID signing/notarization gate.
+- tests: `cargo test empty_args_creates_native_app_bundle --locked -- --test-threads=1` now pre-creates a stale `_CodeSignature/CodeResources` directory and asserts bundle generation replaces it with a fresh CodeResources file.
+- migration: local generated app bundles self-heal on the next `opensks` app generation. No tracked runtime data migration.
+- removal/deletion: stale generated `_CodeSignature` directories inside `.opensks/macos/OpenSKS.app` are removed and regenerated during bundle generation.
+- final evidence: the native bundle generation path no longer preserves stale local signing metadata and refreshes the local ad-hoc seal. Production Developer ID signing and notarization remain explicit release-proof blockers.
