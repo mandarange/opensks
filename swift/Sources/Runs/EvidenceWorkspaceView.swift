@@ -177,6 +177,16 @@ struct EvidenceWorkspaceView: View {
                         .font(Theme.ui(13, .semibold))
                         .foregroundStyle(Theme.text)
                     Spacer()
+                    Button {
+                        state.runReleaseProof()
+                    } label: {
+                        Label("Run release proof", systemImage: "checkmark.seal")
+                    }
+                    .buttonStyle(.secondaryAction)
+                    .frame(maxWidth: 185)
+                    .disabled(state.isRunning)
+                    .accessibilityIdentifier("evidence.run.release-proof")
+                    .help("Run release proof and refresh signing, notarization, and artifact binding evidence.")
                     StatusPill(kind: release.pillKind, label: release.displayStatus)
                 }
                 if !release.blockers.isEmpty {

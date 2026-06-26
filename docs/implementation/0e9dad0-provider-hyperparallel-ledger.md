@@ -1463,3 +1463,14 @@ Follow-up evidence: `cargo test provider_commands_write_zero_leak_registry_probe
 - migration: no data migration. UI/action surface only.
 - removal/deletion: none.
 - final evidence: after regenerating `.opensks/macos/OpenSKS.app`, Computer Use relaunched the app as `pid 32434`, opened Project -> Evidence, and found the provider adapter live-check card exposing a `Run provider check` button with help text `Run the live provider adapter check and refresh the evidence card.` Clicking it completed through the app UI and updated the status bar to `provider adapter-check exit 0` while preserving the honest `Needs Setup` state and OpenRouter/OpenAI credential/remote-opt-in actions.
+
+### Cross-cutting - Evidence Release Proof Rerun Control
+
+- status: Verified
+- owner file/module: `swift/Sources/Backend.swift`, `swift/Sources/Runs/EvidenceWorkspaceView.swift`, `swift/Tests/OpenSKSStudioTests/ReleaseReadinessTests.swift`
+- current evidence: the Evidence workspace surfaces signing/notarization blockers and signing diagnostics, but after an operator signs/notarizes a bundle there was no direct Evidence-card control to rerun `release proof`; operators had to leave the proof card for CLI/command-palette execution before app-data could refresh.
+- target change: add a named `AppState.runReleaseProof()` helper and expose a disabled-while-running `Run release proof` button on the Release proof card. The button must use the existing `runVerb` path so release proof output streams into the drawer and app-data reloads after the command finishes.
+- tests: `CLANG_MODULE_CACHE_PATH=/tmp/opensks-clang-module-cache MODULE_CACHE_DIR=/tmp/opensks-clang-module-cache swift test --disable-sandbox --package-path swift --scratch-path /tmp/opensks-swift-build-release-proof-button --filter OpenSKSStudioTests.ReleaseReadinessTests/testEvidenceWorkspaceRendersReleaseProofActions` passed. `cargo fmt --all --check`, `git diff --check`, and `cargo run -- release proof` passed; the pre-commit CLI proof correctly reported `workspace_dirty` plus the existing signing/notarization blockers because the release-proof button slice was still uncommitted.
+- migration: no data migration. UI/action surface only.
+- removal/deletion: none.
+- final evidence: after regenerating `.opensks/macos/OpenSKS.app`, Computer Use relaunched the app as `pid 2964`, opened Project -> Evidence, and found the Release proof card exposing a `Run release proof` button with help text `Run release proof and refresh signing, notarization, and artifact binding evidence.` Clicking it completed through the app UI, temporarily disabled release/provider run controls while running, and updated the status bar to `release proof exit 0` while preserving the honest `Not Verified` signing/notarization blocker state.

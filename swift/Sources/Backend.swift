@@ -1885,6 +1885,10 @@ final class AppState: ObservableObject {
 
     func runAcceptance() { runVerb(label: "acceptance audit", args: ["acceptance", "audit"]) }
 
+    func runReleaseProof() {
+        runVerb(label: "release proof", args: ["release", "proof"])
+    }
+
     func runProviderAdapterCheck() {
         runVerb(label: "provider adapter-check", args: ["provider", "adapter-check"])
     }
