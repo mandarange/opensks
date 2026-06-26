@@ -189,6 +189,9 @@ struct EvidenceWorkspaceView: View {
                         }
                     }
                 }
+                if let signingEvidence = release.signingEvidence {
+                    releaseSigningEvidenceSection(signingEvidence)
+                }
                 if !release.remediationActions.isEmpty {
                     VStack(alignment: .leading, spacing: Theme.s8) {
                         Text("Remediation actions")
@@ -257,6 +260,52 @@ struct EvidenceWorkspaceView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(action.blocker): \(action.action)")
+    }
+
+    private func releaseSigningEvidenceSection(_ evidence: ReleaseSigningEvidence) -> some View {
+        VStack(alignment: .leading, spacing: Theme.s8) {
+            Text("Signing evidence")
+                .font(Theme.ui(11.5, .semibold))
+                .foregroundStyle(Theme.textSoft)
+            providerProofRow(label: "App", value: evidence.appBundlePath, systemImage: "app.badge")
+            providerProofRow(label: "Signature", value: evidence.signature ?? "unknown", systemImage: "signature")
+            providerProofRow(label: "Team ID", value: evidence.teamIdentifier ?? "unknown", systemImage: "person.text.rectangle")
+            providerProofRow(label: "Identifier", value: evidence.identifier ?? "unknown", systemImage: "number")
+            providerProofRow(label: "Production signed", value: evidence.productionSigned ? "true" : "false", systemImage: "checkmark.shield")
+            providerProofRow(label: "Notarized", value: evidence.notarized ? "true" : "false", systemImage: "seal")
+            providerProofRow(label: "Codesign", value: releaseStatusCode(evidence.codesignStatus), systemImage: "terminal")
+            providerProofRow(label: "Notarization", value: releaseStatusCode(evidence.notarizationStatus), systemImage: "doc.text.magnifyingglass")
+            if !evidence.diagnostic.isEmpty {
+                releaseDiagnosticRow(evidence.diagnostic)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(
+            "Signing evidence: signature \(evidence.signature ?? "unknown"), team \(evidence.teamIdentifier ?? "unknown"), production signed \(evidence.productionSigned ? "true" : "false"), notarized \(evidence.notarized ? "true" : "false")"
+        )
+    }
+
+    private func releaseStatusCode(_ status: Int?) -> String {
+        status.map(String.init) ?? "unknown"
+    }
+
+    private func releaseDiagnosticRow(_ diagnostic: String) -> some View {
+        HStack(alignment: .top, spacing: Theme.s10) {
+            Label {
+                Text("Diagnostic").font(Theme.ui(12, .medium)).foregroundStyle(Theme.textSoft)
+            } icon: {
+                Image(systemName: "stethoscope").font(.system(size: 12)).foregroundStyle(Theme.muted)
+            }
+            .frame(width: 130, alignment: .leading)
+            Text(diagnostic)
+                .font(Theme.mono(11.5))
+                .foregroundStyle(Theme.text)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Diagnostic: \(diagnostic)")
     }
 
     // MARK: - Provider live check

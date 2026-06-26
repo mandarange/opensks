@@ -358,6 +358,7 @@ struct NativeReleaseStatus {
     status: String,
     blockers: Vec<NativeReleaseBlocker>,
     remediation_actions: Vec<NativeReleaseRemediationAction>,
+    signing_evidence: Option<NativeReleaseSigningEvidence>,
 }
 
 #[derive(Debug, Clone)]
@@ -371,6 +372,21 @@ struct NativeReleaseRemediationAction {
     blocker: String,
     action: String,
     scope: String,
+}
+
+#[derive(Debug, Clone)]
+struct NativeReleaseSigningEvidence {
+    checked: bool,
+    app_bundle_path: String,
+    identifier: Option<String>,
+    signature: Option<String>,
+    team_identifier: Option<String>,
+    cd_hash: Option<String>,
+    production_signed: bool,
+    notarized: bool,
+    codesign_status: Option<i32>,
+    notarization_status: Option<i32>,
+    diagnostic: String,
 }
 
 #[derive(Debug, Clone)]
@@ -2082,11 +2098,14 @@ fn render_native_release_json(release: &NativeReleaseStatus) -> String {
         concat!(
             "{{\"status\": {status}, ",
             "\"blockers\": {blockers}, ",
-            "\"remediation_actions\": {actions}}}"
+            "\"remediation_actions\": {actions}, ",
+            "\"signing_evidence\": {signing_evidence}}}"
         ),
         status = json_string(&release.status),
         blockers = render_native_release_blockers_json(&release.blockers),
         actions = render_native_release_actions_json(&release.remediation_actions),
+        signing_evidence =
+            render_native_release_signing_evidence_json(release.signing_evidence.as_ref()),
     )
 }
 
@@ -2119,6 +2138,50 @@ fn render_native_release_actions_json(actions: &[NativeReleaseRemediationAction]
         .collect::<Vec<_>>()
         .join(",");
     format!("[{items}]")
+}
+
+fn render_native_release_signing_evidence_json(
+    evidence: Option<&NativeReleaseSigningEvidence>,
+) -> String {
+    let Some(evidence) = evidence else {
+        return "null".to_string();
+    };
+    format!(
+        concat!(
+            "{{\"checked\": {checked}, ",
+            "\"app_bundle_path\": {app_bundle_path}, ",
+            "\"identifier\": {identifier}, ",
+            "\"signature\": {signature}, ",
+            "\"team_identifier\": {team_identifier}, ",
+            "\"cd_hash\": {cd_hash}, ",
+            "\"production_signed\": {production_signed}, ",
+            "\"notarized\": {notarized}, ",
+            "\"codesign_status\": {codesign_status}, ",
+            "\"notarization_status\": {notarization_status}, ",
+            "\"diagnostic\": {diagnostic}}}"
+        ),
+        checked = evidence.checked,
+        app_bundle_path = json_string(&evidence.app_bundle_path),
+        identifier = render_optional_string_json(evidence.identifier.as_deref()),
+        signature = render_optional_string_json(evidence.signature.as_deref()),
+        team_identifier = render_optional_string_json(evidence.team_identifier.as_deref()),
+        cd_hash = render_optional_string_json(evidence.cd_hash.as_deref()),
+        production_signed = evidence.production_signed,
+        notarized = evidence.notarized,
+        codesign_status = render_optional_i32_json(evidence.codesign_status),
+        notarization_status = render_optional_i32_json(evidence.notarization_status),
+        diagnostic = json_string(&evidence.diagnostic),
+    )
+}
+
+fn render_optional_string_json(value: Option<&str>) -> String {
+    value.map(json_string).unwrap_or_else(|| "null".to_string())
+}
+
+fn render_optional_i32_json(value: Option<i32>) -> String {
+    value
+        .map(|number| number.to_string())
+        .unwrap_or_else(|| "null".to_string())
 }
 
 fn run_scheduler_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksError> {
@@ -14391,6 +14454,7 @@ fn collect_native_release_status(workspace: &Path) -> NativeReleaseStatus {
             status: "not_audited".to_string(),
             blockers: Vec::new(),
             remediation_actions: Vec::new(),
+            signing_evidence: None,
         };
     }
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
@@ -14398,6 +14462,7 @@ fn collect_native_release_status(workspace: &Path) -> NativeReleaseStatus {
             status: "invalid".to_string(),
             blockers: Vec::new(),
             remediation_actions: Vec::new(),
+            signing_evidence: None,
         };
     };
     let status = value
@@ -14450,11 +14515,67 @@ fn collect_native_release_status(workspace: &Path) -> NativeReleaseStatus {
                 .collect()
         })
         .unwrap_or_default();
+    let signing_evidence = collect_native_release_signing_evidence(value.get("signing_evidence"));
     NativeReleaseStatus {
         status,
         blockers,
         remediation_actions,
+        signing_evidence,
     }
+}
+
+fn collect_native_release_signing_evidence(
+    value: Option<&serde_json::Value>,
+) -> Option<NativeReleaseSigningEvidence> {
+    let value = value?;
+    Some(NativeReleaseSigningEvidence {
+        checked: value
+            .get("checked")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        app_bundle_path: value
+            .get("app_bundle_path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(".opensks/macos/OpenSKS.app")
+            .to_string(),
+        identifier: value
+            .get("identifier")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        signature: value
+            .get("signature")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        team_identifier: value
+            .get("team_identifier")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        cd_hash: value
+            .get("cd_hash")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        production_signed: value
+            .get("production_signed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        notarized: value
+            .get("notarized")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        codesign_status: value
+            .get("codesign_status")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|number| i32::try_from(number).ok()),
+        notarization_status: value
+            .get("notarization_status")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|number| i32::try_from(number).ok()),
+        diagnostic: value
+            .get("diagnostic")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    })
 }
 
 fn compact_display_path(path: &Path) -> String {

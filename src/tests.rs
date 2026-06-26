@@ -2732,7 +2732,20 @@ fn app_data_exposes_release_proof_remediation_actions() {
               "action": "Build and sign the macOS app with a production Developer ID Application identity, then rerun release proof.",
               "scope": "release_signing"
             }
-          ]
+          ],
+          "signing_evidence": {
+            "checked": true,
+            "app_bundle_path": ".opensks/macos/OpenSKS.app",
+            "identifier": "dev.opensks.local",
+            "signature": "adhoc",
+            "team_identifier": "not set",
+            "cd_hash": "abc123",
+            "production_signed": false,
+            "notarized": false,
+            "codesign_status": 0,
+            "notarization_status": 1,
+            "diagnostic": "codesign_status=Some(0); signature=adhoc; team_identifier=not set"
+          }
         }"#,
     )
     .expect("release proof");
@@ -2750,6 +2763,26 @@ fn app_data_exposes_release_proof_remediation_actions() {
     assert_eq!(
         json["release"]["remediation_actions"][0]["scope"],
         "release_signing"
+    );
+    assert_eq!(json["release"]["signing_evidence"]["checked"], true);
+    assert_eq!(
+        json["release"]["signing_evidence"]["app_bundle_path"],
+        ".opensks/macos/OpenSKS.app"
+    );
+    assert_eq!(json["release"]["signing_evidence"]["signature"], "adhoc");
+    assert_eq!(
+        json["release"]["signing_evidence"]["team_identifier"],
+        "not set"
+    );
+    assert_eq!(
+        json["release"]["signing_evidence"]["production_signed"],
+        false
+    );
+    assert_eq!(json["release"]["signing_evidence"]["notarized"], false);
+    assert_eq!(json["release"]["signing_evidence"]["codesign_status"], 0);
+    assert_eq!(
+        json["release"]["signing_evidence"]["notarization_status"],
+        1
     );
     assert!(
         output

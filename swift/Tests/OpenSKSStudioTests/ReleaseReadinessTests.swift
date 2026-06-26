@@ -140,7 +140,20 @@ final class ReleaseReadinessTests: XCTestCase {
                         action: "Build and sign the macOS app, then rerun release proof.",
                         scope: "release_signing"
                     )
-                ]
+                ],
+                signingEvidence: ReleaseSigningEvidence(
+                    checked: true,
+                    appBundlePath: ".opensks/macos/OpenSKS.app",
+                    identifier: "dev.opensks.local",
+                    signature: "adhoc",
+                    teamIdentifier: "not set",
+                    cdHash: "abc123",
+                    productionSigned: false,
+                    notarized: false,
+                    codesignStatus: 0,
+                    notarizationStatus: 1,
+                    diagnostic: "codesign_status=Some(0); signature=adhoc; team_identifier=not set"
+                )
             ),
             providerAdapterCheck: ProviderAdapterCheckReport(
                 schema: "opensks.provider-adapter-check.v1",

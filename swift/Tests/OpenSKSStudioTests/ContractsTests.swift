@@ -857,7 +857,20 @@ final class ContractsTests: XCTestCase {
                 "action": "Build and sign the macOS app with a production Developer ID Application identity, then rerun release proof.",
                 "scope": "release_signing"
               }
-            ]
+            ],
+            "signing_evidence": {
+              "checked": true,
+              "app_bundle_path": ".opensks/macos/OpenSKS.app",
+              "identifier": "dev.opensks.local",
+              "signature": "adhoc",
+              "team_identifier": "not set",
+              "cd_hash": "abc123",
+              "production_signed": false,
+              "notarized": false,
+              "codesign_status": 0,
+              "notarization_status": 1,
+              "diagnostic": "codesign_status=Some(0); signature=adhoc; team_identifier=not set"
+            }
           },
           "provider_adapter_check": {
             "schema": "opensks.provider-adapter-check.v1",
@@ -939,6 +952,14 @@ final class ContractsTests: XCTestCase {
         XCTAssertEqual(data.release?.displayStatus, "Not Verified")
         XCTAssertEqual(data.release?.blockers.first?.code, "signed_app_missing")
         XCTAssertEqual(data.release?.remediationActions.first?.scope, "release_signing")
+        XCTAssertEqual(data.release?.signingEvidence?.checked, true)
+        XCTAssertEqual(data.release?.signingEvidence?.appBundlePath, ".opensks/macos/OpenSKS.app")
+        XCTAssertEqual(data.release?.signingEvidence?.signature, "adhoc")
+        XCTAssertEqual(data.release?.signingEvidence?.teamIdentifier, "not set")
+        XCTAssertEqual(data.release?.signingEvidence?.productionSigned, false)
+        XCTAssertEqual(data.release?.signingEvidence?.notarized, false)
+        XCTAssertEqual(data.release?.signingEvidence?.codesignStatus, 0)
+        XCTAssertEqual(data.release?.signingEvidence?.notarizationStatus, 1)
         XCTAssertEqual(data.providerAdapterCheck?.remoteProbeOptIn, false)
         XCTAssertEqual(data.providerAdapterCheck?.summary.total, 2)
         XCTAssertEqual(data.providerAdapterCheck?.summary.reachable, 0)

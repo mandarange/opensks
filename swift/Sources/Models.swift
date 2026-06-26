@@ -35,9 +35,22 @@ struct ReleaseProofSummary: Codable, Sendable {
     let status: String
     let blockers: [ReleaseProofBlocker]
     let remediationActions: [ReleaseRemediationAction]
+    let signingEvidence: ReleaseSigningEvidence?
+
+    init(
+        status: String,
+        blockers: [ReleaseProofBlocker],
+        remediationActions: [ReleaseRemediationAction],
+        signingEvidence: ReleaseSigningEvidence? = nil
+    ) {
+        self.status = status
+        self.blockers = blockers
+        self.remediationActions = remediationActions
+        self.signingEvidence = signingEvidence
+    }
 
     var hasEvidence: Bool {
-        status != "not_audited" || !blockers.isEmpty || !remediationActions.isEmpty
+        status != "not_audited" || !blockers.isEmpty || !remediationActions.isEmpty || signingEvidence != nil
     }
 
     var displayStatus: String {
@@ -68,6 +81,20 @@ struct ReleaseRemediationAction: Codable, Sendable, Identifiable {
     let scope: String
 
     var id: String { "\(scope):\(blocker):\(action)" }
+}
+
+struct ReleaseSigningEvidence: Codable, Sendable {
+    let checked: Bool
+    let appBundlePath: String
+    let identifier: String?
+    let signature: String?
+    let teamIdentifier: String?
+    let cdHash: String?
+    let productionSigned: Bool
+    let notarized: Bool
+    let codesignStatus: Int?
+    let notarizationStatus: Int?
+    let diagnostic: String
 }
 
 struct ProviderMockE2eSummary: Codable, Sendable {
