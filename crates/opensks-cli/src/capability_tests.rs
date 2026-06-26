@@ -35,20 +35,20 @@ fn capability_report_emits_valid_json_and_matrix() {
             .tool_registry
             .descriptor("image.generate")
             .is_some_and(|tool| {
-                tool.availability == opensks_contracts::ToolAvailability::Available
-                    && tool.reason_code == "provider_image_executor_route_required"
+                tool.availability == opensks_contracts::ToolAvailability::Unavailable
+                    && tool.reason_code == "provider_image_route_unavailable"
             }),
-        "runtime report must expose provider-backed image tool truth"
+        "runtime report must disable image generation until an image route is enabled"
     );
     assert!(
         report
             .tool_registry
             .descriptor("image.inspect")
             .is_some_and(|tool| {
-                tool.availability == opensks_contracts::ToolAvailability::Available
-                    && tool.reason_code == "provider_vision_executor_route_required"
+                tool.availability == opensks_contracts::ToolAvailability::Unavailable
+                    && tool.reason_code == "provider_vision_route_unavailable"
             }),
-        "runtime report must expose provider-backed vision tool truth"
+        "runtime report must disable image inspection until a vision route is enabled"
     );
     let local_test = report
         .capabilities

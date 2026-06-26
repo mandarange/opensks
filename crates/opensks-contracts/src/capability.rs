@@ -15,7 +15,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::agent::{ToolRegistry, default_tool_registry};
+use crate::agent::{ToolAvailability, ToolRegistry, default_tool_registry};
 
 /// Schema id for [`RuntimeCapability`].
 pub const RUNTIME_CAPABILITY_SCHEMA: &str = "opensks.runtime-capability.v1";
@@ -258,7 +258,7 @@ pub fn baseline_capability_report() -> RuntimeCapabilityReport {
     RuntimeCapabilityReport {
         schema: RUNTIME_CAPABILITY_REPORT_SCHEMA.to_string(),
         generated_for: None,
-        tool_registry: default_tool_registry(),
+        tool_registry: baseline_runtime_tool_registry(),
         capabilities: vec![
             capability(
                 "chat.answer",
@@ -487,10 +487,46 @@ pub fn baseline_capability_report() -> RuntimeCapabilityReport {
     }
 }
 
+fn baseline_runtime_tool_registry() -> ToolRegistry {
+    let mut registry = default_tool_registry();
+    mark_tool_unavailable(
+        &mut registry,
+        "image.generate",
+        "provider_image_route_unavailable",
+        "capability:image.generate:needs-enabled-image-route",
+    );
+    mark_tool_unavailable(
+        &mut registry,
+        "image.inspect",
+        "provider_vision_route_unavailable",
+        "capability:image.inspect:needs-enabled-vision-route",
+    );
+    registry
+}
+
+fn mark_tool_unavailable(
+    registry: &mut ToolRegistry,
+    name: &str,
+    reason_code: &str,
+    evidence_ref: &str,
+) {
+    if let Some(tool) = registry.tools.iter_mut().find(|tool| tool.name == name) {
+        tool.availability = ToolAvailability::Unavailable;
+        tool.reason_code = reason_code.to_string();
+        if !tool
+            .evidence_refs
+            .iter()
+            .any(|existing| existing == evidence_ref)
+        {
+            tool.evidence_refs.push(evidence_ref.to_string());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{ToolAvailability, ToolPermission};
+    use crate::agent::ToolPermission;
 
     #[test]
     fn baseline_report_is_internally_valid() {
@@ -514,15 +550,24 @@ mod tests {
         let image = registry
             .descriptor("image.generate")
             .expect("image.generate descriptor");
-        assert_eq!(image.availability, ToolAvailability::Available);
-        assert_eq!(image.reason_code, "provider_image_executor_route_required");
+        assert_eq!(image.availability, ToolAvailability::Unavailable);
+        assert_eq!(image.reason_code, "provider_image_route_unavailable");
+        assert!(
+            image
+                .evidence_refs
+                .iter()
+                .any(|e| e == "capability:image.generate:needs-enabled-image-route")
+        );
         let inspect = registry
             .descriptor("image.inspect")
             .expect("image.inspect descriptor");
-        assert_eq!(inspect.availability, ToolAvailability::Available);
-        assert_eq!(
-            inspect.reason_code,
-            "provider_vision_executor_route_required"
+        assert_eq!(inspect.availability, ToolAvailability::Unavailable);
+        assert_eq!(inspect.reason_code, "provider_vision_route_unavailable");
+        assert!(
+            inspect
+                .evidence_refs
+                .iter()
+                .any(|e| e == "capability:image.inspect:needs-enabled-vision-route")
         );
     }
 

@@ -46,7 +46,7 @@ Tools are emitted from the same `ToolRegistry` snapshot used by provider adapter
 | `git.log` | Git Log | Available | ReadOnly | `git_service_read_only` | tool-registry:canonical-catalog |
 | `artifact.read` | Read Artifact | Available | ReadOnly | `artifact_store_executable` | tool-registry:canonical-catalog |
 | `artifact.write` | Write Artifact | Available | Ask | `artifact_store_executable` | tool-registry:canonical-catalog |
-| `image.generate` | Generate Image | Available | Ask | `provider_image_executor_route_required` | tool-registry:canonical-catalog |
-| `image.inspect` | Inspect Image | Available | ReadOnly | `provider_vision_executor_route_required` | tool-registry:canonical-catalog |
+| `image.generate` | Generate Image | Unavailable | Ask | `provider_image_route_unavailable` | tool-registry:canonical-catalog, capability:image.generate:needs-enabled-image-route |
+| `image.inspect` | Inspect Image | Unavailable | ReadOnly | `provider_vision_route_unavailable` | tool-registry:canonical-catalog, capability:image.inspect:needs-enabled-vision-route |
 | `mcp.invoke` | Invoke MCP | Available | Ask | `local_mcp_broker_executable` | tool-registry:canonical-catalog |
 | `skill.invoke` | Invoke Skill | Available | Ask | `local_skill_registry_executable` | tool-registry:canonical-catalog |
