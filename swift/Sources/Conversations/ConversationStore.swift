@@ -8,8 +8,17 @@
 import Foundation
 import SwiftUI
 
+struct ConversationPendingSend: Equatable {
+    let projectId: String
+    let text: String
+    let createdAtMs: Int64
+    let token: String
+}
+
 @MainActor
 final class ConversationStore: ObservableObject, BackgroundReleasable {
+    nonisolated static let maxPinnedConversations = 5
+
     // Service boundary. Swappable so the live service can be (re)bound once the
     // workspace path is known at runtime (RootView.onAppear).
     @Published private(set) var service: ConversationService
@@ -61,7 +70,9 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     // independently.
     @Published private(set) var sendingConversationIDs: Set<String> = []
     @Published private(set) var savingThreadSettingsConversationIDs: Set<String> = []
+    @Published private(set) var applyingIntegrationRunIDs: Set<String> = []
     @Published private(set) var localSendTokensByConversation: [String: String] = [:]
+    @Published private(set) var pendingSendsByConversation: [String: ConversationPendingSend] = [:]
 
     // Filter / search.
     @Published var filter: ConversationFilter = .all
@@ -114,6 +125,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     /// Summaries after the in-memory search filter (the CLI already applied the
     /// status/pinned/archived filter).
     var visibleSummaries: [ConversationSummary] {
+        let summaries = reconcileSummaryStatuses(summaries)
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !query.isEmpty else { return summaries }
         return summaries.filter { $0.title.lowercased().contains(query) }
@@ -121,7 +133,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
 
     var selectedSummary: ConversationSummary? {
         guard let id = selectedConversationID else { return nil }
-        return summaries.first { $0.id == id }
+        return summaries.first { $0.id == id }.map(reconciledSummaryStatus)
     }
 
     func draft(for id: String) -> String { drafts[id] ?? "" }
@@ -138,10 +150,31 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
         drafts = updated
     }
 
-    private func markLocalSend(for id: String) {
+    func localPendingSend(for id: String) -> ConversationPendingSend? {
+        pendingSendsByConversation[id]
+    }
+
+    private func markLocalSend(for id: String, projectId: String, text: String) {
+        let token = "\(nowMs())-\(UUID().uuidString)"
         var updated = localSendTokensByConversation
-        updated[id] = "\(nowMs())-\(UUID().uuidString)"
+        updated[id] = token
         localSendTokensByConversation = updated
+
+        var pending = pendingSendsByConversation
+        pending[id] = ConversationPendingSend(
+            projectId: projectId,
+            text: text,
+            createdAtMs: nowMs(),
+            token: token
+        )
+        pendingSendsByConversation = pending
+    }
+
+    private func clearLocalPendingSend(for id: String) {
+        guard pendingSendsByConversation[id] != nil else { return }
+        var pending = pendingSendsByConversation
+        pending.removeValue(forKey: id)
+        pendingSendsByConversation = pending
     }
 
     var isSending: Bool {
@@ -166,25 +199,45 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
         savingThreadSettingsConversationIDs.contains(id)
     }
 
+    func isApplyingIntegration(runID: String?) -> Bool {
+        guard let runID else { return false }
+        return applyingIntegrationRunIDs.contains(runID)
+    }
+
     /// Runs linked to a conversation (most recent last), for the run card.
-    func runs(for id: String) -> [ConversationRunRef] { runsByConversation[id] ?? [] }
+    /// Durable run refs can briefly lag behind terminal assistant/timeline state
+    /// during live event races, so accessors surface the converged state.
+    func runs(for id: String) -> [ConversationRunRef] {
+        (runsByConversation[id] ?? []).map { terminalAdjustedRunRef($0, conversationID: id) }
+    }
 
     /// Durable timeline items for a conversation. This is the preferred Chat
     /// read model; `messages` remain loaded for pagination and compatibility.
     func timelineItems(for id: String) -> [ConversationTimelineItem] {
-        timelineByConversation[id] ?? []
+        orderedConversationTimelineItems(timelineByConversation[id] ?? [])
     }
 
     /// Durable Chat settings for a conversation, falling back to the typed safe
     /// defaults until the service has loaded or persisted a row.
     func threadSettings(for id: String) -> ConversationThreadSettings {
-        threadSettingsByConversation[id] ?? ConversationThreadSettings.defaultFor(conversationID: id)
+        canonicalThreadSettings(
+            threadSettingsByConversation[id] ?? ConversationThreadSettings.defaultFor(conversationID: id)
+        )
     }
 
     private func cacheThreadSettings(_ settings: ConversationThreadSettings, for id: String) {
         var next = threadSettingsByConversation
-        next[id] = settings
+        next[id] = canonicalThreadSettings(settings)
         threadSettingsByConversation = next
+    }
+
+    private func canonicalThreadSettings(_ settings: ConversationThreadSettings) -> ConversationThreadSettings {
+        var canonical = settings
+        let approval = ConversationApprovalPolicy.canonicalId(for: canonical.approvalPolicyId)
+        if approval != canonical.approvalPolicyId {
+            canonical.approvalPolicyId = approval
+        }
+        return canonical
     }
 
     private func removeCachedThreadSettings(for id: String) {
@@ -427,10 +480,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
             updatedAtMs: nowMs
         )
         timelineByConversation[id, default: []].append(local)
-        timelineByConversation[id]?.sort { lhs, rhs in
-            if lhs.sequence != rhs.sequence { return lhs.sequence < rhs.sequence }
-            return lhs.id < rhs.id
-        }
+        timelineByConversation[id] = orderedConversationTimelineItems(timelineByConversation[id] ?? [])
         Task { @MainActor in
             do {
                 _ = try await service.appendGitReceiptEvent(
@@ -456,12 +506,16 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     /// render a `RunCard` directly under the turn that produced it.
     func run(forMessageID messageID: String) -> ConversationRunRef? {
         guard let id = selectedConversationID else { return nil }
-        return runsByConversation[id]?.first { $0.messageId == messageID }
+        return runsByConversation[id]?
+            .first { $0.messageId == messageID }
+            .map { terminalAdjustedRunRef($0, conversationID: id) }
     }
 
     func run(forRunID runID: String) -> ConversationRunRef? {
         guard let id = selectedConversationID else { return nil }
-        return runsByConversation[id]?.first { $0.runId == runID }
+        return runsByConversation[id]?
+            .first { $0.runId == runID }
+            .map { terminalAdjustedRunRef($0, conversationID: id) }
     }
 
     // MARK: - Loading
@@ -472,7 +526,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
         defer { isLoading = false }
         do {
             let list = try await service.list(filter: filter, limit: nil)
-            summaries = list.conversations
+            summaries = reconcileSummaryStatuses(list.conversations)
             projectId = list.projectId
             // Keep selection valid; if it vanished, select the first.
             if let selected = selectedConversationID, !summaries.contains(where: { $0.id == selected }) {
@@ -519,8 +573,9 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
             let page = try await service.messages(id: id, beforeSequence: nil, limit: messagePageSize)
             // Only apply if the selection hasn't changed underneath us.
             guard selectedConversationID == id else { return }
-            messages = page.messages
+            messages = orderedConversationMessages(page.messages)
             hasMoreMessages = page.hasMore
+            reconcileSummaryStatusInPlace(for: id)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -541,7 +596,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
             // Prepend older page; de-dup defensively on id.
             let existing = Set(messages.map(\.id))
             let prepend = page.messages.filter { !existing.contains($0.id) }
-            messages = prepend + messages
+            messages = orderedConversationMessages(prepend + messages)
             hasMoreMessages = page.hasMore
             await loadTimeline(for: id, limit: messages.count)
         } catch {
@@ -568,7 +623,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
             return
         }
         setDraft("", for: conversationID)
-        markLocalSend(for: conversationID)
+        markLocalSend(for: conversationID, projectId: summary.projectId, text: trimmed)
         do {
             let threadSettings = threadSettings(for: conversationID)
             let context = turnContextSelection(for: conversationID)
@@ -576,28 +631,33 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
                 conversationID: conversationID,
                 projectID: summary.projectId,
                 text: trimmed,
-                settings: nil,
+                settings: ConversationTurnSettings.fromThread(threadSettings),
                 threadSettingsUpdatedAtMs: threadSettings.updatedAtMs,
                 context: context,
                 idempotencyKey: key
             )
             await refreshConversationReadModels(for: conversationID)
+            if acceptedUserMessageExists(in: conversationID, matching: trimmed) {
+                clearLocalPendingSend(for: conversationID)
+            }
             startRunEventSubscription(
                 runID: turn.runId,
                 conversationID: conversationID,
                 projectID: summary.projectId,
                 turnID: turn.turnId
             )
-            _ = try await drainSupervisorQueue(
-                maxTicks: supervisorDrainMaxTicks,
-                refreshAfterDrain: true,
-                preferredRunID: turn.runId
-            )
+            await refreshConversationReadModels(for: conversationID)
+            if acceptedUserMessageExists(in: conversationID, matching: trimmed) {
+                clearLocalPendingSend(for: conversationID)
+            }
             if let streamFailureMessage = latestLiveStreamFailureMessage(for: conversationID) {
                 errorMessage = streamFailureMessage
             }
         } catch {
             await refreshConversationReadModels(for: conversationID)
+            if acceptedUserMessageExists(in: conversationID, matching: trimmed) {
+                clearLocalPendingSend(for: conversationID)
+            }
             if let recoveredRun = acceptedRunForUserMessage(in: conversationID, matching: trimmed) {
                 do {
                     startRunEventSubscription(
@@ -608,12 +668,28 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
                     )
                     try? await Task.sleep(nanoseconds: 500_000_000)
                     await refreshConversationReadModels(for: conversationID)
+                    if acceptedUserMessageExists(in: conversationID, matching: trimmed) {
+                        clearLocalPendingSend(for: conversationID)
+                    }
+                    if isTerminalRunState(runState(in: conversationID, runID: recoveredRun.runId)) {
+                        errorMessage = nil
+                        return
+                    }
                     if runState(in: conversationID, runID: recoveredRun.runId) == .queued {
-                        _ = try await drainSupervisorQueue(
-                            maxTicks: supervisorDrainMaxTicks,
-                            refreshAfterDrain: true,
-                            preferredRunID: recoveredRun.runId
-                        )
+                        do {
+                            _ = try await drainSupervisorQueue(
+                                maxTicks: supervisorDrainMaxTicks,
+                                refreshAfterDrain: true,
+                                preferredRunID: recoveredRun.runId
+                            )
+                        } catch {
+                            await refreshConversationReadModels(for: conversationID)
+                            guard !isTerminalRunState(runState(in: conversationID, runID: recoveredRun.runId)) else {
+                                errorMessage = nil
+                                return
+                            }
+                            throw error
+                        }
                     }
                     if let streamFailureMessage = latestLiveStreamFailureMessage(for: conversationID) {
                         errorMessage = streamFailureMessage
@@ -628,6 +704,46 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
                !acceptedUserMessageExists(in: conversationID, matching: trimmed) {
                 setDraft(trimmed, for: conversationID)
             }
+            if !acceptedUserMessageExists(in: conversationID, matching: trimmed) {
+                clearLocalPendingSend(for: conversationID)
+            }
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func applyIntegrationCandidate(runID: String, conversationID: String) async {
+        guard !applyingIntegrationRunIDs.contains(runID) else { return }
+        guard let summary = summaries.first(where: { $0.id == conversationID }) else {
+            errorMessage = "conversation not loaded: \(conversationID)"
+            return
+        }
+        applyingIntegrationRunIDs.insert(runID)
+        errorMessage = nil
+        defer { applyingIntegrationRunIDs.remove(runID) }
+
+        do {
+            let stream = try await service.applyIntegrationCandidate(runID: runID)
+            if !stream.executionEvents.isEmpty {
+                applyLiveExecutionEvents(
+                    stream.executionEvents,
+                    conversationID: conversationID,
+                    projectID: summary.projectId,
+                    turnID: nil
+                )
+            }
+            if let failure = stream.streamFailures.first {
+                applyLiveStreamFailure(
+                    failure,
+                    conversationID: conversationID,
+                    projectID: summary.projectId,
+                    turnID: nil,
+                    runID: runID
+                )
+                errorMessage = streamFailureMessage(failure)
+            }
+            await refreshConversationReadModels(for: conversationID)
+        } catch {
+            await refreshConversationReadModels(for: conversationID)
             errorMessage = error.localizedDescription
         }
     }
@@ -650,6 +766,10 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
 
     private func runState(in conversationID: String, runID: String) -> RunState? {
         runsByConversation[conversationID]?.first { $0.runId == runID }?.runState
+    }
+
+    private func isTerminalRunState(_ state: RunState?) -> Bool {
+        state == .completed || state == .failed || state == .cancelled
     }
 
     private func acceptedUserMessageExists(in conversationID: String, matching text: String) -> Bool {
@@ -894,14 +1014,37 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     }
 
     private func refreshConversationReadModels(for conversationID: String? = nil) async {
-        await load()
+        await refreshSummariesPreservingSelection(preferredConversationID: conversationID)
         if let id = conversationID ?? selectedConversationID {
-            await loadRuns(for: id)
             await loadThreadSettings(for: id)
             if activeConversationID == id {
                 await loadMessages(for: id)
                 await loadTimeline(for: id)
             }
+            await loadRuns(for: id)
+        }
+    }
+
+    private func refreshSummariesPreservingSelection(preferredConversationID: String?) async {
+        do {
+            let previousSummaries = summaries
+            let list = try await service.list(filter: filter, limit: nil)
+            var nextSummaries = reconcileSummaryStatuses(list.conversations)
+            projectId = list.projectId
+
+            if let selected = selectedConversationID,
+               !nextSummaries.contains(where: { $0.id == selected }),
+               let previous = previousSummaries.first(where: { $0.id == selected }) {
+                nextSummaries.insert(reconciledSummaryStatus(previous), at: 0)
+            } else if let preferred = preferredConversationID,
+                      !nextSummaries.contains(where: { $0.id == preferred }),
+                      let previous = previousSummaries.first(where: { $0.id == preferred }) {
+                nextSummaries.insert(reconciledSummaryStatus(previous), at: 0)
+            }
+
+            summaries = nextSummaries
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -909,9 +1052,195 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     func loadRuns(for id: String) async {
         do {
             let runs = try await service.runs(conversationID: id)
-            runsByConversation[id] = runs
+            runsByConversation[id] = reconcileTerminalRunRefs(runs, conversationID: id)
+            reconcileSummaryStatusInPlace(for: id)
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func reconcileSummaryStatuses(_ list: [ConversationSummary]) -> [ConversationSummary] {
+        list.map(reconciledSummaryStatus)
+    }
+
+    private func reconcileSummaryStatusInPlace(for id: String) {
+        guard let index = summaries.firstIndex(where: { $0.id == id }) else { return }
+        summaries[index] = reconciledSummaryStatus(summaries[index])
+    }
+
+    private func reconciledSummaryStatus(_ summary: ConversationSummary) -> ConversationSummary {
+        guard summary.status.needsTerminalEvidenceReconciliation,
+              let terminalStatus = terminalConversationStatus(for: summary.id)
+        else {
+            return summary
+        }
+        return ConversationSummary(
+            schema: summary.schema,
+            id: summary.id,
+            projectId: summary.projectId,
+            title: summary.title,
+            titleSource: summary.titleSource,
+            status: terminalStatus,
+            pinned: summary.pinned,
+            archived: summary.archived,
+            messageCount: summary.messageCount,
+            createdAtMs: summary.createdAtMs,
+            updatedAtMs: summary.updatedAtMs,
+            lastMessageAtMs: summary.lastMessageAtMs
+        )
+    }
+
+    private func terminalConversationStatus(for id: String) -> ConversationStatus? {
+        let runs = (runsByConversation[id] ?? [])
+            .map { terminalAdjustedRunRef($0, conversationID: id) }
+        if let latestRun = runs.last,
+           isTerminalRunState(latestRun.runState) {
+            return conversationStatus(for: latestRun.runState)
+        }
+
+        guard selectedConversationID == id,
+              let latestAssistant = messages.last(where: { $0.role == .assistant }),
+              let terminalState = terminalRunStateForMessageState(latestAssistant.state)
+        else {
+            return nil
+        }
+        return conversationStatus(for: terminalState)
+    }
+
+    private func reconcileTerminalRunRefs(
+        _ runs: [ConversationRunRef],
+        conversationID: String
+    ) -> [ConversationRunRef] {
+        guard selectedConversationID == conversationID else { return runs }
+        return runs.map { terminalAdjustedRunRef($0, conversationID: conversationID) }
+    }
+
+    private func terminalAdjustedRunRef(
+        _ run: ConversationRunRef,
+        conversationID: String
+    ) -> ConversationRunRef {
+        guard let terminalState = terminalRunStateForLoadedRun(run, conversationID: conversationID),
+              shouldReplaceRunState(current: run.runState, with: terminalState)
+        else {
+            return run
+        }
+        return ConversationRunRef(
+            turnId: run.turnId,
+            runId: run.runId,
+            messageId: run.messageId,
+            relation: run.relation,
+            runState: terminalState
+        )
+    }
+
+    private func shouldReplaceRunState(current: RunState, with next: RunState) -> Bool {
+        if current == next { return false }
+        if next == .failed { return true }
+        if current == .failed { return false }
+        return !isTerminalRunState(current)
+    }
+
+    private func terminalRunStateForLoadedRun(
+        _ run: ConversationRunRef,
+        conversationID: String
+    ) -> RunState? {
+        let timelineState = terminalRunStateForTimeline(
+            timelineByConversation[conversationID] ?? [],
+            run: run
+        )
+        if timelineState == .failed {
+            return .failed
+        }
+        if selectedConversationID == conversationID,
+           let message = messages.first(where: { $0.id == run.messageId && $0.role == .assistant }),
+           let terminalState = terminalRunStateForMessageState(message.state) {
+            if terminalState == .failed { return .failed }
+            if let timelineState { return timelineState }
+            return terminalState
+        }
+        return timelineState
+    }
+
+    private func terminalRunStateForTimeline(
+        _ timeline: [ConversationTimelineItem],
+        run: ConversationRunRef
+    ) -> RunState? {
+        var sawCompleted = false
+        var sawCancelled = false
+        for item in timeline where timelineItem(item, matches: run) {
+            if terminalTimelineItemIndicatesFailure(item) {
+                return .failed
+            }
+            if terminalTimelineItemIndicatesCancellation(item) {
+                sawCancelled = true
+            }
+            if terminalTimelineItemIndicatesCompletion(item) {
+                sawCompleted = true
+            }
+            if timelineItemIsRunAssistantMessage(item, run: run),
+               let messageState = item.payload.messageState,
+               let terminalState = terminalRunStateForMessageState(messageState) {
+                switch terminalState {
+                case .failed:
+                    return .failed
+                case .cancelled:
+                    sawCancelled = true
+                case .completed:
+                    sawCompleted = true
+                default:
+                    break
+                }
+            }
+        }
+        if sawCancelled { return .cancelled }
+        if sawCompleted { return .completed }
+        return nil
+    }
+
+    private func timelineItem(_ item: ConversationTimelineItem, matches run: ConversationRunRef) -> Bool {
+        item.runId == run.runId
+            || item.payload.messageId == run.messageId
+            || item.payload.assistantMessageId == run.messageId
+    }
+
+    private func timelineItemIsRunAssistantMessage(
+        _ item: ConversationTimelineItem,
+        run: ConversationRunRef
+    ) -> Bool {
+        item.payload.messageId == run.messageId
+            || item.payload.assistantMessageId == run.messageId
+    }
+
+    private func terminalTimelineItemIndicatesFailure(_ item: ConversationTimelineItem) -> Bool {
+        item.state == "failed"
+            || item.state == "verification_failed"
+            || item.payload.eventKind == ExecutionEventKind.verificationFailed.rawValue
+    }
+
+    private func terminalTimelineItemIndicatesCancellation(_ item: ConversationTimelineItem) -> Bool {
+        item.state == "cancelled"
+            || item.state == ExecutionEventKind.runCancelled.rawValue
+            || item.payload.eventKind == ExecutionEventKind.runCancelled.rawValue
+    }
+
+    private func terminalTimelineItemIndicatesCompletion(_ item: ConversationTimelineItem) -> Bool {
+        item.state == "completed"
+            || item.state == ExecutionEventKind.runCompleted.rawValue
+            || item.state == ExecutionEventKind.snapshotWritten.rawValue
+            || item.payload.eventKind == ExecutionEventKind.runCompleted.rawValue
+            || item.payload.eventKind == ExecutionEventKind.snapshotWritten.rawValue
+    }
+
+    private func terminalRunStateForMessageState(_ messageState: MessageState) -> RunState? {
+        switch messageState {
+        case .complete:
+            return .completed
+        case .failed:
+            return .failed
+        case .cancelled:
+            return .cancelled
+        case .draft, .queued, .pending, .streaming, .unknown:
+            return nil
         }
     }
 
@@ -966,10 +1295,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
             )
             applyLiveRunTerminalEvent(event, conversationID: conversationID)
         }
-        items.sort { lhs, rhs in
-            lhs.sequence == rhs.sequence ? lhs.id < rhs.id : lhs.sequence < rhs.sequence
-        }
-        timelineByConversation[conversationID] = items
+        timelineByConversation[conversationID] = orderedConversationTimelineItems(items)
     }
 
     private func applyLiveAssistantMessageEvent(
@@ -1160,6 +1486,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
                 durableItems: timeline.items,
                 preservingLocalLiveEventsFor: id
             )
+            reconcileSummaryStatusInPlace(for: id)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -1176,11 +1503,7 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
                     || item.payload.projection == "live_stream_failure")
                 && !durableIDs.contains(item.id)
         }
-        var merged = durableItems + pendingLiveItems
-        merged.sort { lhs, rhs in
-            lhs.sequence == rhs.sequence ? lhs.id < rhs.id : lhs.sequence < rhs.sequence
-        }
-        return merged
+        return orderedConversationTimelineItems(durableItems + pendingLiveItems)
     }
 
     private func latestLiveStreamFailureMessage(for id: String) -> String? {
@@ -1256,6 +1579,23 @@ final class ConversationStore: ObservableObject, BackgroundReleasable {
     func togglePinned(_ id: String) async {
         guard let summary = summaries.first(where: { $0.id == id }) else { return }
         errorMessage = nil
+        if !summary.pinned {
+            do {
+                let pinned = try await service.list(filter: .pinned, limit: nil)
+                    .conversations
+                    .filter { !$0.archived }
+                    .count
+                guard pinned < Self.maxPinnedConversations else {
+                    errorMessage = ConversationServiceError.pinLimitDescription(
+                        limit: Self.maxPinnedConversations
+                    )
+                    return
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+                return
+            }
+        }
         do {
             try await service.setPinned(id: id, pinned: !summary.pinned)
             await load()
@@ -1716,6 +2056,17 @@ private extension JSONValue {
             return values.compactMap(\.stringValue)
         }
         return nil
+    }
+}
+
+private extension ConversationStatus {
+    var needsTerminalEvidenceReconciliation: Bool {
+        switch self {
+        case .queued, .running, .waitingForInput, .waitingForApproval, .paused, .unknown:
+            return true
+        case .idle, .completed, .failed, .archived:
+            return false
+        }
     }
 }
 

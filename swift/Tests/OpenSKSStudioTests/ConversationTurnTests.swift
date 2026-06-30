@@ -16,7 +16,9 @@ final class ConversationTurnTests: XCTestCase {
     private func summary(
         id: String,
         title: String = "Thread",
+        titleSource: ConversationTitleSource = .generated,
         status: ConversationStatus = .idle,
+        pinned: Bool = false,
         messageCount: Int = 0,
         activityMs: Int64 = 1_000
     ) -> ConversationSummary {
@@ -25,9 +27,9 @@ final class ConversationTurnTests: XCTestCase {
             id: id,
             projectId: "mock-project",
             title: title,
-            titleSource: .generated,
+            titleSource: titleSource,
             status: status,
-            pinned: false,
+            pinned: pinned,
             archived: false,
             messageCount: messageCount,
             createdAtMs: activityMs,
@@ -52,11 +54,41 @@ final class ConversationTurnTests: XCTestCase {
         )
     }
 
+    private func message(
+        id: String,
+        conversationID: String,
+        role: MessageRole,
+        text: String,
+        sequence: Int64,
+        state: MessageState = .complete
+    ) -> ConversationMessage {
+        ConversationMessage(
+            schema: "opensks.conversation-message.v1",
+            id: id,
+            projectId: "mock-project",
+            conversationId: conversationID,
+            turnId: nil,
+            role: role,
+            state: state,
+            contentRedacted: text,
+            sequence: sequence,
+            createdAtMs: 1_000 + sequence,
+            updatedAtMs: 1_000 + sequence
+        )
+    }
+
     private func makeStore(
         summaries: [ConversationSummary],
+        messages: [String: [ConversationMessage]] = [:],
+        runs: [String: [ConversationRunRef]] = [:],
         runStateOnTurn: RunState = .queued
     ) -> (ConversationStore, MockConversationService) {
-        let mock = MockConversationService(summaries: summaries, runStateOnTurn: runStateOnTurn)
+        let mock = MockConversationService(
+            summaries: summaries,
+            messages: messages,
+            runs: runs,
+            runStateOnTurn: runStateOnTurn
+        )
         return (ConversationStore(service: mock, messagePageSize: 50), mock)
     }
 
@@ -108,6 +140,24 @@ final class ConversationTurnTests: XCTestCase {
         XCTAssertEqual(turn.runState, .unknown)
     }
 
+    func testLoadRunsReconcilesStaleQueuedRunWhenAssistantMessageIsComplete() async {
+        let existingMessages = [
+            message(id: "m1", conversationID: "a", role: .user, text: "Reply with exactly: ok", sequence: 1),
+            message(id: "m2", conversationID: "a", role: .assistant, text: "ok", sequence: 2)
+        ]
+        let staleRun = runRef(turn: "turn-1", run: "run-1", message: "m2", state: .queued)
+        let (store, _) = makeStore(
+            summaries: [summary(id: "a", status: .running, messageCount: 2)],
+            messages: ["a": existingMessages],
+            runs: ["a": [staleRun]]
+        )
+
+        await store.load()
+
+        XCTAssertEqual(store.runs(for: "a").first?.runState, .completed)
+        XCTAssertEqual(store.selectedSummary?.status, .completed)
+    }
+
     // MARK: - Send appends user + assistant and records the run
 
     func testSendAppendsUserAndAssistantTurnAndRecordsRun() async {
@@ -124,7 +174,6 @@ final class ConversationTurnTests: XCTestCase {
         XCTAssertEqual(store.messages.first?.contentRedacted, "explain the parser")
         XCTAssertEqual(store.messages.last?.role, .assistant)
         await waitForSubscribeCalls(mock)
-        await waitForSupervisorTicks(mock, atLeast: 1)
         await waitForAssistantState(store, conversationID: "a", state: .complete)
         XCTAssertGreaterThanOrEqual(mock.subscribeRunEventsCallCount, 1)
         XCTAssertEqual(mock.subscribeRunEventsRequests.first?.runID, store.runs(for: "a").first?.runId)
@@ -147,9 +196,175 @@ final class ConversationTurnTests: XCTestCase {
         XCTAssertEqual(run.messageId, store.messages.last?.id)
         XCTAssertNotNil(store.run(forMessageID: store.messages.last!.id))
         XCTAssertEqual(store.selectedSummary?.status, .completed)
-        XCTAssertEqual(mock.supervisorTickCount, 1, "foreground send claims the just-accepted run without draining stale backlog")
+        XCTAssertEqual(mock.supervisorTickCount, 0, "foreground send observes the resident supervisor instead of starting a second daemon tick")
         XCTAssertEqual(store.messages.last?.state, .complete)
         XCTAssertEqual(store.messages.last?.contentRedacted, "Mock supervisor completed.")
+    }
+
+    func testSendRefreshDoesNotClearSelectedConversationWhenFilteredListChanges() async {
+        let (store, mock) = makeStore(summaries: [summary(id: "a", status: .running)])
+        await store.applyFilter(.running)
+        XCTAssertEqual(store.selectedConversationID, "a")
+
+        await store.send(conversationID: "a", text: "keep this thread visible")
+        await waitForSubscribeCalls(mock)
+        await waitForAssistantState(store, conversationID: "a", state: .complete)
+
+        XCTAssertEqual(store.selectedConversationID, "a")
+        XCTAssertNotNil(store.selectedSummary)
+        XCTAssertEqual(store.messages.map(\.contentRedacted), ["keep this thread visible", "Mock supervisor completed."])
+        XCTAssertFalse(store.timelineItems(for: "a").isEmpty)
+    }
+
+    func testFirstSendAutoNamesPlaceholderConversationFromUserRequest() async {
+        let (store, _) = makeStore(summaries: [
+            summary(id: "a", title: "New conversation", titleSource: .generated)
+        ])
+        await store.load()
+
+        await store.send(conversationID: "a", text: "Fix chat model picker and add regression tests")
+
+        XCTAssertEqual(store.selectedSummary?.title, "Fix chat model picker and add regression tests")
+        XCTAssertEqual(store.selectedSummary?.titleSource, .agent)
+    }
+
+    func testFirstSendAutoNameStripsLeadingMarkdownSkillLink() async {
+        let (store, _) = makeStore(summaries: [
+            summary(id: "a", title: "New conversation", titleSource: .generated)
+        ])
+        await store.load()
+
+        await store.send(conversationID: "a", text: "[$dfix](/tmp/dfix/SKILL.md) 푸쉬한번해줘")
+
+        XCTAssertEqual(store.selectedSummary?.title, "푸쉬한번해줘")
+        XCTAssertFalse(store.selectedSummary?.title.contains("/tmp/") ?? true)
+        XCTAssertEqual(store.selectedSummary?.titleSource, .agent)
+    }
+
+    func testLiveConversationServiceUsesOneDaemonEngineForChatTurnAndSupervisor() {
+        let engine = EngineProcess()
+        let service = LiveConversationService(
+            cli: URL(fileURLWithPath: "/tmp/opensks-cli"),
+            workspace: URL(fileURLWithPath: "/tmp/opensks-workspace", isDirectory: true),
+            engine: engine
+        )
+
+        XCTAssertTrue(service.engine === service.supervisorEngine)
+    }
+
+    func testFirstSendDoesNotOverwriteUserNamedConversation() async {
+        let (store, _) = makeStore(summaries: [
+            summary(id: "a", title: "Release checklist", titleSource: .user)
+        ])
+        await store.load()
+
+        await store.send(conversationID: "a", text: "Fix chat model picker and add regression tests")
+
+        XCTAssertEqual(store.selectedSummary?.title, "Release checklist")
+        XCTAssertEqual(store.selectedSummary?.titleSource, .user)
+    }
+
+    func testFirstSendDoesNotOverwriteGeneratedThreadTitle() async {
+        let (store, _) = makeStore(summaries: [
+            summary(id: "a", title: "Thread", titleSource: .generated)
+        ])
+        await store.load()
+
+        await store.send(conversationID: "a", text: "Rename should not happen from the first send")
+
+        XCTAssertEqual(store.selectedSummary?.title, "Thread")
+        XCTAssertEqual(store.selectedSummary?.titleSource, .generated)
+    }
+
+    func testLaterSendAutoNamesPlaceholderConversationWithExistingMessages() async {
+        let existingMessages = [
+            message(id: "m1", conversationID: "a", role: .user, text: "first prompt", sequence: 1),
+            message(id: "m2", conversationID: "a", role: .assistant, text: "first response", sequence: 2)
+        ]
+        let (store, _) = makeStore(
+            summaries: [
+                summary(id: "a", title: "New conversation", titleSource: .generated, messageCount: 2)
+            ],
+            messages: ["a": existingMessages]
+        )
+        await store.load()
+
+        await store.send(conversationID: "a", text: "Fix chat title sync")
+
+        XCTAssertEqual(store.selectedSummary?.title, "Fix chat title sync")
+        XCTAssertEqual(store.selectedSummary?.titleSource, .agent)
+    }
+
+    func testPinLimitStopsSixthPinnedConversation() async {
+        let summaries = (1...5).map { index in
+            summary(id: "p\(index)", title: "Pinned \(index)", pinned: true)
+        } + [
+            summary(id: "target", title: "Target", pinned: false)
+        ]
+        let (store, _) = makeStore(summaries: summaries)
+        await store.load()
+
+        await store.togglePinned("target")
+
+        XCTAssertFalse(store.summaries.first { $0.id == "target" }?.pinned ?? true)
+        XCTAssertEqual(store.summaries.filter(\.pinned).count, ConversationStore.maxPinnedConversations)
+        XCTAssertEqual(
+            store.errorMessage,
+            "You can pin up to 5 conversations. Unpin one before pinning another."
+        )
+    }
+
+    func testPinLimitUsesProjectPinnedCountWhenSidebarIsFiltered() async {
+        let summaries = (1...5).map { index in
+            summary(id: "p\(index)", title: "Pinned \(index)", pinned: true)
+        } + [
+            summary(id: "target", title: "Running target", status: .running, pinned: false)
+        ]
+        let (store, _) = makeStore(summaries: summaries)
+        await store.applyFilter(.running)
+
+        XCTAssertEqual(store.summaries.map(\.id), ["target"])
+
+        await store.togglePinned("target")
+
+        XCTAssertFalse(store.summaries.first { $0.id == "target" }?.pinned ?? true)
+        XCTAssertEqual(
+            store.errorMessage,
+            "You can pin up to 5 conversations. Unpin one before pinning another."
+        )
+    }
+
+    func testPinLimitStillAllowsUnpinWhenLimitReached() async {
+        let summaries = (1...5).map { index in
+            summary(id: "p\(index)", title: "Pinned \(index)", pinned: true)
+        }
+        let (store, _) = makeStore(summaries: summaries)
+        await store.load()
+
+        await store.togglePinned("p1")
+
+        XCTAssertFalse(store.summaries.first { $0.id == "p1" }?.pinned ?? true)
+        XCTAssertEqual(store.summaries.filter(\.pinned).count, ConversationStore.maxPinnedConversations - 1)
+        XCTAssertNil(store.errorMessage)
+    }
+
+    func testMockServiceEnforcesPinLimitForDirectServiceCalls() async {
+        let summaries = (1...5).map { index in
+            summary(id: "p\(index)", title: "Pinned \(index)", pinned: true)
+        } + [
+            summary(id: "target", title: "Target", pinned: false)
+        ]
+        let mock = MockConversationService(summaries: summaries)
+
+        do {
+            try await mock.setPinned(id: "target", pinned: true)
+            XCTFail("sixth pinned conversation should be rejected by the service boundary")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                "You can pin up to 5 conversations. Unpin one before pinning another."
+            )
+        }
     }
 
     func testForegroundSendClaimsJustAcceptedRunBeforeOlderQueuedTurns() async throws {
@@ -164,14 +379,13 @@ final class ConversationTurnTests: XCTestCase {
 
         await store.send(conversationID: "a", text: "fresh foreground turn")
 
-        await waitForSupervisorTicks(mock, atLeast: 1)
         await waitForAssistantState(store, conversationID: "a", state: .complete)
         let runs = store.runs(for: "a")
         XCTAssertEqual(runs.first { $0.runId == oldTurn.runId }?.runState, .queued)
         let freshRun = try XCTUnwrap(runs.last)
         XCTAssertNotEqual(freshRun.runId, oldTurn.runId)
         XCTAssertEqual(freshRun.runState, .completed)
-        XCTAssertEqual(mock.supervisorTickCount, 1)
+        XCTAssertEqual(mock.supervisorTickCount, 0)
         XCTAssertEqual(store.messages.last?.contentRedacted, "Mock supervisor completed.")
     }
 
@@ -191,7 +405,6 @@ final class ConversationTurnTests: XCTestCase {
 
         await store.send(conversationID: "a", text: store.draft(for: "a"))
 
-        await waitForSupervisorTicks(base, atLeast: 1)
         await waitForAssistantState(store, conversationID: "a", state: .complete)
         XCTAssertEqual(store.draft(for: "a"), "")
         XCTAssertEqual(store.messages.filter { $0.role == .user }.count, 1)
@@ -319,7 +532,7 @@ final class ConversationTurnTests: XCTestCase {
             settings.maxParallelism = 8
             settings.verifierCount = 3
             settings.toolPolicyId = "read-only"
-            settings.approvalPolicyId = "manual-review"
+            settings.approvalPolicyId = ConversationApprovalPolicy.madSKS
             settings.tokenBudget = 120_000
             settings.costBudgetUsd = 2.75
             settings.timeoutMs = 600_000
@@ -333,7 +546,8 @@ final class ConversationTurnTests: XCTestCase {
         XCTAssertEqual(request.text, "use the selected lines")
         XCTAssertEqual(request.threadSettingsUpdatedAtMs, storedSettings.updatedAtMs)
         XCTAssertEqual(request.context.refs, [ref.wireReference])
-        XCTAssertNil(request.settings)
+        XCTAssertEqual(request.settings, ConversationTurnSettings.fromThread(storedSettings))
+        XCTAssertEqual(request.settings?.model.modelId, "provider/text-large")
         XCTAssertEqual(storedSettings.modelSelection, ModelSelection(
             mode: .pinned,
             modelId: "provider/text-large",
@@ -344,11 +558,104 @@ final class ConversationTurnTests: XCTestCase {
         XCTAssertEqual(storedSettings.maxParallelism, 8)
         XCTAssertEqual(storedSettings.verifierCount, 3)
         XCTAssertEqual(storedSettings.toolPolicyId, "read-only")
-        XCTAssertEqual(storedSettings.approvalPolicyId, "manual-review")
+        XCTAssertEqual(storedSettings.approvalPolicyId, ConversationApprovalPolicy.madSKS)
         XCTAssertEqual(storedSettings.tokenBudget, 120_000)
         XCTAssertEqual(storedSettings.costBudgetUsd, 2.75)
         XCTAssertEqual(storedSettings.timeoutMs, 600_000)
         XCTAssertEqual(storedSettings.imageModelId, "provider/image")
+    }
+
+    func testSendPassesRevisionZeroForUnsavedDefaultThreadSettings() async throws {
+        let (store, mock) = makeStore(summaries: [summary(id: "a")])
+        await store.load()
+        XCTAssertEqual(store.threadSettings(for: "a").updatedAtMs, 0)
+        XCTAssertEqual(store.threadSettings(for: "a").approvalPolicyId, ConversationApprovalPolicy.autopilot)
+        XCTAssertEqual(store.threadSettings(for: "a").maxParallelism, ConversationParallelismOptions.defaultValue)
+
+        await store.send(conversationID: "a", text: "first message")
+
+        let request = try XCTUnwrap(mock.turnStartRequests.last)
+        XCTAssertEqual(request.text, "first message")
+        XCTAssertEqual(request.threadSettingsUpdatedAtMs, 0)
+        XCTAssertEqual(
+            request.settings,
+            ConversationTurnSettings.fromThread(store.threadSettings(for: "a"))
+        )
+        XCTAssertEqual(request.settings?.model.mode, .auto)
+    }
+
+    func testParallelismOptionsDefaultToX16AndAllowX128() {
+        XCTAssertEqual(ConversationParallelismOptions.defaultValue, 16)
+        XCTAssertEqual(ConversationParallelismOptions.allowed.first, 1)
+        XCTAssertEqual(ConversationParallelismOptions.allowed.last, 128)
+        XCTAssertTrue(ConversationParallelismOptions.allowed.contains(16))
+        XCTAssertTrue(ConversationParallelismOptions.allowed.contains(128))
+    }
+
+    func testApprovalPolicyMenuDefaultsToAutopilotAndExposesMadMode() {
+        let settings = ConversationThreadSettings.defaultFor(conversationID: "a")
+
+        XCTAssertEqual(settings.approvalPolicyId, ConversationApprovalPolicy.autopilot)
+        XCTAssertEqual(ConversationApprovalPolicy.displayLabel(for: settings.approvalPolicyId), "Autopilot")
+        XCTAssertEqual(ConversationApprovalPolicy.menuPolicyIds, [
+            ConversationApprovalPolicy.autopilot,
+            ConversationApprovalPolicy.madSKS
+        ])
+        XCTAssertEqual(ConversationApprovalPolicy.displayLabel(for: ConversationApprovalPolicy.madSKS), "Mad Mode")
+        XCTAssertEqual(ConversationApprovalPolicy.iconName(for: ConversationApprovalPolicy.madSKS), "flame")
+        XCTAssertTrue(ConversationApprovalPolicy.helpText(for: ConversationApprovalPolicy.autopilot).contains("low-risk"))
+        XCTAssertTrue(ConversationApprovalPolicy.helpText(for: ConversationApprovalPolicy.madSKS).contains("without approval stops"))
+        XCTAssertEqual(ConversationApprovalPolicy.displayLabel(for: "safe-interactive"), "Autopilot")
+        XCTAssertEqual(ConversationApprovalPolicy.displayLabel(for: "manual-review"), "Autopilot")
+        XCTAssertEqual(ConversationApprovalPolicy.displayLabel(for: "unknown-policy"), "Autopilot")
+    }
+
+    func testLegacyApprovalPoliciesNormalizeToAutopilotOnLoad() async throws {
+        let mock = MockConversationService(summaries: [summary(id: "a")])
+        var legacy = ConversationThreadSettings.defaultFor(conversationID: "a")
+        legacy.approvalPolicyId = "safe-interactive"
+        _ = try await mock.setThreadSettings(legacy, conversationID: "a")
+        let store = ConversationStore(service: mock)
+
+        await store.load()
+
+        XCTAssertEqual(store.threadSettings(for: "a").approvalPolicyId, ConversationApprovalPolicy.autopilot)
+        XCTAssertEqual(ConversationApprovalPolicy.displayLabel(for: store.threadSettings(for: "a").approvalPolicyId), "Autopilot")
+    }
+
+    func testThreadSettingsPersistX128ParallelismSelection() async throws {
+        let (store, mock) = makeStore(summaries: [summary(id: "a")])
+        await store.load()
+
+        await store.updateThreadSettings(for: "a") { settings in
+            settings.maxParallelism = 128
+        }
+
+        let storedSettings = try await mock.threadSettings(conversationID: "a")
+        XCTAssertEqual(store.threadSettings(for: "a").maxParallelism, 128)
+        XCTAssertEqual(storedSettings.maxParallelism, 128)
+    }
+
+    func testSendSuppressesSupervisorTimeoutAfterDurableCompletion() async {
+        let base = MockConversationService(summaries: [summary(id: "a")])
+        let service = GatedTurnStartConversationService(
+            base: base,
+            supervisorTickErrorAfterCommit: NSError(
+                domain: "OpenSKSStudioTests",
+                code: 504,
+                userInfo: [NSLocalizedDescriptionKey: "daemon response timed out"]
+            )
+        )
+        let store = ConversationStore(service: service, messagePageSize: 50)
+        await store.load()
+
+        await store.send(conversationID: "a", text: "complete despite supervisor timeout")
+
+        XCTAssertNil(store.errorMessage)
+        XCTAssertEqual(store.selectedSummary?.status, .completed)
+        XCTAssertEqual(store.runs(for: "a").first?.runState, .completed)
+        XCTAssertEqual(store.messages.last?.state, .complete)
+        XCTAssertEqual(store.messages.last?.contentRedacted, "Mock supervisor completed.")
     }
 
     func testContextAttachmentMarksStaleAfterBackgroundRefreshAndComposerRenders() async throws {
@@ -524,7 +831,6 @@ final class ConversationTurnTests: XCTestCase {
         XCTAssertEqual(started?.kind, .worker)
         XCTAssertEqual(started?.state, "run_started")
         XCTAssertEqual(started?.payload.projection, "live_execution_event")
-        await waitForSupervisorTicks(mock, atLeast: 1)
         let completed = await waitForTimelineItem(
             store,
             conversationID: "a",
@@ -893,7 +1199,7 @@ final class ConversationTurnTests: XCTestCase {
         XCTAssertEqual(timeline.first { $0.id == "timeline-event-evt-run-completed" }?.state, "run_completed")
         let latestReply = try XCTUnwrap(latestAssistantReplyMessage(in: timeline))
         XCTAssertEqual(latestReply.contentRedacted, "Natural language response is visible.")
-        XCTAssertTrue(shouldRenderPinnedAssistantReply(latestReply, in: timeline))
+        XCTAssertFalse(shouldRenderPinnedAssistantReply(latestReply, in: timeline))
     }
 
     func testLiveImageArtifactEventsRenderTypedTimelineItem() async {
@@ -1023,6 +1329,245 @@ final class ConversationTurnTests: XCTestCase {
         XCTAssertEqual(store.selectedSummary?.status, .failed)
     }
 
+    func testRunAccessorsConvergeStaleRunningRunToFailedAssistantMessage() async throws {
+        let assistant = message(
+            id: "assistant-failed",
+            conversationID: "a",
+            role: .assistant,
+            text: "The model call failed: provider response had no message content",
+            sequence: 2,
+            state: .failed
+        )
+        let staleRun = runRef(
+            turn: "turn-stale",
+            run: "run-stale",
+            message: assistant.id,
+            state: .running
+        )
+        let (store, _) = makeStore(
+            summaries: [summary(id: "a", status: .failed, messageCount: 2)],
+            messages: [
+                "a": [
+                    message(id: "user-1", conversationID: "a", role: .user, text: "hello", sequence: 1),
+                    assistant
+                ]
+            ],
+            runs: ["a": [staleRun]]
+        )
+
+        await store.load()
+
+        XCTAssertEqual(store.runs(for: "a").first?.runState, .failed)
+        XCTAssertEqual(store.run(forRunID: "run-stale")?.runState, .failed)
+        XCTAssertEqual(store.run(forMessageID: assistant.id)?.runState, .failed)
+    }
+
+    func testLiveVerificationFailedEventConvergesRunningRunCardState() async throws {
+        let assistant = message(
+            id: "assistant-streaming",
+            conversationID: "a",
+            role: .assistant,
+            text: "...",
+            sequence: 2,
+            state: .streaming
+        )
+        let run = runRef(
+            turn: "turn-live",
+            run: "run-live",
+            message: assistant.id,
+            state: .running
+        )
+        let (store, _) = makeStore(
+            summaries: [summary(id: "a", status: .running, messageCount: 2)],
+            messages: [
+                "a": [
+                    message(id: "user-1", conversationID: "a", role: .user, text: "hello", sequence: 1),
+                    assistant
+                ]
+            ],
+            runs: ["a": [run]]
+        )
+        await store.load()
+
+        store.applyLiveExecutionEvents(
+            [
+                executionEvent(
+                    id: "evt-live-failed",
+                    runID: "run-live",
+                    sequence: 7,
+                    kind: .verificationFailed,
+                    message: "provider response had no message content"
+                )
+            ],
+            conversationID: "a",
+            projectID: "mock-project",
+            turnID: "turn-live"
+        )
+
+        XCTAssertEqual(store.run(forRunID: "run-live")?.runState, .failed)
+        XCTAssertEqual(store.runs(for: "a").first?.runState, .failed)
+        XCTAssertEqual(store.messages.last?.state, .failed)
+        XCTAssertEqual(store.selectedSummary?.status, .failed)
+    }
+
+    func testLiveVerificationFailedEventOverridesCompletedRunCardState() async throws {
+        let assistant = message(
+            id: "assistant-complete",
+            conversationID: "a",
+            role: .assistant,
+            text: "done",
+            sequence: 2,
+            state: .complete
+        )
+        let run = runRef(
+            turn: "turn-live",
+            run: "run-live",
+            message: assistant.id,
+            state: .completed
+        )
+        let (store, _) = makeStore(
+            summaries: [summary(id: "a", status: .completed, messageCount: 2)],
+            messages: [
+                "a": [
+                    message(id: "user-1", conversationID: "a", role: .user, text: "hello", sequence: 1),
+                    assistant
+                ]
+            ],
+            runs: ["a": [run]]
+        )
+        await store.load()
+
+        store.applyLiveExecutionEvents(
+            [
+                executionEvent(
+                    id: "evt-live-failed-after-complete",
+                    runID: "run-live",
+                    sequence: 9,
+                    kind: .verificationFailed,
+                    message: "TurnSupervisor failed."
+                )
+            ],
+            conversationID: "a",
+            projectID: "mock-project",
+            turnID: "turn-live"
+        )
+
+        XCTAssertEqual(store.run(forRunID: "run-live")?.runState, .failed)
+        XCTAssertEqual(store.runs(for: "a").first?.runState, .failed)
+        XCTAssertEqual(store.messages.last?.state, .failed)
+        XCTAssertEqual(store.selectedSummary?.status, .failed)
+    }
+
+    func testLiveRunCompletedEventConvergesRunningRunCardState() async throws {
+        let assistant = message(
+            id: "assistant-streaming",
+            conversationID: "a",
+            role: .assistant,
+            text: "...",
+            sequence: 2,
+            state: .streaming
+        )
+        let run = runRef(
+            turn: "turn-live",
+            run: "run-live",
+            message: assistant.id,
+            state: .running
+        )
+        let (store, _) = makeStore(
+            summaries: [summary(id: "a", status: .running, messageCount: 2)],
+            messages: [
+                "a": [
+                    message(id: "user-1", conversationID: "a", role: .user, text: "hello", sequence: 1),
+                    assistant
+                ]
+            ],
+            runs: ["a": [run]]
+        )
+        await store.load()
+
+        store.applyLiveExecutionEvents(
+            [
+                executionEvent(
+                    id: "evt-live-completed",
+                    runID: "run-live",
+                    sequence: 7,
+                    kind: .runCompleted,
+                    message: "completed"
+                )
+            ],
+            conversationID: "a",
+            projectID: "mock-project",
+            turnID: "turn-live"
+        )
+
+        XCTAssertEqual(store.run(forRunID: "run-live")?.runState, .completed)
+        XCTAssertEqual(store.runs(for: "a").first?.runState, .completed)
+        XCTAssertEqual(store.messages.last?.state, .complete)
+        XCTAssertEqual(store.selectedSummary?.status, .completed)
+    }
+
+    func testTerminalEventForOneRunDoesNotConvergeSiblingRunInSameTurn() async throws {
+        let firstAssistant = message(
+            id: "assistant-one",
+            conversationID: "a",
+            role: .assistant,
+            text: "...",
+            sequence: 2,
+            state: .streaming
+        )
+        let secondAssistant = message(
+            id: "assistant-two",
+            conversationID: "a",
+            role: .assistant,
+            text: "...",
+            sequence: 3,
+            state: .streaming
+        )
+        let failedRun = runRef(
+            turn: "turn-shared",
+            run: "run-one",
+            message: firstAssistant.id,
+            state: .running
+        )
+        let siblingRun = runRef(
+            turn: "turn-shared",
+            run: "run-two",
+            message: secondAssistant.id,
+            state: .running
+        )
+        let (store, _) = makeStore(
+            summaries: [summary(id: "a", status: .running, messageCount: 3)],
+            messages: [
+                "a": [
+                    message(id: "user-1", conversationID: "a", role: .user, text: "hello", sequence: 1),
+                    firstAssistant,
+                    secondAssistant
+                ]
+            ],
+            runs: ["a": [failedRun, siblingRun]]
+        )
+        await store.load()
+
+        store.applyLiveExecutionEvents(
+            [
+                executionEvent(
+                    id: "evt-run-one-failed",
+                    runID: "run-one",
+                    sequence: 7,
+                    kind: .verificationFailed,
+                    message: "first run failed"
+                )
+            ],
+            conversationID: "a",
+            projectID: "mock-project",
+            turnID: "turn-shared"
+        )
+
+        XCTAssertEqual(store.run(forRunID: "run-one")?.runState, .failed)
+        XCTAssertEqual(store.run(forRunID: "run-two")?.runState, .running)
+        XCTAssertEqual(store.runs(for: "a").map(\.runState), [.failed, .running])
+    }
+
     // MARK: - Render smoke tests
 
     func testRunCardRendersNonNil() throws {
@@ -1039,13 +1584,37 @@ final class ConversationTurnTests: XCTestCase {
         XCTAssertNotNil(ImageRenderer(content: card).nsImage)
     }
 
+    func testRunFailureDiagnosticsPopoverRendersLongScrollableContent() throws {
+        let run = runRef(state: .failed)
+        let diagnostics = RunFailureDiagnostics(
+            run: run,
+            summary: "The worker failed after the command returned a non-zero exit code.",
+            details: (0..<32).map { index in
+                RunFailureDetail(
+                    label: "Signal \(index)",
+                    value: "Long diagnostic line \(index): command output and failure context should remain readable in a scrollable panel."
+                )
+            },
+            recoveryHints: [
+                "Open the command output, fix the failing command, then retry the turn.",
+                "Use the reason/code signal as the first fix target."
+            ]
+        )
+        let popover = RunFailureDiagnosticsPopover(diagnostics: diagnostics, shortRunID: "run-fail")
+            .frame(width: 430, height: 460)
+
+        XCTAssertNotNil(ImageRenderer(content: popover).nsImage)
+    }
+
     func testConversationComposerRendersNonNil() async throws {
         let (store, _) = makeStore(summaries: [summary(id: "a")])
         await store.load()
         let composer = ConversationComposer(
             store: store,
             providers: ProviderStore(secretStore: InMemoryProviderSecretStore()),
-            conversationID: "a"
+            conversationID: "a",
+            workspaceURL: URL(fileURLWithPath: "/tmp/opensks-workspace", isDirectory: true),
+            openProject: { _ in }
         )
             .frame(width: 720, height: 128)
         let renderer = ImageRenderer(content: composer)
@@ -1158,6 +1727,7 @@ private final class GatedTurnStartConversationService: ConversationService, @unc
     private let gatedThreadSettingsConversationID: String?
     private let threadSettingsError: NSError?
     private let turnStartErrorAfterCommit: NSError?
+    private let supervisorTickErrorAfterCommit: NSError?
     private let lock = NSLock()
     private var gateContinuation: CheckedContinuation<Void, Never>?
     private var enteredContinuation: CheckedContinuation<Void, Never>?
@@ -1171,13 +1741,15 @@ private final class GatedTurnStartConversationService: ConversationService, @unc
         gatedConversationID: String? = nil,
         gatedThreadSettingsConversationID: String? = nil,
         threadSettingsError: NSError? = nil,
-        turnStartErrorAfterCommit: NSError? = nil
+        turnStartErrorAfterCommit: NSError? = nil,
+        supervisorTickErrorAfterCommit: NSError? = nil
     ) {
         self.base = base
         self.gatedConversationID = gatedConversationID
         self.gatedThreadSettingsConversationID = gatedThreadSettingsConversationID
         self.threadSettingsError = threadSettingsError
         self.turnStartErrorAfterCommit = turnStartErrorAfterCommit
+        self.supervisorTickErrorAfterCommit = supervisorTickErrorAfterCommit
     }
 
     func waitUntilGatedTurnStartEntered() async {
@@ -1326,7 +1898,11 @@ private final class GatedTurnStartConversationService: ConversationService, @unc
     }
 
     func supervisorTick(runID: String? = nil) async throws -> TurnSupervisorTickResult {
-        try await base.supervisorTick(runID: runID)
+        let result = try await base.supervisorTick(runID: runID)
+        if let supervisorTickErrorAfterCommit {
+            throw supervisorTickErrorAfterCommit
+        }
+        return result
     }
 
     func subscribeRunEvents(
@@ -1341,6 +1917,10 @@ private final class GatedTurnStartConversationService: ConversationService, @unc
             tailMs: tailMs,
             pollIntervalMs: pollIntervalMs
         )
+    }
+
+    func applyIntegrationCandidate(runID: String) async throws -> EngineRunStream {
+        try await base.applyIntegrationCandidate(runID: runID)
     }
 
     func runs(conversationID: String) async throws -> [ConversationRunRef] {

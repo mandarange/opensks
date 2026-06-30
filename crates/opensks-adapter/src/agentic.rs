@@ -1407,6 +1407,8 @@ fn run_agentic_loop_inner(
     let mut observations: Vec<ToolResult> = Vec::new();
     let mut patches: Vec<PatchProposal> = Vec::new();
     let mut applies: Vec<PatchApplyResult> = Vec::new();
+    let mut had_successful_apply = false;
+    let mut consecutive_noop_write_steps = 0usize;
 
     for step in 0..config.max_steps.max(1) {
         if request_cancelled(request) {
@@ -1487,6 +1489,9 @@ fn run_agentic_loop_inner(
                 // (rel_path, before, after, operation) planned writes for THIS step,
                 // applied together as one transaction after all calls are processed.
                 let mut planned: Vec<(String, String, String, FileOperation)> = Vec::new();
+                let mut write_call_count = 0usize;
+                let mut noop_write_count = 0usize;
+                let mut non_write_call_count = 0usize;
 
                 for call in &calls {
                     if request_cancelled(request) {
@@ -1507,6 +1512,7 @@ fn run_agentic_loop_inner(
                     );
                     match gateway.execute(call) {
                         Ok(ToolGatewayReceipt::Read(result)) => {
+                            non_write_call_count += 1;
                             let exists = matches!(
                                 &result,
                                 ToolResult::FileContent {
@@ -1528,6 +1534,7 @@ fn run_agentic_loop_inner(
                             next_obs.push(result);
                         }
                         Ok(ToolGatewayReceipt::ImageArtifact(asset)) => {
+                            non_write_call_count += 1;
                             let asset = asset.as_ref();
                             emit(
                                 sink,
@@ -1556,6 +1563,7 @@ fn run_agentic_loop_inner(
                             });
                         }
                         Ok(ToolGatewayReceipt::ImageInspection(result)) => {
+                            non_write_call_count += 1;
                             let result = result.as_ref();
                             emit(
                                 sink,
@@ -1586,6 +1594,29 @@ fn run_agentic_loop_inner(
                             after,
                             operation,
                         }) => {
+                            write_call_count += 1;
+                            if before == after {
+                                noop_write_count += 1;
+                                emit(
+                                    sink,
+                                    request,
+                                    &mut sequence,
+                                    AgentEventKind::ToolCallCompleted,
+                                    serde_json::json!({
+                                        "tool": call.tool_name(),
+                                        "path": path,
+                                        "planned": false,
+                                        "no_op": true,
+                                        "reason_code": "no_op",
+                                    }),
+                                );
+                                next_obs.push(ToolResult::Wrote {
+                                    path,
+                                    applied: false,
+                                    reason: "no_op".to_string(),
+                                });
+                                continue;
+                            }
                             emit(
                                 sink,
                                 request,
@@ -1600,6 +1631,7 @@ fn run_agentic_loop_inner(
                             planned.push((path, before, after, operation));
                         }
                         Err(result) => {
+                            non_write_call_count += 1;
                             let message = tool_result_message(&result);
                             emit(
                                 sink,
@@ -1660,6 +1692,9 @@ fn run_agentic_loop_inner(
                         AgentEventKind::FilePatchApplied,
                         serde_json::to_value(&apply).unwrap_or(serde_json::Value::Null),
                     );
+                    if apply.applied {
+                        had_successful_apply = true;
+                    }
                     for (path, _, _, _) in &planned {
                         next_obs.push(ToolResult::Wrote {
                             path: path.clone(),
@@ -1671,6 +1706,33 @@ fn run_agentic_loop_inner(
                     applies.push(apply);
                 }
 
+                let noop_write_only_step = write_call_count > 0
+                    && noop_write_count == write_call_count
+                    && planned.is_empty()
+                    && non_write_call_count == 0;
+                if noop_write_only_step {
+                    consecutive_noop_write_steps += 1;
+                } else {
+                    consecutive_noop_write_steps = 0;
+                }
+                if had_successful_apply && consecutive_noop_write_steps >= 2 {
+                    let text = "No further file changes were needed; the proposed edits already match the workspace."
+                        .to_string();
+                    emit(
+                        sink,
+                        request,
+                        &mut sequence,
+                        AgentEventKind::AssistantTextCompleted,
+                        serde_json::json!({ "text": text }),
+                    );
+                    return Ok(AgentRunOutcome {
+                        assistant_text: text,
+                        patches,
+                        apply_results: applies,
+                        final_state: RunProjectionState::Completed,
+                    });
+                }
+
                 observations = next_obs;
             }
         }
@@ -1679,15 +1741,21 @@ fn run_agentic_loop_inner(
     // The budget is exhausted and the driver never declared it was done. This is an
     // HONEST failure — never a quiet/fabricated completion (directive §0.4).
     let text = format!(
-        "Stopped after the {}-step budget without a final answer.",
+        "The agent exhausted its {}-step budget before producing a final answer.",
         config.max_steps.max(1)
     );
     emit(
         sink,
         request,
         &mut sequence,
-        AgentEventKind::AssistantTextCompleted,
-        serde_json::json!({ "text": text }),
+        AgentEventKind::Error,
+        serde_json::json!({
+            "code": "agentic_step_budget_exhausted",
+            "reason_code": "agentic_step_budget_exhausted",
+            "message": text,
+            "max_steps": config.max_steps.max(1),
+            "retryable": true
+        }),
     );
     Ok(AgentRunOutcome {
         assistant_text: text,
@@ -2454,6 +2522,52 @@ mod tests {
     }
 
     #[test]
+    fn loop_short_circuits_repeated_noop_writes_after_successful_apply() {
+        let ws = temp_workspace("noop-repeat");
+        let mut driver = FnDriver::new(|_obs: &[ToolResult], _step: usize| {
+            AgentStep::Tools(vec![ToolCall::ProposePatch {
+                path: "DONE.txt".to_string(),
+                content: "done\n".to_string(),
+            }])
+        });
+        let sink = CollectingSink::new();
+
+        let outcome = run_agentic_loop(
+            &request(&ws),
+            &mut driver,
+            &AgenticConfig {
+                max_steps: 16,
+                ..AgenticConfig::default()
+            },
+            &sink,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.final_state, RunProjectionState::Completed);
+        assert!(outcome.assistant_text.contains("No further file changes"));
+        assert_eq!(
+            std::fs::read_to_string(ws.join("DONE.txt")).unwrap(),
+            "done\n"
+        );
+        assert_eq!(outcome.apply_results.len(), 1);
+        assert_eq!(
+            sink.kinds()
+                .into_iter()
+                .filter(|kind| *kind == AgentEventKind::FilePatchApplied)
+                .count(),
+            1,
+            "identical no-op writes must not repeatedly apply patches"
+        );
+        assert!(
+            sink.events()
+                .iter()
+                .any(|event| event.payload["reason_code"] == "no_op"),
+            "driver should see no-op write observations before the loop self-terminates"
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
     fn loop_stops_before_next_tool_step_when_cancelled() {
         let ws = temp_workspace("cancel-before-tool");
         std::fs::write(ws.join("NOTES.md"), "one\n").unwrap();
@@ -2608,6 +2722,13 @@ mod tests {
         .unwrap();
         assert_eq!(outcome.final_state, RunProjectionState::Failed);
         assert!(outcome.assistant_text.contains("budget"));
+        let events = sink.events();
+        let budget_event = events.last().expect("budget event");
+        assert_eq!(budget_event.kind, AgentEventKind::Error);
+        assert_eq!(
+            budget_event.payload["reason_code"],
+            "agentic_step_budget_exhausted"
+        );
         std::fs::remove_dir_all(&ws).ok();
     }
 

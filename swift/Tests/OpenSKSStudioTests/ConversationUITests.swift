@@ -104,6 +104,16 @@ final class ConversationUITests: XCTestCase {
         }
     }
 
+    func testHeaderFailureDetailsAreExposedOnlyForFailedSummaryStatus() {
+        XCTAssertTrue(shouldExposeConversationHeaderFailureDetails(status: .failed))
+        for status in ConversationStatus.allCases where status != .failed {
+            XCTAssertFalse(
+                shouldExposeConversationHeaderFailureDetails(status: status),
+                "\(status.rawValue) should keep its normal header status semantics"
+            )
+        }
+    }
+
     func testConversationSummaryDecodesAllRustTitleSources() throws {
         let titleSources: [(String, ConversationTitleSource)] = [
             ("generated", .generated),
@@ -172,6 +182,345 @@ final class ConversationUITests: XCTestCase {
         XCTAssertEqual(event.kind, .error)
         XCTAssertNil(event.message)
         XCTAssertEqual(event.payload.contentRedacted, "Needs setup")
+    }
+
+    func testPendingSendBubblesAppendAfterExistingDurableTimeline() throws {
+        let json = """
+        {"schema":"opensks.conversation-timeline.v1","conversation_id":"c1","items":[{"schema":"opensks.timeline-item.v1","id":"timeline-old-user","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":1,"kind":"user_message","state":"complete","payload":{"message_id":"u1","role":"user","message_state":"complete","content_redacted":"old prompt"},"created_at_ms":10,"updated_at_ms":10},{"schema":"opensks.timeline-item.v1","id":"timeline-old-assistant","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":2,"kind":"assistant_message","state":"completed","payload":{"message_id":"a1","role":"assistant","message_state":"complete","content_redacted":"old answer"},"created_at_ms":11,"updated_at_ms":11}]}
+        """
+        let timeline = try JSONDecoder.opensks
+            .decode(ConversationTimeline.self, from: Data(json.utf8))
+            .items
+        let pending = ConversationPendingSend(
+            projectId: "mock-project",
+            text: "new prompt",
+            createdAtMs: 99,
+            token: "pending-token"
+        )
+
+        let pendingMessages = localPendingConversationMessages(pending, conversationID: "c1")
+        XCTAssertEqual(pendingMessages.map(\.contentRedacted), ["new prompt", "Thinking..."])
+        XCTAssertEqual(pendingMessages.map(\.role), [.user, .assistant])
+
+        let appended = appendedLocalPendingMessagesForRenderedTimeline(
+            mainThreadTimelineItems(timeline),
+            pendingMessages: pendingMessages
+        )
+        XCTAssertEqual(appended.map(\.contentRedacted), ["new prompt", "Thinking..."])
+    }
+
+    func testMainThreadTimelineOrdersOldestAtTopEvenWhenServiceReturnsNewestFirst() throws {
+        let json = """
+        {"schema":"opensks.conversation-timeline.v1","conversation_id":"c1","items":[{"schema":"opensks.timeline-item.v1","id":"timeline-new-user","project_id":"p1","conversation_id":"c1","turn_id":"t2","run_id":"r2","sequence":3,"kind":"user_message","state":"complete","payload":{"message_id":"u2","role":"user","message_state":"complete","content_redacted":"new prompt"},"created_at_ms":30,"updated_at_ms":30},{"schema":"opensks.timeline-item.v1","id":"timeline-old-error","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":2000001,"kind":"error","state":"verification_failed","payload":{"content_redacted":"old run failed"},"created_at_ms":12,"updated_at_ms":12},{"schema":"opensks.timeline-item.v1","id":"timeline-old-user","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":1,"kind":"user_message","state":"complete","payload":{"message_id":"u1","role":"user","message_state":"complete","content_redacted":"old prompt"},"created_at_ms":10,"updated_at_ms":10},{"schema":"opensks.timeline-item.v1","id":"timeline-old-assistant","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":2,"kind":"assistant_message","state":"failed","payload":{"message_id":"a1","role":"assistant","message_state":"failed","content_redacted":"old answer"},"created_at_ms":11,"updated_at_ms":11}]}
+        """
+        let timeline = try JSONDecoder.opensks
+            .decode(ConversationTimeline.self, from: Data(json.utf8))
+            .items
+
+        XCTAssertEqual(
+            mainThreadTimelineItems(timeline).map(\.id),
+            ["timeline-old-user", "timeline-old-assistant", "timeline-old-error", "timeline-new-user"]
+        )
+    }
+
+    func testBudgetExhaustionTextIsDisplayedAsFailureSummaryNotRawSentinel() {
+        let message = ConversationMessage(
+            schema: "opensks.conversation-message.v1",
+            id: "a1",
+            projectId: "p1",
+            conversationId: "c1",
+            turnId: "t1",
+            role: .assistant,
+            state: .failed,
+            contentRedacted: "Stopped after the 16-step budget without a final answer.",
+            sequence: 2,
+            createdAtMs: 20,
+            updatedAtMs: 20
+        )
+
+        XCTAssertEqual(
+            messageCellDisplayText(message),
+            "The agent exhausted its step budget before producing a final answer."
+        )
+        XCTAssertEqual(
+            normalizedRunFailureText(message.contentRedacted),
+            "The agent exhausted its step budget before producing a final answer."
+        )
+    }
+
+    func testWorkerTimelineItemsMoveOutOfMainConversationRail() throws {
+        let json = """
+        {"schema":"opensks.conversation-timeline.v1","conversation_id":"c1","items":[{"schema":"opensks.timeline-item.v1","id":"timeline-user","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":1,"kind":"user_message","state":"complete","payload":{"message_id":"u1","role":"user","message_state":"complete","content_redacted":"fix the layout"},"created_at_ms":10,"updated_at_ms":10},{"schema":"opensks.timeline-item.v1","id":"timeline-worker","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":2,"kind":"worker","state":"running","payload":{"worker_id":"worker-1","role_label":"layout reviewer","content_redacted":"checking the sidebar layout"},"created_at_ms":11,"updated_at_ms":11},{"schema":"opensks.timeline-item.v1","id":"timeline-tool","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":3,"kind":"tool_call","state":"completed","payload":{"worker_id":"worker-1","tool":"workspace.search_text","content_redacted":"searched layout files"},"created_at_ms":12,"updated_at_ms":12},{"schema":"opensks.timeline-item.v1","id":"timeline-assistant","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":4,"kind":"assistant_message","state":"completed","payload":{"message_id":"a1","role":"assistant","message_state":"complete","content_redacted":"I fixed the layout."},"created_at_ms":13,"updated_at_ms":13},{"schema":"opensks.timeline-item.v1","id":"timeline-assistant-event","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":5,"kind":"assistant_message","state":"completed","payload":{"assistant_message_id":"a1","agent_event_kind":"assistant_text_completed","worker_id":"worker-1","assistant_text":"I fixed the layout.","content_redacted":"I fixed the layout."},"created_at_ms":14,"updated_at_ms":14},{"schema":"opensks.timeline-item.v1","id":"timeline-error","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":6,"kind":"error","state":"failed","payload":{"content_redacted":"A visible failure reason."},"created_at_ms":15,"updated_at_ms":15}]}
+        """
+        let timeline = try JSONDecoder.opensks
+            .decode(ConversationTimeline.self, from: Data(json.utf8))
+            .items
+
+        XCTAssertEqual(
+            mainThreadTimelineItems(timeline).map(\.id),
+            ["timeline-user", "timeline-assistant", "timeline-error"]
+        )
+        XCTAssertEqual(
+            workerRailTimelineItems(timeline).map(\.id),
+            ["timeline-assistant-event"]
+        )
+        let rail = WorkerRailView(items: workerRailTimelineItems(timeline))
+            .frame(width: 304, height: 360)
+        XCTAssertNotNil(ImageRenderer(content: rail).nsImage, "worker rail should render collapsed worker summaries")
+        XCTAssertTrue(isActiveWorkerItem(timeline[1]))
+        XCTAssertFalse(isActiveWorkerItem(timeline[2]))
+    }
+
+    func testWorkerScopedWarningsMoveOutOfMainConversationRail() throws {
+        let json = """
+        {"schema":"opensks.conversation-timeline.v1","conversation_id":"c1","items":[{"schema":"opensks.timeline-item.v1","id":"timeline-user","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":1,"kind":"user_message","state":"complete","payload":{"message_id":"u1","role":"user","message_state":"complete","content_redacted":"fix the UI"},"created_at_ms":10,"updated_at_ms":10},{"schema":"opensks.timeline-item.v1","id":"timeline-worker-warning","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":2,"kind":"warning","state":"work_item_running","payload":{"event_kind":"work_item_running","worker_id":"agentic","tool":"workspace.list_directory","content_redacted":"warning"},"created_at_ms":11,"updated_at_ms":11},{"schema":"opensks.timeline-item.v1","id":"timeline-user-warning","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":3,"kind":"warning","state":"warning","payload":{"content_redacted":"A main-thread warning."},"created_at_ms":12,"updated_at_ms":12},{"schema":"opensks.timeline-item.v1","id":"timeline-assistant","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":4,"kind":"assistant_message","state":"completed","payload":{"message_id":"a1","role":"assistant","message_state":"complete","content_redacted":"Done."},"created_at_ms":13,"updated_at_ms":13}]}
+        """
+        let timeline = try JSONDecoder.opensks
+            .decode(ConversationTimeline.self, from: Data(json.utf8))
+            .items
+
+        XCTAssertEqual(
+            mainThreadTimelineItems(timeline).map(\.id),
+            ["timeline-user", "timeline-user-warning", "timeline-assistant"]
+        )
+        XCTAssertEqual(workerRailTimelineItems(timeline).map(\.id), ["timeline-worker-warning"])
+    }
+
+    func testLatestErrorTextByRunIDUsesRunScopedErrorText() throws {
+        let json = """
+        {"schema":"opensks.conversation-timeline.v1","conversation_id":"c1","items":[{"schema":"opensks.timeline-item.v1","id":"timeline-assistant","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":2,"kind":"assistant_message","state":"failed","payload":{"message_id":"a1","role":"assistant","message_state":"complete","content_redacted":"What would you like me to do?"},"created_at_ms":10,"updated_at_ms":10},{"schema":"opensks.timeline-item.v1","id":"timeline-error-old","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":3,"kind":"error","state":"verification_failed","payload":{"content_redacted":"old provider error"},"created_at_ms":11,"updated_at_ms":11},{"schema":"opensks.timeline-item.v1","id":"timeline-error-new","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":4,"kind":"error","state":"verification_failed","payload":{"content_redacted":"The model call failed: provider response had no message content"},"created_at_ms":12,"updated_at_ms":12}]}
+        """
+        let timeline = try JSONDecoder.opensks
+            .decode(ConversationTimeline.self, from: Data(json.utf8))
+            .items
+
+        XCTAssertEqual(
+            latestErrorTextByRunID(in: timeline)["r1"],
+            "The model call failed: provider response had no message content"
+        )
+    }
+
+    func testRunFailureSummaryPrefersRunErrorOverAssistantText() throws {
+        let json = """
+        {"schema":"opensks.conversation-timeline.v1","conversation_id":"c1","items":[{"schema":"opensks.timeline-item.v1","id":"timeline-assistant","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":2,"kind":"assistant_message","state":"failed","payload":{"message_id":"a1","role":"assistant","message_state":"complete","content_redacted":"What would you like me to do with these lines?"},"created_at_ms":10,"updated_at_ms":10},{"schema":"opensks.timeline-item.v1","id":"timeline-error","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":3,"kind":"error","state":"verification_failed","payload":{"content_redacted":"The model call failed: provider call failed: provider response had no message content"},"created_at_ms":11,"updated_at_ms":11}]}
+        """
+        let timeline = try JSONDecoder.opensks
+            .decode(ConversationTimeline.self, from: Data(json.utf8))
+            .items
+
+        XCTAssertEqual(
+            runFailureSummary(
+                messageContent: "What would you like me to do with these lines?",
+                evidence: timeline
+            ),
+            "The model call failed: provider call failed: provider response had no message content"
+        )
+    }
+
+    func testRunFailureDiagnosticsPopoverRendersLongScrollableDiagnostics() {
+        let run = ConversationRunRef(
+            turnId: "turn-long-diagnostics",
+            runId: "run-long-diagnostics",
+            messageId: "assistant-long-diagnostics",
+            relation: "primary",
+            runState: .failed
+        )
+        let diagnostics = RunFailureDiagnostics(
+            run: run,
+            summary: "The model call failed: provider call failed: provider response had no message content",
+            details: (0..<36).map { index in
+                RunFailureDetail(
+                    label: "Signal \(index)",
+                    value: "Long diagnostic row \(index) with enough text to wrap inside the scrollable failure details panel."
+                )
+            },
+            recoveryHints: [
+                "Retry on the current app build; if this repeats, inspect the provider response shape and model selection first.",
+                "Use the reason/code signal above as the first fix target."
+            ]
+        )
+
+        let rendered = RunFailureDiagnosticsPopover(
+            diagnostics: diagnostics,
+            shortRunID: "run-long"
+        )
+        .frame(width: 560, height: 620)
+
+        XCTAssertNotNil(
+            ImageRenderer(content: rendered).nsImage,
+            "long failure diagnostics should render in a bounded scrollable panel"
+        )
+    }
+
+    func testMainWorkspacePatchRendersAsCodeChangeCardInsteadOfWorkerLog() throws {
+        let json = """
+        {"schema":"opensks.conversation-timeline.v1","conversation_id":"c1","items":[{"schema":"opensks.timeline-item.v1","id":"timeline-user","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":1,"kind":"user_message","state":"complete","payload":{"message_id":"u1","role":"user","message_state":"complete","content_redacted":"make two tiny edits"},"created_at_ms":10,"updated_at_ms":10},{"schema":"opensks.timeline-item.v1","id":"timeline-isolated-patch","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":2,"kind":"patch","state":"completed","payload":{"agent_event_kind":"file_patch_applied","worker_id":"worker-a","content_redacted":"isolated worker patch","applied_files":["scratch-a.md"],"patch_count":1,"apply_result_count":1,"main_workspace_modified":false},"created_at_ms":11,"updated_at_ms":11},{"schema":"opensks.timeline-item.v1","id":"timeline-main-patch","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":3,"kind":"patch","state":"completed","payload":{"agent_event_kind":"file_patch_applied","content_redacted":"Applied integrated candidate to the main workspace.","applied_files":["src/lib.rs","README.md"],"patch_count":2,"apply_result_count":2,"main_workspace_modified":true,"integration_final_diff_hash":"fnv1a64:abcdef1234567890","integration_final_diff_ref":"artifact://.opensks/runtime/integration-candidates/r1/final.diff","receipt_ref":"artifact://receipt.json"},"created_at_ms":12,"updated_at_ms":12},{"schema":"opensks.timeline-item.v1","id":"timeline-assistant","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":4,"kind":"assistant_message","state":"completed","payload":{"message_id":"a1","role":"assistant","message_state":"complete","content_redacted":"Done."},"created_at_ms":13,"updated_at_ms":13}]}
+        """
+        let timeline = try JSONDecoder.opensks
+            .decode(ConversationTimeline.self, from: Data(json.utf8))
+            .items
+
+        XCTAssertEqual(
+            mainThreadTimelineItems(timeline).map(\.id),
+            ["timeline-user", "timeline-main-patch", "timeline-assistant"]
+        )
+        XCTAssertEqual(
+            workerRailTimelineItems(timeline).map(\.id),
+            ["timeline-isolated-patch"]
+        )
+        let mainPatch = try XCTUnwrap(timeline.first { $0.id == "timeline-main-patch" })
+        let card = try XCTUnwrap(CodeChangeSummaryCardModel(item: mainPatch))
+        XCTAssertEqual(card.title, "Edited 2 files")
+        XCTAssertEqual(card.files, ["src/lib.rs", "README.md"])
+        XCTAssertTrue(card.diffEvidence?.contains("abcdef123456") ?? false)
+        let rendered = CodeChangeSummaryCard(card: card).frame(width: 720, height: 240)
+        XCTAssertNotNil(ImageRenderer(content: rendered).nsImage, "main workspace patch should render a code change card")
+    }
+
+    func testPendingIntegrationCandidateRendersMainApplyCard() throws {
+        let json = """
+        {"schema":"opensks.conversation-timeline.v1","conversation_id":"c1","items":[{"schema":"opensks.timeline-item.v1","id":"timeline-user","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":1,"kind":"user_message","state":"complete","payload":{"message_id":"u1","role":"user","message_state":"complete","content_redacted":"create the smoke file"},"created_at_ms":10,"updated_at_ms":10},{"schema":"opensks.timeline-item.v1","id":"timeline-pending-integration","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":3,"kind":"worker","state":"completed","payload":{"code":"integration_candidate_ready","reason_code":"aggregate_isolated_patch_candidate_ready","main_workspace_modified":false,"approval_required":true,"receipt_ref":"artifact://.opensks/runtime/integration-candidates/r1/candidate.json","patch_ref":"artifact://.opensks/runtime/integration-candidates/r1/candidate.patch","target_paths":["SMOKE.txt"]},"created_at_ms":12,"updated_at_ms":12},{"schema":"opensks.timeline-item.v1","id":"timeline-assistant","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":4,"kind":"assistant_message","state":"completed","payload":{"message_id":"a1","role":"assistant","message_state":"complete","content_redacted":"Integration is pending approval."},"created_at_ms":13,"updated_at_ms":13}]}
+        """
+        let timeline = try JSONDecoder.opensks
+            .decode(ConversationTimeline.self, from: Data(json.utf8))
+            .items
+
+        XCTAssertEqual(
+            mainThreadTimelineItems(timeline).map(\.id),
+            ["timeline-user", "timeline-pending-integration", "timeline-assistant"]
+        )
+        XCTAssertTrue(workerRailTimelineItems(timeline).isEmpty)
+        let pending = try XCTUnwrap(timeline.first { $0.id == "timeline-pending-integration" })
+        let card = try XCTUnwrap(CodeChangeSummaryCardModel(item: pending))
+        XCTAssertEqual(card.title, "Code changes ready")
+        XCTAssertTrue(card.canApplyIntegration)
+        XCTAssertEqual(card.runID, "r1")
+        XCTAssertEqual(card.files, ["SMOKE.txt"])
+        let rendered = CodeChangeSummaryCard(card: card) { _ in }
+            .frame(width: 720, height: 260)
+        XCTAssertNotNil(ImageRenderer(content: rendered).nsImage, "pending candidate should render with apply affordance")
+    }
+
+    func testIntegratedApplySupersedesPendingIntegrationFailure() throws {
+        let json = """
+        {"schema":"opensks.conversation-timeline.v1","conversation_id":"c1","items":[{"schema":"opensks.timeline-item.v1","id":"timeline-user","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":1,"kind":"user_message","state":"complete","payload":{"message_id":"u1","role":"user","message_state":"complete","content_redacted":"create the smoke file"},"created_at_ms":10,"updated_at_ms":10},{"schema":"opensks.timeline-item.v1","id":"timeline-pending-integration","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":2,"kind":"worker","state":"completed","payload":{"code":"integration_candidate_ready","reason_code":"aggregate_isolated_patch_candidate_ready","main_workspace_modified":false,"approval_required":true,"receipt_ref":"artifact://.opensks/runtime/integration-candidates/r1/candidate.json","patch_ref":"artifact://.opensks/runtime/integration-candidates/r1/candidate.patch","target_paths":["SMOKE.txt"]},"created_at_ms":11,"updated_at_ms":11},{"schema":"opensks.timeline-item.v1","id":"timeline-failed-integration","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":3,"kind":"error","state":"verification_failed","payload":{"event_kind":"verification_failed","reason_code":"git_apply_failed","content_redacted":"verification failed","repair_ref":"artifact://.opensks/runtime/integration-candidates/r1/repair.json"},"created_at_ms":12,"updated_at_ms":12},{"schema":"opensks.timeline-item.v1","id":"timeline-integrated-apply-old","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":4,"kind":"worker","state":"completed","payload":{"event_kind":"work_item_completed","reason_code":"candidate_applied_to_main_workspace","main_workspace_modified":true,"verifier_passed":true,"target_paths":["SMOKE.txt"],"final_diff_ref":"artifact://.opensks/runtime/integration-candidates/r1/final.diff","receipt_ref":"artifact://.opensks/runtime/integration-candidates/r1/integration.json"},"created_at_ms":13,"updated_at_ms":13},{"schema":"opensks.timeline-item.v1","id":"timeline-integrated-apply","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":5,"kind":"worker","state":"completed","payload":{"event_kind":"work_item_completed","reason_code":"candidate_already_applied_to_main_workspace","main_workspace_modified":true,"verifier_passed":true,"target_paths":["SMOKE.txt"],"final_diff_ref":"artifact://.opensks/runtime/integration-candidates/r1/final.diff","receipt_ref":"artifact://.opensks/runtime/integration-candidates/r1/integration.json"},"created_at_ms":14,"updated_at_ms":14},{"schema":"opensks.timeline-item.v1","id":"timeline-assistant","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":6,"kind":"assistant_message","state":"completed","payload":{"message_id":"a1","role":"assistant","message_state":"complete","content_redacted":"Applied."},"created_at_ms":15,"updated_at_ms":15}]}
+        """
+        let timeline = try JSONDecoder.opensks
+            .decode(ConversationTimeline.self, from: Data(json.utf8))
+            .items
+
+        XCTAssertEqual(
+            mainThreadTimelineItems(timeline).map(\.id),
+            ["timeline-user", "timeline-integrated-apply", "timeline-assistant"]
+        )
+        XCTAssertTrue(workerRailTimelineItems(timeline).isEmpty)
+        let integrated = try XCTUnwrap(timeline.first { $0.id == "timeline-integrated-apply" })
+        let card = try XCTUnwrap(CodeChangeSummaryCardModel(item: integrated))
+        XCTAssertEqual(card.title, "Applied 1 file")
+        XCTAssertEqual(card.files, ["SMOKE.txt"])
+        XCTAssertFalse(card.canApplyIntegration)
+    }
+
+    func testStoreApplyIntegrationCandidateRoutesThroughService() async {
+        let service = MockConversationService(
+            summaries: [
+                summary(id: "c1", title: "Pending integration", status: .completed, messageCount: 1)
+            ]
+        )
+        let store = ConversationStore(service: service)
+
+        await store.load()
+        await store.applyIntegrationCandidate(runID: "r1", conversationID: "c1")
+
+        XCTAssertEqual(service.applyIntegrationCandidateRequests, ["r1"])
+        XCTAssertFalse(store.isApplyingIntegration(runID: "r1"))
+        XCTAssertNil(store.errorMessage)
+    }
+
+    func testAgenticPatchApplyWithoutMainWorkspaceFlagStaysInWorkerRail() throws {
+        let json = """
+        {"schema":"opensks.conversation-timeline.v1","conversation_id":"c1","items":[{"schema":"opensks.timeline-item.v1","id":"timeline-user","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":1,"kind":"user_message","state":"complete","payload":{"message_id":"u1","role":"user","message_state":"complete","content_redacted":"create the two smoke files"},"created_at_ms":10,"updated_at_ms":10},{"schema":"opensks.timeline-item.v1","id":"timeline-agentic-apply","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":8000008,"kind":"patch","state":"work_item_completed","payload":{"agent_event_kind":"file_patch_applied","worker_id":"agentic","content_redacted":"file_patch_applied","applied_files":["PARALLEL_SMOKE_A.txt","PARALLEL_SMOKE_B.txt"],"reason_code":"applied"},"created_at_ms":12,"updated_at_ms":12},{"schema":"opensks.timeline-item.v1","id":"timeline-assistant","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":8000016,"kind":"assistant_message","state":"completed","payload":{"message_id":"a1","role":"assistant","message_state":"complete","content_redacted":"Verified both files contain the requested content."},"created_at_ms":13,"updated_at_ms":13}]}
+        """
+        let timeline = try JSONDecoder.opensks
+            .decode(ConversationTimeline.self, from: Data(json.utf8))
+            .items
+
+        XCTAssertEqual(
+            mainThreadTimelineItems(timeline).map(\.id),
+            ["timeline-user", "timeline-assistant"]
+        )
+        XCTAssertEqual(workerRailTimelineItems(timeline).map(\.id), ["timeline-agentic-apply"])
+        let patch = try XCTUnwrap(timeline.first { $0.id == "timeline-agentic-apply" })
+        XCTAssertNil(CodeChangeSummaryCardModel(item: patch))
+    }
+
+    func testMainThreadPrefersDurableAssistantMessageOverSupersededRawAssistantEvent() throws {
+        let json = """
+        {"schema":"opensks.conversation-timeline.v1","conversation_id":"c1","items":[{"schema":"opensks.timeline-item.v1","id":"timeline-user","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":1,"kind":"user_message","state":"complete","payload":{"message_id":"u1","role":"user","message_state":"complete","content_redacted":"Title smoke: provider routing works."},"created_at_ms":10,"updated_at_ms":10},{"schema":"opensks.timeline-item.v1","id":"timeline-assistant","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":2,"kind":"assistant_message","state":"failed","payload":{"message_id":"a1","role":"assistant","message_state":"failed","content_redacted":"Prepared isolated change candidate for src/tests.rs from 1 source candidate(s)."},"created_at_ms":11,"updated_at_ms":30},{"schema":"opensks.timeline-item.v1","id":"timeline-agentic-raw-final","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":3,"kind":"assistant_message","state":"completed","payload":{"assistant_message_id":"a1","agent_event_kind":"assistant_text_completed","worker_id":"agentic","assistant_text":"Stopped after the 16-step budget without a final answer.","content_redacted":"Stopped after the 16-step budget without a final answer."},"created_at_ms":12,"updated_at_ms":12}]}
+        """
+        let timeline = try JSONDecoder.opensks
+            .decode(ConversationTimeline.self, from: Data(json.utf8))
+            .items
+
+        XCTAssertEqual(
+            mainThreadTimelineItems(timeline).map(\.id),
+            ["timeline-user", "timeline-assistant"]
+        )
+        XCTAssertEqual(
+            latestAssistantReplyMessage(in: mainThreadTimelineItems(timeline))?.contentRedacted,
+            "Prepared isolated change candidate for src/tests.rs from 1 source candidate(s)."
+        )
+        let reply = try XCTUnwrap(latestAssistantReplyMessage(in: mainThreadTimelineItems(timeline)))
+        XCTAssertFalse(shouldRenderPinnedAssistantReply(reply, in: mainThreadTimelineItems(timeline)))
+    }
+
+    func testMainThreadUsesLoadedDurableAssistantMessageWhenTimelineOnlyHasRawEvent() throws {
+        let json = """
+        {"schema":"opensks.conversation-timeline.v1","conversation_id":"c1","items":[{"schema":"opensks.timeline-item.v1","id":"timeline-user","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":1,"kind":"user_message","state":"complete","payload":{"message_id":"u1","role":"user","message_state":"complete","content_redacted":"Title smoke: provider routing works."},"created_at_ms":10,"updated_at_ms":10},{"schema":"opensks.timeline-item.v1","id":"timeline-error","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":2,"kind":"error","state":"verification_failed","payload":{"content_redacted":"TurnSupervisor failed.","code":"turn_supervisor_failed"},"created_at_ms":11,"updated_at_ms":11},{"schema":"opensks.timeline-item.v1","id":"timeline-agentic-raw-final","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":8000079,"kind":"assistant_message","state":"completed","payload":{"assistant_message_id":"a1","agent_event_kind":"assistant_text_completed","worker_id":"agentic","assistant_text":"Stopped after the 16-step budget without a final answer.","content_redacted":"Stopped after the 16-step budget without a final answer.","projection":"assistant_execution_event"},"created_at_ms":999999,"updated_at_ms":999999}]}
+        """
+        let timeline = try JSONDecoder.opensks
+            .decode(ConversationTimeline.self, from: Data(json.utf8))
+            .items
+        let durable = message(
+            id: "a1",
+            conversation: "c1",
+            role: .assistant,
+            text: "Prepared isolated change candidate for src/tests.rs from 1 source candidate(s).",
+            sequence: 4
+        )
+
+        XCTAssertEqual(
+            mainThreadTimelineItems(timeline, additionalDurableAssistantMessageIDs: ["a1"]).map(\.id),
+            ["timeline-user", "timeline-error"]
+        )
+        XCTAssertEqual(
+            mainThreadTimelineItems(timeline).map(\.id),
+            ["timeline-user", "timeline-error"]
+        )
+        XCTAssertEqual(
+            latestAssistantReplyMessage(in: timeline, durableMessages: [durable])?.contentRedacted,
+            "Prepared isolated change candidate for src/tests.rs from 1 source candidate(s)."
+        )
+        let reply = try XCTUnwrap(latestAssistantReplyMessage(in: timeline, durableMessages: [durable]))
+        XCTAssertTrue(shouldRenderPinnedAssistantReply(reply, in: mainThreadTimelineItems(timeline)))
+    }
+
+    func testWorkerRailCompressesRepeatedToolLogsIntoOneDialogueLane() throws {
+        let repeatedToolEvents = (1...20)
+            .map { index in
+                """
+                {"schema":"opensks.timeline-item.v1","id":"tool-\(index)","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":\(index),"kind":"tool_call","state":"tool_call_completed","payload":{"worker_id":"agentic","role_label":"Agentic","tool":"workspace.read_file_range","content_redacted":"read chunk \(index)"},"created_at_ms":\(10 + index),"updated_at_ms":\(10 + index)}
+                """
+            }
+            .joined(separator: ",")
+        let json = """
+        {"schema":"opensks.conversation-timeline.v1","conversation_id":"c1","items":[\(repeatedToolEvents),{"schema":"opensks.timeline-item.v1","id":"worker-dialogue","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":21,"kind":"assistant_message","state":"completed","payload":{"assistant_message_id":"a1","agent_event_kind":"assistant_text_completed","worker_id":"agentic","role_label":"Agentic","assistant_text":"I found the UI loop and reduced the worker rail noise.","content_redacted":"I found the UI loop and reduced the worker rail noise."},"created_at_ms":31,"updated_at_ms":31},{"schema":"opensks.timeline-item.v1","id":"tool-after-dialogue","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":22,"kind":"tool_call","state":"tool_call_completed","payload":{"worker_id":"agentic","role_label":"Agentic","tool":"git.status","content_redacted":"status checked"},"created_at_ms":32,"updated_at_ms":32}]}
+        """
+        let timeline = try JSONDecoder.opensks
+            .decode(ConversationTimeline.self, from: Data(json.utf8))
+            .items
+
+        XCTAssertEqual(workerRailTimelineItems(timeline).map(\.id), ["worker-dialogue"])
     }
 
     func testThreadSettingsDecodesCliModelSelectionWithoutFallbackIds() throws {
@@ -475,11 +824,77 @@ final class ConversationUITests: XCTestCase {
             summary(id: "a", title: "Alpha", status: .running, messageCount: 4, activityMs: 2_000),
             summary(id: "b", title: "Beta", pinned: true, activityMs: 1_000)
         ])
-        let sidebar = ConversationSidebar(store: store, projectName: "OpenSKS")
+        let sidebar = ConversationSidebar(
+            store: store,
+            providers: ProviderStore(secretStore: InMemoryProviderSecretStore()),
+            projectName: "OpenSKS"
+        )
             .frame(width: 280, height: 600)
         let renderer = ImageRenderer(content: sidebar)
         renderer.scale = 1
         XCTAssertNotNil(renderer.nsImage, "conversation sidebar must render non-nil")
+    }
+
+    func testConversationSidebarRendersProviderSettingsEntry() async throws {
+        let store = makeStore(summaries: [
+            summary(id: "a", title: "Alpha", status: .running, messageCount: 4, activityMs: 2_000)
+        ])
+        let providers = ProviderStore(secretStore: InMemoryProviderSecretStore())
+        var draft = ProviderDraft(kind: .codexLB)
+        draft.displayName = "codex-lb"
+        draft.codexLbDomain = "codex.hyper-lab.xyz"
+        _ = try await providers.connect(draft, credential: SecureCredential(value: "test-secret"))
+
+        let sidebar = ConversationSidebar(
+            store: store,
+            providers: providers,
+            projectName: "OpenSKS",
+            onOpenProviderSettings: {}
+        )
+            .frame(width: 280, height: 600)
+        let renderer = ImageRenderer(content: sidebar)
+        renderer.scale = 1
+        XCTAssertNotNil(renderer.nsImage, "conversation sidebar should render the compact provider settings entry")
+    }
+
+    func testConversationRowRendersInlinePinControl() throws {
+        let row = ConversationRow(
+            summary: summary(id: "pinned", title: "Pinned design review", pinned: true, messageCount: 2),
+            isSelected: true,
+            onTogglePinned: {},
+            onSelect: {}
+        )
+        .frame(width: 280, height: 64)
+
+        let renderer = ImageRenderer(content: row)
+        renderer.scale = 1
+        XCTAssertNotNil(renderer.nsImage, "conversation rows should render the inline pin control")
+    }
+
+    func testConversationSidebarRendersPinLimitErrorWithExistingRows() async {
+        let pinned = (1...5).map { index in
+            summary(id: "p\(index)", title: "Pinned \(index)", pinned: true, activityMs: Int64(2_000 - index))
+        }
+        let store = makeStore(summaries: pinned + [
+            summary(id: "target", title: "Target", activityMs: 500)
+        ])
+        await store.load()
+
+        await store.togglePinned("target")
+
+        XCTAssertEqual(
+            store.errorMessage,
+            "You can pin up to 5 conversations. Unpin one before pinning another."
+        )
+        let sidebar = ConversationSidebar(
+            store: store,
+            providers: ProviderStore(secretStore: InMemoryProviderSecretStore()),
+            projectName: "OpenSKS"
+        )
+            .frame(width: 280, height: 600)
+        let renderer = ImageRenderer(content: sidebar)
+        renderer.scale = 1
+        XCTAssertNotNil(renderer.nsImage, "conversation sidebar should render cap error above populated rows")
     }
 
     func testConversationThreadViewRendersAtFixedSize() throws {
@@ -497,6 +912,170 @@ final class ConversationUITests: XCTestCase {
         let renderer = ImageRenderer(content: thread)
         renderer.scale = 1
         XCTAssertNotNil(renderer.nsImage, "conversation thread view must render non-nil")
+    }
+
+    func testConversationThreadShowsPendingThinkingBubbleWhileTurnStartIsDelayed() async throws {
+        let mock = MockConversationService(
+            summaries: [summary(id: "a", title: "Pending send", messageCount: 0)],
+            turnStartDelayNanoseconds: 300_000_000
+        )
+        let store = ConversationStore(service: mock, messagePageSize: 50)
+        await store.load()
+        await store.select("a")
+
+        let sendTask = Task {
+            await store.send(conversationID: "a", text: "create a tiny file")
+        }
+        try await Task.sleep(nanoseconds: 60_000_000)
+
+        let pending = try XCTUnwrap(store.localPendingSend(for: "a"))
+        XCTAssertEqual(pending.text, "create a tiny file")
+        XCTAssertTrue(store.timelineItems(for: "a").isEmpty)
+
+        let thread = ConversationThreadView(
+            store: store,
+            providers: ProviderStore(secretStore: InMemoryProviderSecretStore())
+        )
+            .frame(width: 720, height: 600)
+        let renderer = ImageRenderer(content: thread)
+        renderer.scale = 1
+        XCTAssertNotNil(renderer.nsImage, "pending send should render user + Thinking... bubbles")
+
+        await sendTask.value
+        XCTAssertNil(store.localPendingSend(for: "a"))
+    }
+
+    func testConversationThreadShowsPendingThinkingBubbleAfterExistingTimeline() async throws {
+        let existing = [
+            message(id: "m1", conversation: "a", role: .user, text: "old prompt", sequence: 1),
+            message(id: "m2", conversation: "a", role: .assistant, text: "old answer", sequence: 2)
+        ]
+        let mock = MockConversationService(
+            summaries: [summary(id: "a", title: "Pending after history", messageCount: existing.count)],
+            messages: ["a": existing],
+            turnStartDelayNanoseconds: 300_000_000
+        )
+        let store = ConversationStore(service: mock, messagePageSize: 50)
+        await store.load()
+        await store.select("a")
+
+        XCTAssertFalse(store.timelineItems(for: "a").isEmpty)
+
+        let sendTask = Task {
+            await store.send(conversationID: "a", text: "new prompt")
+        }
+        try await Task.sleep(nanoseconds: 60_000_000)
+
+        let pending = try XCTUnwrap(store.localPendingSend(for: "a"))
+        XCTAssertEqual(pending.text, "new prompt")
+        XCTAssertFalse(store.timelineItems(for: "a").isEmpty)
+
+        let thread = ConversationThreadView(
+            store: store,
+            providers: ProviderStore(secretStore: InMemoryProviderSecretStore())
+        )
+            .frame(width: 720, height: 600)
+        let renderer = ImageRenderer(content: thread)
+        renderer.scale = 1
+        XCTAssertNotNil(renderer.nsImage, "pending send should render after existing history")
+
+        await sendTask.value
+        XCTAssertNil(store.localPendingSend(for: "a"))
+    }
+
+    func testStreamingAssistantPlaceholderDisplaysThinkingInsteadOfEllipsis() {
+        let streaming = ConversationMessage(
+            schema: "opensks.conversation-message.v1",
+            id: "assistant-thinking",
+            projectId: "mock-project",
+            conversationId: "a",
+            turnId: nil,
+            role: .assistant,
+            state: .streaming,
+            contentRedacted: "...",
+            sequence: 1,
+            createdAtMs: 1,
+            updatedAtMs: 1
+        )
+        let completed = ConversationMessage(
+            schema: "opensks.conversation-message.v1",
+            id: "assistant-complete",
+            projectId: "mock-project",
+            conversationId: "a",
+            turnId: nil,
+            role: .assistant,
+            state: .complete,
+            contentRedacted: "...",
+            sequence: 2,
+            createdAtMs: 2,
+            updatedAtMs: 2
+        )
+
+        XCTAssertEqual(messageCellDisplayText(streaming), "Thinking...")
+        XCTAssertEqual(messageCellDisplayText(completed), "...")
+    }
+
+    func testFailedConversationHeaderRendersFailureDiagnosticsEntryPoint() async throws {
+        let mock = MockConversationService(
+            summaries: [summary(id: "a", title: "Failure details", status: .idle)],
+            runStateOnTurn: .failed
+        )
+        let store = ConversationStore(service: mock, messagePageSize: 50)
+        await store.load()
+
+        _ = try await mock.turnStart(
+            conversationID: "a",
+            projectID: "mock-project",
+            text: "trigger a failed run",
+            settings: nil,
+            threadSettingsUpdatedAtMs: nil,
+            context: .empty,
+            idempotencyKey: "failed-header-render"
+        )
+        _ = try await mock.supervisorTick()
+        await store.load()
+        await store.select("a")
+
+        XCTAssertEqual(store.selectedSummary?.status, .failed)
+        XCTAssertEqual(store.runs(for: "a").first?.runState, .failed)
+
+        let thread = ConversationThreadView(
+            store: store,
+            providers: ProviderStore(secretStore: InMemoryProviderSecretStore())
+        )
+            .frame(width: 860, height: 600)
+        let renderer = ImageRenderer(content: thread)
+        renderer.scale = 1
+        XCTAssertNotNil(renderer.nsImage, "failed header should render its diagnostics entry point")
+    }
+
+    func testFailedConversationHeaderRendersTimelineOnlyFailureDiagnosticsEntryPoint() async throws {
+        let mock = MockConversationService(
+            summaries: [summary(id: "a", title: "Timeline-only failure", status: .failed)]
+        )
+        _ = try await mock.appendTimelineItem(
+            conversationID: "a",
+            kind: .error,
+            state: "verification_failed",
+            payloadJSON: """
+            {"content_redacted":"TurnSupervisor failed.","code":"turn_supervisor_failed"}
+            """
+        )
+        let store = ConversationStore(service: mock, messagePageSize: 50)
+        await store.load()
+        await store.select("a")
+
+        XCTAssertEqual(store.selectedSummary?.status, .failed)
+        XCTAssertTrue(store.runs(for: "a").isEmpty)
+
+        let thread = ConversationThreadView(
+            store: store,
+            providers: ProviderStore(secretStore: InMemoryProviderSecretStore())
+        )
+            .frame(width: 860, height: 600)
+        let renderer = ImageRenderer(content: thread)
+        renderer.scale = 1
+        XCTAssertNotNil(renderer.nsImage, "failed header should render details even without a run-list ref")
     }
 
     func testEmptyThreadRendersEmptyState() throws {

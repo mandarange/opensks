@@ -1546,6 +1546,8 @@ fn append_supervisor_failure_event(
 ) -> Result<opensks_contracts::ExecutionEventEnvelope, String> {
     let mut store = opensks_event_store::EventStore::open_workspace(workspace)
         .map_err(|error| error.to_string())?;
+    let error_redacted = redacted_failure_text(error);
+    let message = supervisor_failure_message(error);
     let event = opensks_contracts::ExecutionEventEnvelope {
         schema: opensks_contracts::EXECUTION_EVENT_ENVELOPE_SCHEMA.to_string(),
         id: format!("agent-{}-supervisor-failed-{}", lease.run_id, now_ms),
@@ -1564,7 +1566,9 @@ fn append_supervisor_failure_event(
             "stream_id": format!("stream-{}", lease.turn_id),
             "state": "failed",
             "reason_code": "turn_supervisor_failed",
-            "message": "TurnSupervisor failed.",
+            "message": message.clone(),
+            "content_redacted": message,
+            "error_redacted": error_redacted,
             "error_present": !error.is_empty()
         }),
         sensitivity: opensks_contracts::Sensitivity::Internal,
@@ -1574,6 +1578,47 @@ fn append_supervisor_failure_event(
         ],
     };
     store.append_event(event).map_err(|error| error.to_string())
+}
+
+fn redacted_failure_text(text: &str) -> String {
+    opensks_conversation::redact_secrets(text)
+        .trim()
+        .chars()
+        .take(2_000)
+        .collect()
+}
+
+fn supervisor_failure_message(error: &str) -> String {
+    let redacted = redacted_failure_text(error);
+    if redacted.is_empty() {
+        "TurnSupervisor failed before reporting a detailed cause.".to_string()
+    } else {
+        format!("TurnSupervisor failed: {redacted}")
+    }
+}
+
+struct AgentOutcomeFailureSignal {
+    reason_code: &'static str,
+    message: String,
+}
+
+fn agent_outcome_failure_signal(assistant_text: &str) -> AgentOutcomeFailureSignal {
+    let message = redacted_failure_text(assistant_text);
+    let message = if message.is_empty() {
+        "The agent run failed before a detailed assistant response was available.".to_string()
+    } else {
+        message
+    };
+    let lower = message.to_ascii_lowercase();
+    let reason_code = if lower.contains("step budget") && lower.contains("final answer") {
+        "agentic_step_budget_exhausted"
+    } else {
+        "agent_run_failed"
+    };
+    AgentOutcomeFailureSignal {
+        reason_code,
+        message,
+    }
 }
 
 fn conversation_turn_start_lines(
@@ -1628,6 +1673,15 @@ fn conversation_turn_start_lines(
     ) {
         Ok(accepted) => {
             if let Err(error) = record_model_routing_decision(&repo, &accepted.turn_id) {
+                let _ = finalize_accepted_turn_start_failure(
+                    &repo,
+                    &options.workspace,
+                    turn_request,
+                    &accepted,
+                    "model_routing_receipt_failed",
+                    &error.to_string(),
+                    timestamp_ms(),
+                );
                 let mut event = EngineEvent::new(
                     format!(
                         "engine-conversation-turn-start-routing-error-{}",
@@ -1647,6 +1701,15 @@ fn conversation_turn_start_lines(
             if let Err(error) =
                 bootstrap_turn_scheduler(&repo, &options.workspace, turn_request, &accepted)
             {
+                let _ = finalize_accepted_turn_start_failure(
+                    &repo,
+                    &options.workspace,
+                    turn_request,
+                    &accepted,
+                    "scheduler_bootstrap_failed",
+                    &error.to_string(),
+                    timestamp_ms(),
+                );
                 let mut event = EngineEvent::new(
                     format!(
                         "engine-conversation-turn-start-scheduler-error-{}",
@@ -1677,6 +1740,71 @@ fn conversation_turn_start_lines(
             event.evidence_refs = vec!["daemon:conversation-turn-start-error".to_string()];
             event.redacted = true;
             Ok(vec![serde_json::to_string(&event)?])
+        }
+    }
+}
+
+fn finalize_accepted_turn_start_failure(
+    repo: &opensks_conversation::ConversationRepository,
+    workspace: &Path,
+    turn_request: &opensks_contracts::ConversationTurnStartRequest,
+    accepted: &opensks_contracts::ConversationTurnAccepted,
+    reason_code: &str,
+    error: &str,
+    now_ms: u64,
+) -> Result<(), String> {
+    let assistant_text = format!("Turn failed to start — {reason_code}.");
+    repo.set_message_content(
+        &accepted.assistant_message_id,
+        &assistant_text,
+        opensks_contracts::MessageState::Failed,
+        now_ms,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let mut store = opensks_event_store::EventStore::open_workspace(workspace)
+        .map_err(|error| error.to_string())?;
+    let event = opensks_contracts::ExecutionEventEnvelope {
+        schema: opensks_contracts::EXECUTION_EVENT_ENVELOPE_SCHEMA.to_string(),
+        id: format!("agent-{}-turn-start-failed-{now_ms}", accepted.run_id),
+        run_id: accepted.run_id.clone(),
+        sequence: 0,
+        occurred_at: event_time_from_ms(now_ms),
+        actor: "conversation-turn-start".to_string(),
+        causation_id: Some(accepted.turn_id.clone()),
+        correlation_id: Some(accepted.stream_id.clone()),
+        kind: opensks_contracts::EventKind::VerificationFailed,
+        payload: serde_json::json!({
+            "source": "conversation.turn_start",
+            "project_id": turn_request.project_id,
+            "conversation_id": turn_request.conversation_id,
+            "turn_id": accepted.turn_id,
+            "stream_id": accepted.stream_id,
+            "state": "failed",
+            "reason_code": reason_code,
+            "message": assistant_text,
+            "error_present": !error.is_empty()
+        }),
+        sensitivity: opensks_contracts::Sensitivity::Internal,
+        evidence_refs: vec![
+            "conversation:turn-start".to_string(),
+            "conversation:turn-start-bootstrap-failure".to_string(),
+        ],
+    };
+    let committed = store
+        .append_event(event)
+        .map_err(|error| error.to_string())?;
+    match repo.project_execution_events_into_timeline(&accepted.run_id, &[committed], now_ms) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let _ = repo.set_turn_run_state_with_last_sequence(
+                &accepted.turn_id,
+                &accepted.run_id,
+                "failed",
+                None,
+                now_ms,
+            );
+            Err(error.to_string())
         }
     }
 }
@@ -1938,11 +2066,9 @@ fn apply_live_objective_planner_directive(
         ),
     )
     .map_err(|_error| "objective_planner_model_call_failed".to_string())?;
-    let content = response
-        .pointer("/choices/0/message/content")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "objective_planner_model_call_returned_no_text".to_string())?;
-    let directive = parse_objective_planner_directive(content)?;
+    let content =
+        provider_chat_response_text(&response, "objective_planner_model_call_returned_no_text")?;
+    let directive = parse_objective_planner_directive(&content)?;
     apply_objective_planner_directive(settings, plan_request, directive);
     push_unique_string(
         &mut plan_request.evidence_refs,
@@ -1955,7 +2081,7 @@ fn apply_live_objective_planner_directive(
     Ok(Some(LiveObjectivePlannerMetadata {
         provider_id: dispatch.connection.id,
         model_id: dispatch.model.id,
-        response_hash: stable_text_digest(content),
+        response_hash: stable_text_digest(&content),
         response_bytes: content.len(),
     }))
 }
@@ -1963,6 +2089,7 @@ fn apply_live_objective_planner_directive(
 fn prepare_objective_planner_provider_dispatch(
     workspace: &Path,
 ) -> Result<Option<RoleProviderDispatchTarget>, String> {
+    sync_daemon_external_provider_registry_if_empty(workspace)?;
     let provider_repo = opensks_provider::ProviderRepository::open_workspace(workspace)
         .map_err(|error| error.to_string())?;
     let registry = opensks_provider::model_registry_from_repository(&provider_repo)
@@ -2021,6 +2148,17 @@ fn prepare_objective_planner_provider_dispatch(
         model,
         bearer_token,
     }))
+}
+
+fn provider_chat_response_text(
+    response: &serde_json::Value,
+    empty_error_code: &str,
+) -> Result<String, String> {
+    let message = response
+        .pointer("/choices/0/message")
+        .ok_or_else(|| empty_error_code.to_string())?;
+    opensks_adapter::assistant_text_from_chat_message(message)
+        .ok_or_else(|| empty_error_code.to_string())
 }
 
 fn objective_planner_model_call_body(
@@ -2238,14 +2376,22 @@ fn turn_scheduler_resource_limits_from_registry(
 
 fn turn_scheduler_role_plan_from_registry(
     workspace: &Path,
+    explicit_model_id: Option<&str>,
 ) -> Option<opensks_scheduler::ConversationTurnSchedulerRolePlan> {
     let repo = opensks_provider::ProviderRepository::open_workspace(workspace).ok()?;
     let registry = opensks_provider::model_registry_from_repository(&repo).ok()?;
-    let plan = registry.route_roles(
-        &opensks_provider::RoleRoutingRequest::hyperparallel_default(
-            "conversation-turn-hyperparallel-roles",
-        ),
+    let mut request = opensks_provider::RoleRoutingRequest::hyperparallel_default(
+        "conversation-turn-hyperparallel-roles",
     );
+    if let Some(model_id) = explicit_model_id.filter(|model_id| !model_id.trim().is_empty()) {
+        request.prefer_distinct_models = false;
+        for role in request.roles.clone() {
+            request
+                .explicit_model_ids
+                .insert(role, model_id.to_string());
+        }
+    }
+    let plan = registry.route_roles(&request);
     Some(scheduler_role_plan_from_provider_plan(&plan))
 }
 
@@ -2256,7 +2402,15 @@ fn turn_scheduler_role_plan_for_settings(
     if settings.pipeline_id == "objective-planner" {
         return None;
     }
-    turn_scheduler_role_plan_from_registry(workspace)
+    let explicit_model_id = if matches!(
+        settings.model.mode,
+        opensks_contracts::ModelSelectionMode::Pinned
+    ) {
+        settings.model.model_id.as_deref()
+    } else {
+        None
+    };
+    turn_scheduler_role_plan_from_registry(workspace, explicit_model_id)
 }
 
 fn scheduler_role_plan_from_provider_plan(
@@ -2471,10 +2625,18 @@ fn execute_claimed_conversation_turn_inner(
         settings.execution_mode,
         opensks_contracts::ExecutionMode::Worktree
     ) && (selected_model_id.is_some() || explicit_local_test);
+    let cancellation_token = Arc::new(AtomicBool::new(false));
+    let lease_heartbeat = TurnLeaseHeartbeatGuard::start(
+        repo,
+        workspace,
+        lease,
+        lease_ttl_ms,
+        Arc::clone(&cancellation_token),
+    )
+    .map_err(|error| format!("start turn lease heartbeat: {error}"))?;
     let execution_workspace =
         prepare_turn_execution_workspace(workspace, lease, should_isolate_execution)
             .map_err(|error| format!("prepare execution workspace: {error}"))?;
-    let cancellation_token = Arc::new(AtomicBool::new(false));
     let request = opensks_adapter::AgentRunRequest {
         workspace: execution_workspace.path.clone(),
         project_id: lease.project_id.clone(),
@@ -2488,14 +2650,6 @@ fn execute_claimed_conversation_turn_inner(
         prompt: prompt.clone(),
     };
     let sink = DaemonAgentEventSink::open(workspace).map_err(|error| error.to_string())?;
-    let lease_heartbeat = TurnLeaseHeartbeatGuard::start(
-        repo,
-        workspace,
-        lease,
-        lease_ttl_ms,
-        Arc::clone(&cancellation_token),
-    )
-    .map_err(|error| format!("start turn lease heartbeat: {error}"))?;
     sink.emit_run_started(&request)
         .map_err(|error| error.to_string())?;
     if let Some(isolation) = execution_workspace.isolation.as_ref() {
@@ -2588,6 +2742,20 @@ fn execute_claimed_conversation_turn_inner(
             integration_candidate_agent_event(&request, &candidate.receipt),
         );
     }
+    let automatic_integration_apply = if let Some(candidate) = integration_candidate.as_ref() {
+        if should_attempt_automatic_integration_apply(
+            candidate.receipt.approval_policy_id.as_deref(),
+        ) {
+            let receipt =
+                apply_integration_candidate(workspace, &lease.run_id, None, timestamp_ms())?;
+            append_automatic_integration_apply_event(workspace, &receipt)?;
+            Some(receipt)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     if outcome.final_state == opensks_contracts::projection::RunProjectionState::Completed {
         sink.emit_run_completed(
             &request,
@@ -2599,7 +2767,13 @@ fn execute_claimed_conversation_turn_inner(
         )
         .map_err(|error| error.to_string())?;
     } else if outcome.final_state == opensks_contracts::projection::RunProjectionState::Failed {
-        sink.emit_run_failed(&request, timestamp_ms())
+        let failure_signal = agent_outcome_failure_signal(&outcome.assistant_text);
+        sink.emit_run_failed(
+            &request,
+            failure_signal.reason_code,
+            &failure_signal.message,
+            timestamp_ms(),
+        )
             .map_err(|error| error.to_string())?;
     }
     sink.finish(&lease.run_id)
@@ -2623,10 +2797,11 @@ fn execute_claimed_conversation_turn_inner(
             ("running", opensks_contracts::MessageState::Streaming)
         }
     };
-    let assistant_text = integration_candidate
-        .as_ref()
-        .map(|candidate| candidate.assistant_text.clone())
-        .unwrap_or_else(|| outcome.assistant_text.clone());
+    let assistant_text = final_assistant_text_after_integration(
+        &outcome.assistant_text,
+        integration_candidate.as_ref(),
+        automatic_integration_apply.as_ref(),
+    );
     repo.set_message_content(
         &lease.assistant_message_id,
         &assistant_text,
@@ -2658,6 +2833,12 @@ fn execute_claimed_conversation_turn_inner(
             .as_ref()
             .map(|candidate| candidate.receipt.state.as_str())
             .unwrap_or("not_required"),
+        "automatic_integration_apply_state": automatic_integration_apply
+            .as_ref()
+            .map(|receipt| receipt.state.as_str()),
+        "automatic_integration_apply_reason_code": automatic_integration_apply
+            .as_ref()
+            .map(|receipt| receipt.reason_code.as_str()),
         "integration_candidate_ref": integration_candidate
             .as_ref()
             .map(|candidate| candidate.receipt.receipt_ref.as_str()),
@@ -3018,6 +3199,31 @@ impl opensks_scheduler::WorkerDriver for ClaimedTurnSchedulerWorker<'_> {
         if item.parent_id.is_some() {
             return execute_claimed_turn_role_work_item(&self.execution, item, &lease.holder);
         }
+        if self.execution.settings.pipeline_id == "objective-planner" {
+            let outcome = opensks_adapter::AgentRunOutcome {
+                assistant_text: "Objective planner queued isolated child workers; the turn supervisor did not mutate the workspace directly.".to_string(),
+                patches: Vec::new(),
+                apply_results: Vec::new(),
+                final_state: opensks_contracts::projection::RunProjectionState::Completed,
+            };
+            let result = Ok((
+                outcome.clone(),
+                self.execution.initial_routing_decision.clone(),
+            ));
+            self.root_outcome = Some(outcome);
+            self.result = Some(result);
+            return opensks_scheduler::WorkerDispatchOutcome {
+                work_item_id: item.id.clone(),
+                worker_id: lease.holder.clone(),
+                ok: true,
+                message: "objective planner root orchestrator queued child work".to_string(),
+                evidence_refs: vec![
+                    "daemon:objective-plan-root-orchestrator".to_string(),
+                    "scheduler:lease-visible-to-worker".to_string(),
+                    "scheduler:objective-plan-turn-bootstrap".to_string(),
+                ],
+            };
+        }
         let mut request = self.execution.request.clone();
         request.patch_lease = Some(opensks_adapter::PatchPathLease::from_scheduler_lease(lease));
         let result = run_claimed_turn_adapter_workload(&self.execution, &request);
@@ -3057,6 +3263,17 @@ impl opensks_scheduler::WorkerDriver for ClaimedTurnSchedulerWorker<'_> {
         &mut self,
         items: Vec<opensks_contracts::SchedulerWorkItem>,
     ) -> Vec<opensks_scheduler::WorkerDispatchOutcome> {
+        if items.len() > 1 && items.iter().all(is_objective_plan_role_work_item) {
+            let items = items
+                .into_iter()
+                .map(|item| {
+                    let role = objective_plan_role_for_item(&item)
+                        .expect("objective role item checked before batch");
+                    objective_plan_role_work_item(item, &self.execution.lease.turn_id, role)
+                })
+                .collect();
+            return execute_claimed_turn_role_work_item_batch(&self.execution, items);
+        }
         if items.len() <= 1
             || items.iter().any(|item| item.parent_id.is_none())
             || items.iter().any(is_objective_plan_work_item)
@@ -3104,12 +3321,7 @@ fn execute_claimed_turn_objective_work_item(
     }
 
     if let Some(role) = objective_plan_role_for_item(item) {
-        let mut role_item = item.clone();
-        role_item.requirement_ids = vec![execution.lease.turn_id.clone(), role.to_string()];
-        push_unique_string(
-            &mut role_item.evidence_refs,
-            "daemon:objective-plan-child-runtime".to_string(),
-        );
+        let role_item = objective_plan_role_work_item(item.clone(), &execution.lease.turn_id, role);
         let mut outcome = execute_claimed_turn_role_work_item(execution, &role_item, worker_id);
         push_unique_string(
             &mut outcome.evidence_refs,
@@ -3414,6 +3626,32 @@ fn objective_plan_role_for_item(
         "verifier" => Some("verification"),
         _ => None,
     }
+}
+
+fn is_objective_plan_role_work_item(item: &opensks_contracts::SchedulerWorkItem) -> bool {
+    is_objective_plan_work_item(item) && objective_plan_role_for_item(item).is_some()
+}
+
+fn objective_plan_role_work_item(
+    mut item: opensks_contracts::SchedulerWorkItem,
+    turn_id: &str,
+    role: &str,
+) -> opensks_contracts::SchedulerWorkItem {
+    let mut requirement_ids = vec![turn_id.to_string(), role.to_string()];
+    for requirement_id in &item.requirement_ids {
+        if !requirement_ids
+            .iter()
+            .any(|existing| existing == requirement_id)
+        {
+            requirement_ids.push(requirement_id.clone());
+        }
+    }
+    item.requirement_ids = requirement_ids;
+    push_unique_string(
+        &mut item.evidence_refs,
+        "daemon:objective-plan-child-runtime".to_string(),
+    );
+    item
 }
 
 fn execute_claimed_turn_role_work_item_batch(
@@ -3872,11 +4110,8 @@ fn execute_claimed_turn_role_model_call(
         ),
     )
     .map_err(|_error| "provider_role_call_failed".to_string())?;
-    let content = response
-        .pointer("/choices/0/message/content")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "provider_role_call_returned_no_text".to_string())?;
-    let response_hash = stable_text_digest(content);
+    let content = provider_chat_response_text(&response, "provider_role_call_returned_no_text")?;
+    let response_hash = stable_text_digest(&content);
     let response_bytes = content.len();
     let semantic_verifier_judgment = if role == "verification" {
         Some(write_semantic_verifier_judgment(
@@ -3885,7 +4120,7 @@ fn execute_claimed_turn_role_model_call(
             worker_id,
             role,
             &dispatch,
-            content,
+            &content,
             &response_hash,
             response_bytes,
             worker_context,
@@ -3935,11 +4170,12 @@ fn execute_claimed_turn_code_role_subcontract(
         completer,
         "You are an isolated OpenSKS Code role subcontract worker. Use workspace tools only inside this isolated workspace. Produce a small candidate patch when useful, never claim it is integrated into the main workspace, and keep final text concise.",
         format!(
-            "Role: {role}\nWork item: {}\nRoot context pack ref: {}\nWorker context pack ref: {}\nWorker context:\n{}\n\nUser objective:\n{}\n\nIf a safe code/documentation patch is useful, create it in this isolated workspace. Final answer should summarize the role candidate.",
+            "Role: {role}\nWork item: {}\nRoot context pack ref: {}\nWorker context pack ref: {}\nWorker context:\n{}\n\nShard guidance:\n{}\n\nUser objective:\n{}\n\nIf a safe code/documentation patch is useful, create it in this isolated workspace. Final answer should summarize the role candidate.",
             item.id,
             item.context_pack_ref.as_deref().unwrap_or("none"),
             worker_context_ref(item, worker_context),
             worker_context_body(worker_context),
+            objective_shard_guidance(item),
             context.prompt
         ),
     )
@@ -4004,6 +4240,17 @@ fn write_semantic_verifier_judgment(
     let judgment_relative = relative_dir.join("judgment.json");
     let judgment_ref = artifact_ref(&judgment_relative);
     let semantic_verdict = parse_semantic_verifier_verdict(response_text);
+    let mut evidence_refs = vec![
+        "daemon:semantic-verifier-judgment".to_string(),
+        "daemon:role-worker-model-call".to_string(),
+        "provider:role-routing".to_string(),
+        "scheduler:role-plan-work-item".to_string(),
+    ];
+    if scheduler_work_item_has_evidence(item, SEMANTIC_VERIFIER_CANDIDATE_BOUND_EVIDENCE) {
+        evidence_refs.push(SEMANTIC_VERIFIER_CANDIDATE_BOUND_EVIDENCE.to_string());
+    } else {
+        evidence_refs.push("daemon:role-verifier-advisory-not-candidate-bound".to_string());
+    }
     let receipt = SemanticVerifierJudgmentReceipt {
         schema: opensks_contracts::SEMANTIC_VERIFIER_JUDGMENT_SCHEMA.to_string(),
         id: format!("semantic-verifier-{}-{safe_item_id}", item.run_id),
@@ -4035,12 +4282,7 @@ fn write_semantic_verifier_judgment(
         path_redacted: true,
         content_redacted: true,
         generated_at_ms: now_ms,
-        evidence_refs: vec![
-            "daemon:semantic-verifier-judgment".to_string(),
-            "daemon:role-worker-model-call".to_string(),
-            "provider:role-routing".to_string(),
-            "scheduler:role-plan-work-item".to_string(),
-        ],
+        evidence_refs,
     };
     std::fs::write(
         dir.join("judgment.json"),
@@ -4054,6 +4296,20 @@ struct SemanticVerifierParsedVerdict {
     verdict: &'static str,
     passed_gates: Vec<String>,
     failed_gates: Vec<String>,
+}
+
+const SEMANTIC_VERIFIER_CANDIDATE_BOUND_EVIDENCE: &str =
+    "integration:candidate-bound-semantic-verifier";
+
+fn scheduler_work_item_has_evidence(
+    item: &opensks_contracts::SchedulerWorkItem,
+    marker: &str,
+) -> bool {
+    item.evidence_refs.iter().any(|evidence| evidence == marker)
+        || item
+            .requirement_ids
+            .iter()
+            .any(|requirement| requirement == marker)
 }
 
 fn parse_semantic_verifier_verdict(response_text: &str) -> SemanticVerifierParsedVerdict {
@@ -4275,6 +4531,7 @@ fn prepare_role_provider_dispatch(
         .model_selector
         .as_deref()
         .ok_or_else(|| "role work item has no selected model".to_string())?;
+    sync_daemon_external_provider_registry_for_model(workspace, model_id)?;
     let provider_repo = opensks_provider::ProviderRepository::open_workspace(workspace)
         .map_err(|error| error.to_string())?;
     let model = provider_repo
@@ -4350,11 +4607,12 @@ fn role_worker_model_call_body(
             {
                 "role": "user",
                 "content": format!(
-                    "Role: {role}\nWork item: {}\nRoot context pack ref: {}\nWorker context pack ref: {}\nWorker context:\n{}\n\nUser objective:\n{}\n\n{}",
+                    "Role: {role}\nWork item: {}\nRoot context pack ref: {}\nWorker context pack ref: {}\nWorker context:\n{}\n\nShard guidance:\n{}\n\nUser objective:\n{}\n\n{}",
                     item.id,
                     item.context_pack_ref.as_deref().unwrap_or("none"),
                     worker_context_ref(item, worker_context),
                     worker_context_body(worker_context),
+                    objective_shard_guidance(item),
                     context.prompt,
                     response_instruction
                 )
@@ -4379,6 +4637,22 @@ fn worker_context_body(worker_context: Option<&WorkerContextPackMaterialization>
     worker_context
         .map(|context| context.body.clone())
         .unwrap_or_else(|| "[worker context unavailable]".to_string())
+}
+
+fn objective_shard_guidance(item: &opensks_contracts::SchedulerWorkItem) -> String {
+    let shard = item
+        .requirement_ids
+        .iter()
+        .find_map(|id| id.strip_prefix("objective-shard:"));
+    let Some(shard) = shard else {
+        return "none".to_string();
+    };
+    if item.shard_policy_id.is_none() {
+        return "none".to_string();
+    }
+    format!(
+        "objective-shard: {shard}\nWork only on this shard's independent slice of the user objective. For ordered lists of files or subtasks, shard 1 handles the first slice, shard 2 the second, and so on. Avoid editing targets that naturally belong to another shard unless required for a shared compile fix."
+    )
 }
 
 fn stable_text_digest(content: &str) -> String {
@@ -4517,12 +4791,13 @@ fn dispatch_claimed_turn_via_scheduler(
         .result
         .take()
         .ok_or_else(|| "conversation turn scheduler worker produced no result".to_string())?;
-    let should_dispatch_role_children = root_result
-        .as_ref()
-        .map(|(outcome, _)| {
-            outcome.final_state == opensks_contracts::projection::RunProjectionState::Completed
-        })
-        .unwrap_or(false);
+    let should_dispatch_role_children = !worker.execution.explicit_local_test
+        && root_result
+            .as_ref()
+            .map(|(outcome, _)| {
+                outcome.final_state == opensks_contracts::projection::RunProjectionState::Completed
+            })
+            .unwrap_or(false);
     if should_dispatch_role_children {
         let (_snapshot, child_report) = scheduler
             .dispatch_until_idle(&mut store, &mut worker)
@@ -4588,7 +4863,27 @@ fn run_claimed_turn_adapter_workload(
         .then(|| execution.initial_routing_decision.selected_model_id.clone())
         .flatten();
     let mut final_routing_decision = execution.initial_routing_decision.clone();
-    let outcome = if selected_model_id.is_some() {
+    let outcome = if execution.explicit_local_test {
+        if matches!(
+            execution.settings.execution_mode,
+            opensks_contracts::ExecutionMode::ReadOnly
+        ) {
+            opensks_adapter::AgentEventSink::emit(
+                execution.sink,
+                read_only_execution_mode_agent_event(request),
+            );
+            Ok(opensks_adapter::AgentRunOutcome {
+                assistant_text:
+                    "Read-only execution mode blocked workspace writes for this turn."
+                        .to_string(),
+                patches: vec![],
+                apply_results: vec![],
+                final_state: opensks_contracts::projection::RunProjectionState::Failed,
+            })
+        } else {
+            run_explicit_local_test_turn(request, execution.sink)
+        }
+    } else if selected_model_id.is_some() {
         match prepare_provider_dispatch(
             execution.repo,
             execution.workspace,
@@ -4679,26 +4974,6 @@ fn run_claimed_turn_adapter_workload(
                 })
             }
         }
-    } else if execution.explicit_local_test {
-        if matches!(
-            execution.settings.execution_mode,
-            opensks_contracts::ExecutionMode::ReadOnly
-        ) {
-            opensks_adapter::AgentEventSink::emit(
-                execution.sink,
-                read_only_execution_mode_agent_event(request),
-            );
-            Ok(opensks_adapter::AgentRunOutcome {
-                assistant_text:
-                    "Read-only execution mode blocked workspace writes for this turn."
-                        .to_string(),
-                patches: vec![],
-                apply_results: vec![],
-                final_state: opensks_contracts::projection::RunProjectionState::Failed,
-            })
-        } else {
-            run_explicit_local_test_turn(request, execution.sink)
-        }
     } else {
         opensks_adapter::AgentEventSink::emit(execution.sink, setup_required_agent_event(request));
         Ok(opensks_adapter::AgentRunOutcome {
@@ -4732,7 +5007,6 @@ struct IntegrationCandidateSource {
     role: Option<String>,
     target_paths: Vec<String>,
     applied_files: Vec<String>,
-    patch_count: usize,
     apply_result_count: usize,
     source_isolation_id: Option<String>,
     source_isolation_mode: Option<String>,
@@ -4885,12 +5159,10 @@ fn write_integration_candidate(
 
     let mut target_paths = std::collections::BTreeSet::new();
     let mut applied_files = std::collections::BTreeSet::new();
-    let mut patch_count = 0usize;
     let mut apply_result_count = 0usize;
     for source in &sources {
         target_paths.extend(source.target_paths.iter().cloned());
         applied_files.extend(source.applied_files.iter().cloned());
-        patch_count = patch_count.saturating_add(source.patch_count);
         apply_result_count = apply_result_count.saturating_add(source.apply_result_count);
     }
     let target_paths = target_paths.into_iter().collect::<Vec<_>>();
@@ -4898,12 +5170,9 @@ fn write_integration_candidate(
         return Ok(None);
     }
     let applied_files = applied_files.into_iter().collect::<Vec<_>>();
-    let unified_diff = sources
-        .iter()
-        .map(|source| source.patch_text.trim_end())
-        .filter(|patch| !patch.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let (unified_diff, patch_count) = deduplicated_integration_patch_texts(
+        sources.iter().map(|source| source.patch_text.as_str()),
+    );
     if unified_diff.trim().is_empty() {
         return Ok(None);
     }
@@ -4988,6 +5257,22 @@ fn write_integration_candidate(
         .required_verifier_count
         .max(planned_integration_verifier_count(settings.verifier_count))
         .min(MAX_INTEGRATION_VERIFIER_LANES);
+    let approval_required = integration_candidate_requires_manual_approval(
+        &settings.approval_policy_id,
+        &target_paths,
+        &unified_diff,
+    );
+    let mut required_verification_gates = vec![
+        "candidate_receipt_valid".to_string(),
+        "target_policy_check".to_string(),
+        "patch_apply_check".to_string(),
+        "read_only_verifier_lanes".to_string(),
+    ];
+    required_verification_gates.push(if approval_required {
+        "approval_event".to_string()
+    } else {
+        "automatic_approval_policy".to_string()
+    });
     let mut selection_evidence_refs = vec![
         "integration:candidate-selection-receipt".to_string(),
         "schema:integration-candidate-selection-receipt".to_string(),
@@ -5034,7 +5319,7 @@ fn write_integration_candidate(
         selection_ref: Some(selection_ref.clone()),
         main_workspace_modified: false,
         integration_required: true,
-        approval_required: true,
+        approval_required,
         approval_policy_id: Some(settings.approval_policy_id.clone()),
         turn_settings: Some(opensks_contracts::IntegrationTurnSettingsSnapshot::from(
             settings,
@@ -5056,13 +5341,7 @@ fn write_integration_candidate(
         selected_source_candidate_ids,
         selection_policy: selection_policy.to_string(),
         reason_code: selection_reason_code.to_string(),
-        required_verification_gates: vec![
-            "candidate_receipt_valid".to_string(),
-            "target_policy_check".to_string(),
-            "patch_apply_check".to_string(),
-            "read_only_verifier_lanes".to_string(),
-            "approval_event".to_string(),
-        ],
+        required_verification_gates,
         aggregate_candidate_count: sources.len(),
         aggregate_target_count: target_paths.len(),
         planned_verifier_count,
@@ -5104,6 +5383,49 @@ fn write_integration_candidate(
 
 fn planned_integration_verifier_count(verifier_count: u32) -> usize {
     (verifier_count.max(1) as usize).min(MAX_INTEGRATION_VERIFIER_LANES)
+}
+
+fn deduplicated_integration_patch_texts<'a>(
+    patches: impl IntoIterator<Item = &'a str>,
+) -> (String, usize) {
+    let mut seen_fragments = BTreeSet::new();
+    let mut fragments = Vec::new();
+    for patch in patches {
+        for fragment in integration_patch_file_fragments(patch) {
+            let key = fragment.trim_end().to_string();
+            if key.is_empty() || !seen_fragments.insert(key.clone()) {
+                continue;
+            }
+            fragments.push(key);
+        }
+    }
+    let fragment_count = fragments.len();
+    (fragments.join("\n"), fragment_count)
+}
+
+fn integration_patch_file_fragments(patch: &str) -> Vec<String> {
+    let mut fragments = Vec::new();
+    let mut current = Vec::new();
+    let mut current_started_with_diff_git = false;
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            if !current.is_empty() {
+                fragments.push(current.join("\n"));
+                current.clear();
+            }
+            current_started_with_diff_git = true;
+        } else if line.starts_with("--- ") && !current.is_empty() && !current_started_with_diff_git
+        {
+            fragments.push(current.join("\n"));
+            current.clear();
+            current_started_with_diff_git = false;
+        }
+        current.push(line.to_string());
+    }
+    if !current.is_empty() {
+        fragments.push(current.join("\n"));
+    }
+    fragments
 }
 
 fn turn_supervisor_candidate_source(
@@ -5151,7 +5473,6 @@ fn turn_supervisor_candidate_source(
         role: None,
         target_paths: target_paths.into_iter().collect(),
         applied_files,
-        patch_count: outcome.patches.len(),
         apply_result_count: outcome.apply_results.len(),
         source_isolation_id: Some(isolation.id.clone()),
         source_isolation_mode: Some(isolation_mode_label(&isolation.mode).to_string()),
@@ -5216,7 +5537,6 @@ fn role_subcontract_candidate_sources(
             role: Some(receipt.role),
             target_paths: receipt.target_paths,
             applied_files: receipt.applied_files,
-            patch_count: receipt.patch_count,
             apply_result_count: receipt.apply_result_count,
             source_isolation_id: Some(receipt.source_isolation_id),
             source_isolation_mode: Some(receipt.source_isolation_mode),
@@ -5357,6 +5677,7 @@ fn apply_integration_candidate(
                 cleanup_ref: None,
                 main_workspace_modified: false,
                 verifier_passed: false,
+                approval_required: true,
                 generated_at_ms: now_ms,
             });
             write_integration_apply_receipt(&candidate_dir, &receipt)?;
@@ -5403,6 +5724,7 @@ fn apply_integration_candidate(
                 cleanup_ref: None,
                 main_workspace_modified: false,
                 verifier_passed: false,
+                approval_required: true,
                 generated_at_ms: now_ms,
             });
             write_integration_apply_receipt(&candidate_dir, &receipt)?;
@@ -5434,6 +5756,7 @@ fn apply_integration_candidate(
             cleanup_ref: None,
             main_workspace_modified: false,
             verifier_passed: false,
+            approval_required: true,
             generated_at_ms: now_ms,
         })
     };
@@ -5503,6 +5826,7 @@ fn apply_integration_candidate(
             cleanup_ref: None,
             main_workspace_modified: false,
             verifier_passed: false,
+            approval_required: true,
             generated_at_ms: now_ms,
         });
         write_integration_apply_receipt(&candidate_dir, &receipt)?;
@@ -5552,6 +5876,7 @@ fn apply_integration_candidate(
             cleanup_ref: None,
             main_workspace_modified: false,
             verifier_passed: false,
+            approval_required: true,
             generated_at_ms: now_ms,
         });
         write_integration_apply_receipt(&candidate_dir, &receipt)?;
@@ -5581,7 +5906,7 @@ fn apply_integration_candidate(
     }
     if target_paths
         .iter()
-        .any(|path| invalid_integration_target(path))
+        .any(|path| integration_target_escapes_workspace(path))
     {
         let verification = integration_verification_receipt(IntegrationVerificationReceiptInput {
             run_id,
@@ -5620,6 +5945,42 @@ fn apply_integration_candidate(
         now_ms,
     )?;
     if verification.state != "passed" {
+        if (verification.reason_code == "git_apply_failed"
+            || verification.reason_code == "target_dirty")
+            && !unified_diff.trim().is_empty()
+            && candidate_dir.join("seal.json").is_file()
+            && candidate_dir.join("final.diff").is_file()
+            && opensks_git::check_unified_diff_reverse_apply(workspace, &unified_diff).is_ok()
+        {
+            let cleanup_ref_for_receipt = candidate_dir
+                .join("cleanup.json")
+                .is_file()
+                .then_some(cleanup_ref.as_str());
+            let receipt = integration_apply_receipt(IntegrationApplyReceiptInput {
+                run_id,
+                candidate_id: &candidate_id,
+                state: "integrated",
+                reason_code: "candidate_already_applied_to_main_workspace",
+                target_paths,
+                approval_id: Some(expected_approval_id),
+                approval_policy_id,
+                turn_settings,
+                candidate_ref: &candidate_ref,
+                patch_ref: &patch_ref,
+                verification_ref: Some(&verification_ref),
+                integration_ref: &integration_ref,
+                final_diff_ref: &final_diff_ref,
+                seal_ref: Some(&seal_ref),
+                repair_ref: None,
+                cleanup_ref: cleanup_ref_for_receipt,
+                main_workspace_modified: true,
+                verifier_passed: true,
+                approval_required: true,
+                generated_at_ms: now_ms,
+            });
+            write_integration_apply_receipt(&candidate_dir, &receipt)?;
+            return Ok(receipt);
+        }
         let receipt = integration_apply_receipt(IntegrationApplyReceiptInput {
             run_id,
             candidate_id: &candidate_id,
@@ -5639,16 +6000,22 @@ fn apply_integration_candidate(
             cleanup_ref: None,
             main_workspace_modified: false,
             verifier_passed: false,
+            approval_required: true,
             generated_at_ms: now_ms,
         });
         write_integration_apply_receipt(&candidate_dir, &receipt)?;
         return Ok(receipt);
     }
 
+    let manual_approval_required = integration_candidate_requires_manual_approval(
+        approval_policy_id.unwrap_or(opensks_contracts::turn::APPROVAL_POLICY_SAFE_INTERACTIVE),
+        &target_paths,
+        &unified_diff,
+    );
     let approval_id_matches = approval_id == Some(expected_approval_id.as_str());
     let approval_persisted = approval_id_matches
         && persisted_integration_approval(workspace, run_id, &expected_approval_id)?;
-    if !approval_persisted {
+    if manual_approval_required && !approval_persisted {
         let receipt = integration_apply_receipt(IntegrationApplyReceiptInput {
             run_id,
             candidate_id: &candidate_id,
@@ -5672,6 +6039,7 @@ fn apply_integration_candidate(
             cleanup_ref: None,
             main_workspace_modified: false,
             verifier_passed: true,
+            approval_required: true,
             generated_at_ms: now_ms,
         });
         write_integration_apply_receipt(&candidate_dir, &receipt)?;
@@ -5796,6 +6164,7 @@ fn apply_integration_candidate(
         cleanup_ref: receipt_cleanup_ref,
         main_workspace_modified,
         verifier_passed,
+        approval_required: manual_approval_required,
         generated_at_ms: now_ms,
     });
     write_integration_apply_receipt(&candidate_dir, &receipt)?;
@@ -5817,6 +6186,97 @@ fn persisted_integration_approval(
             && event.payload["scope"].as_str() == Some("integration_apply")
             && event.payload["state"].as_str() == Some("approved")
     }))
+}
+
+fn should_attempt_automatic_integration_apply(approval_policy_id: Option<&str>) -> bool {
+    matches!(
+        approval_policy_id,
+        Some(opensks_contracts::turn::APPROVAL_POLICY_AUTOPILOT)
+            | Some(opensks_contracts::turn::APPROVAL_POLICY_MAD_SKS)
+    )
+}
+
+fn integration_candidate_requires_manual_approval(
+    approval_policy_id: &str,
+    target_paths: &[String],
+    unified_diff: &str,
+) -> bool {
+    match approval_policy_id {
+        opensks_contracts::turn::APPROVAL_POLICY_MAD_SKS => false,
+        opensks_contracts::turn::APPROVAL_POLICY_AUTOPILOT => {
+            integration_candidate_has_high_impact(target_paths, unified_diff)
+        }
+        _ => true,
+    }
+}
+
+fn integration_candidate_has_high_impact(target_paths: &[String], unified_diff: &str) -> bool {
+    target_paths.iter().any(|path| {
+        integration_target_escapes_workspace(path) || looks_secret_integration_target(path)
+    }) || integration_diff_contains_high_impact_operation(unified_diff)
+}
+
+fn integration_diff_contains_high_impact_operation(unified_diff: &str) -> bool {
+    let lower = unified_diff.to_ascii_lowercase();
+    lower.contains("drop table")
+        || lower.contains("truncate table")
+        || lower.contains("delete from")
+        || lower.contains("rm -rf")
+}
+
+fn automatic_integration_apply_assistant_text(
+    receipt: &opensks_contracts::IntegrationApplyReceipt,
+) -> String {
+    match receipt.state.as_str() {
+        "integrated" => format!(
+            "Autopilot applied code changes to {}.",
+            receipt.target_paths.join(", ")
+        ),
+        "awaiting_approval" => format!(
+            "Prepared code changes for {}. Approval is required because the change is high-impact.",
+            receipt.target_paths.join(", ")
+        ),
+        "failed" => format!(
+            "Autopilot could not apply code changes to {}: {}.",
+            receipt.target_paths.join(", "),
+            receipt.reason_code
+        ),
+        _ => format!(
+            "Integration finished with state {}: {}.",
+            receipt.state, receipt.reason_code
+        ),
+    }
+}
+
+fn final_assistant_text_after_integration(
+    model_assistant_text: &str,
+    integration_candidate: Option<&PreparedIntegrationCandidate>,
+    automatic_integration_apply: Option<&opensks_contracts::IntegrationApplyReceipt>,
+) -> String {
+    if let Some(receipt) = automatic_integration_apply {
+        if receipt.state != "integrated" {
+            return automatic_integration_apply_assistant_text(receipt);
+        }
+        if let Some(text) = visible_assistant_text(model_assistant_text) {
+            return text;
+        }
+        return automatic_integration_apply_assistant_text(receipt);
+    }
+    if let Some(candidate) = integration_candidate {
+        if let Some(text) = visible_assistant_text(&candidate.assistant_text) {
+            return text;
+        }
+    }
+    visible_assistant_text(model_assistant_text).unwrap_or_default()
+}
+
+fn visible_assistant_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed == "..." {
+        None
+    } else {
+        Some(text.to_string())
+    }
 }
 
 struct IntegrationVerificationReceiptInput<'a> {
@@ -6000,56 +6460,69 @@ fn run_semantic_verifier_gate_lanes(
         let parsed = std::fs::read_to_string(&path)
             .ok()
             .and_then(|raw| serde_json::from_str::<SemanticVerifierJudgmentReceipt>(&raw).ok());
-        let (worker_id, state, reason_code, mut passed_gates, mut failed_gates) = match parsed {
-            Some(receipt)
-                if receipt.schema == opensks_contracts::SEMANTIC_VERIFIER_JUDGMENT_SCHEMA
-                    && receipt.role == "verification"
-                    && receipt.verifier_kind == "model_semantic_judgment" =>
-            {
-                let verdict = receipt.verdict.trim().to_ascii_lowercase();
-                if receipt.state == "judgment_ready"
-                    && matches!(verdict.as_str(), "pass" | "passed")
-                {
-                    (
-                        receipt.worker_id,
-                        "passed",
-                        "semantic_verifier_judgment_passed",
-                        receipt.passed_gates,
-                        Vec::new(),
-                    )
+        let Some(parsed) = parsed else {
+            lanes.push(opensks_contracts::IntegrationVerifierLaneReceipt {
+                id: format!("integration-semantic-verifier-lane-{run_id}-{lane_number}"),
+                lane_index,
+                worker_id: format!("integration-semantic-verifier-lane-{lane_number}"),
+                verifier_kind: "model_semantic_judgment".to_string(),
+                state: "failed".to_string(),
+                reason_code: "semantic_verifier_judgment_invalid".to_string(),
+                passed_gates: Vec::new(),
+                failed_gates: vec!["semantic_verifier_judgment_valid".to_string()],
+                path_redacted: true,
+                content_redacted: true,
+                evidence_refs: vec![
+                    "integration:semantic-verifier-gate".to_string(),
+                    "daemon:semantic-verifier-judgment".to_string(),
+                ],
+                generated_at_ms,
+            });
+            continue;
+        };
+        if !semantic_verifier_judgment_is_candidate_bound(&parsed) {
+            continue;
+        }
+        let (worker_id, state, reason_code, mut passed_gates, mut failed_gates) = if parsed.schema
+            == opensks_contracts::SEMANTIC_VERIFIER_JUDGMENT_SCHEMA
+            && parsed.role == "verification"
+            && parsed.verifier_kind == "model_semantic_judgment"
+        {
+            let verdict = parsed.verdict.trim().to_ascii_lowercase();
+            if parsed.state == "judgment_ready" && matches!(verdict.as_str(), "pass" | "passed") {
+                (
+                    parsed.worker_id,
+                    "passed",
+                    "semantic_verifier_judgment_passed",
+                    parsed.passed_gates,
+                    Vec::new(),
+                )
+            } else {
+                let reason_code = if verdict.is_empty() || verdict == "unknown" {
+                    "semantic_verifier_verdict_missing"
                 } else {
-                    let reason_code = if verdict.is_empty() || verdict == "unknown" {
-                        "semantic_verifier_verdict_missing"
+                    "semantic_verifier_rejected"
+                };
+                (
+                    parsed.worker_id,
+                    "failed",
+                    reason_code,
+                    Vec::new(),
+                    if parsed.failed_gates.is_empty() {
+                        vec!["semantic_verifier_verdict_passed".to_string()]
                     } else {
-                        "semantic_verifier_rejected"
-                    };
-                    (
-                        receipt.worker_id,
-                        "failed",
-                        reason_code,
-                        Vec::new(),
-                        if receipt.failed_gates.is_empty() {
-                            vec!["semantic_verifier_verdict_passed".to_string()]
-                        } else {
-                            receipt.failed_gates
-                        },
-                    )
-                }
+                        parsed.failed_gates
+                    },
+                )
             }
-            Some(receipt) => (
-                receipt.worker_id,
+        } else {
+            (
+                parsed.worker_id,
                 "failed",
                 "semantic_verifier_judgment_invalid",
                 Vec::new(),
                 vec!["semantic_verifier_judgment_valid".to_string()],
-            ),
-            None => (
-                format!("integration-semantic-verifier-lane-{lane_number}"),
-                "failed",
-                "semantic_verifier_judgment_invalid",
-                Vec::new(),
-                vec!["semantic_verifier_judgment_valid".to_string()],
-            ),
+            )
         };
         if state == "passed" {
             if !passed_gates
@@ -6083,6 +6556,15 @@ fn run_semantic_verifier_gate_lanes(
         });
     }
     Ok(lanes)
+}
+
+fn semantic_verifier_judgment_is_candidate_bound(
+    receipt: &SemanticVerifierJudgmentReceipt,
+) -> bool {
+    receipt
+        .evidence_refs
+        .iter()
+        .any(|evidence| evidence == SEMANTIC_VERIFIER_CANDIDATE_BOUND_EVIDENCE)
 }
 
 fn semantic_verifier_gate_failure(
@@ -6127,7 +6609,7 @@ fn verify_integration_candidate_patch(
     integration_ref: &str,
     now_ms: u64,
 ) -> Result<(opensks_contracts::IntegrationVerificationReceipt, String), String> {
-    let unified_diff = match std::fs::read_to_string(candidate_dir.join("candidate.patch")) {
+    let raw_unified_diff = match std::fs::read_to_string(candidate_dir.join("candidate.patch")) {
         Ok(diff) if !diff.trim().is_empty() => diff,
         Ok(_) => {
             let receipt = integration_verification_receipt(IntegrationVerificationReceiptInput {
@@ -6176,6 +6658,13 @@ fn verify_integration_candidate_patch(
             return Ok((receipt, String::new()));
         }
     };
+    let (deduplicated_unified_diff, _) =
+        deduplicated_integration_patch_texts(std::iter::once(raw_unified_diff.as_str()));
+    let unified_diff = format!("{deduplicated_unified_diff}\n");
+    if unified_diff != raw_unified_diff {
+        std::fs::write(candidate_dir.join("candidate.patch"), &unified_diff)
+            .map_err(|error| error.to_string())?;
+    }
 
     let mut envelope = opensks_git::new_patch_envelope(
         format!("integration-verification-{run_id}"),
@@ -6349,7 +6838,7 @@ fn verify_integration_candidate_patch(
             add_planner_shard_verification_evidence(&mut receipt, candidate);
             add_semantic_verifier_gate_evidence(&mut receipt, semantic_verifier_lanes_present);
             write_integration_verification_receipt(candidate_dir, &receipt)?;
-            Ok((receipt, String::new()))
+            Ok((receipt, unified_diff))
         }
     }
 }
@@ -6373,6 +6862,7 @@ struct IntegrationApplyReceiptInput<'a> {
     cleanup_ref: Option<&'a str>,
     main_workspace_modified: bool,
     verifier_passed: bool,
+    approval_required: bool,
     generated_at_ms: u64,
 }
 
@@ -6409,7 +6899,7 @@ fn integration_apply_receipt(
         state: input.state.to_string(),
         reason_code: input.reason_code.to_string(),
         target_paths: input.target_paths,
-        approval_required: true,
+        approval_required: input.approval_required,
         approval_policy_id: input.approval_policy_id.map(str::to_string),
         turn_settings: input.turn_settings.cloned(),
         approval_id: input.approval_id,
@@ -6740,10 +7230,26 @@ fn append_integration_apply_event(
     workspace: &Path,
     receipt: &opensks_contracts::IntegrationApplyReceipt,
 ) -> Result<(), String> {
+    append_integration_apply_event_with_policy(workspace, receipt, true)
+}
+
+fn append_automatic_integration_apply_event(
+    workspace: &Path,
+    receipt: &opensks_contracts::IntegrationApplyReceipt,
+) -> Result<(), String> {
+    append_integration_apply_event_with_policy(workspace, receipt, false)
+}
+
+fn append_integration_apply_event_with_policy(
+    workspace: &Path,
+    receipt: &opensks_contracts::IntegrationApplyReceipt,
+    failed_apply_is_terminal: bool,
+) -> Result<(), String> {
     let kind = match receipt.state.as_str() {
         "integrated" => opensks_contracts::EventKind::WorkItemCompleted,
         "awaiting_approval" => opensks_contracts::EventKind::ApprovalRequested,
-        _ => opensks_contracts::EventKind::VerificationFailed,
+        _ if failed_apply_is_terminal => opensks_contracts::EventKind::VerificationFailed,
+        _ => opensks_contracts::EventKind::Unknown,
     };
     let now_ms = timestamp_ms();
     let path_write_lease = receipt
@@ -6754,7 +7260,10 @@ fn append_integration_apply_event(
         .then(|| integration_apply_path_scope(&receipt.target_paths));
     let event = opensks_contracts::ExecutionEventEnvelope {
         schema: opensks_contracts::EXECUTION_EVENT_ENVELOPE_SCHEMA.to_string(),
-        id: format!("integration-apply-{}-{}", receipt.run_id, receipt.state),
+        id: format!(
+            "integration-apply-{}-{}-{}",
+            receipt.run_id, receipt.state, receipt.generated_at_ms
+        ),
         run_id: receipt.run_id.clone(),
         sequence: 0,
         occurred_at: event_time_from_ms(now_ms),
@@ -6769,6 +7278,8 @@ fn append_integration_apply_event(
             "state": receipt.state,
             "reason_code": receipt.reason_code,
             "target_count": receipt.target_paths.len(),
+            "target_paths": &receipt.target_paths,
+            "applied_files": &receipt.target_paths,
             "approval_required": receipt.approval_required,
             "approval_id": receipt.approval_id,
             "candidate_ref": receipt.candidate_ref,
@@ -6828,13 +7339,12 @@ fn integration_apply_needs_repair(error: &opensks_git::GitError) -> bool {
     )
 }
 
-fn invalid_integration_target(path: &str) -> bool {
+fn integration_target_escapes_workspace(path: &str) -> bool {
     let relative = Path::new(path);
     relative.is_absolute()
         || relative
             .components()
             .any(|component| matches!(component, Component::ParentDir | Component::RootDir))
-        || looks_secret_integration_target(path)
 }
 
 fn looks_secret_integration_target(path: &str) -> bool {
@@ -6918,6 +7428,8 @@ fn resolve_claimed_turn_routing(
     settings: &opensks_contracts::ConversationTurnSettings,
     now_ms: u64,
 ) -> Result<opensks_contracts::RoutingDecision, DaemonError> {
+    sync_daemon_external_provider_registry_for_settings(workspace, settings)
+        .map_err(|error| DaemonError::Io(std::io::Error::other(error)))?;
     let provider_repo = opensks_provider::ProviderRepository::open_workspace(workspace)
         .map_err(|error| DaemonError::Io(std::io::Error::other(error.to_string())))?;
     let decision = opensks_provider::resolve_routing_decision_from_repository(
@@ -7212,6 +7724,7 @@ fn prepare_provider_dispatch(
         .provider_id
         .as_deref()
         .ok_or_else(|| "resolved route has no provider id".to_string())?;
+    sync_daemon_external_provider_registry_for_provider(workspace, provider_id)?;
     let model_id = routing_decision
         .selected_model_id
         .as_deref()
@@ -7336,6 +7849,105 @@ fn persist_routing_status(
     Ok(decision)
 }
 
+fn sync_daemon_external_provider_registry(workspace: &Path) -> Result<(), String> {
+    if daemon_external_provider_env_sync_disabled(workspace) {
+        return Ok(());
+    }
+    let credential_present = std::env::var(opensks_provider::CODEX_LB_API_KEY_ENV_VAR)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .is_some();
+    let endpoint = std::env::var(opensks_provider::CODEX_LB_BASE_URL_ENV_VAR)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    sync_daemon_external_provider_registry_from_config(
+        workspace,
+        timestamp_ms(),
+        credential_present,
+        endpoint,
+    )
+}
+
+fn sync_daemon_external_provider_registry_from_config(
+    workspace: &Path,
+    now_ms: u64,
+    credential_present: bool,
+    endpoint: Option<String>,
+) -> Result<(), String> {
+    opensks_provider::sync_codex_lb_external_broker_provider_to_registry(
+        workspace,
+        now_ms,
+        credential_present,
+        endpoint,
+    )
+    .map_err(|error| format!("sync codex-lb env provider: {error}"))
+}
+
+fn sync_daemon_external_provider_registry_for_settings(
+    workspace: &Path,
+    settings: &opensks_contracts::ConversationTurnSettings,
+) -> Result<(), String> {
+    if let Some(model_id) = settings.model.model_id.as_deref()
+        && !model_id.trim().is_empty()
+    {
+        return sync_daemon_external_provider_registry_for_model(workspace, model_id);
+    }
+    if matches!(
+        settings.model.mode,
+        opensks_contracts::ModelSelectionMode::Auto
+    ) {
+        return sync_daemon_external_provider_registry_if_empty(workspace);
+    }
+    Ok(())
+}
+
+fn sync_daemon_external_provider_registry_for_model(
+    workspace: &Path,
+    model_id: &str,
+) -> Result<(), String> {
+    if is_codex_lb_model_id(model_id) {
+        return sync_daemon_external_provider_registry(workspace);
+    }
+    Ok(())
+}
+
+fn sync_daemon_external_provider_registry_for_provider(
+    workspace: &Path,
+    provider_id: &str,
+) -> Result<(), String> {
+    if provider_id == opensks_provider::CODEX_LB_PROVIDER_ID {
+        return sync_daemon_external_provider_registry(workspace);
+    }
+    Ok(())
+}
+
+fn sync_daemon_external_provider_registry_if_empty(workspace: &Path) -> Result<(), String> {
+    let repo = opensks_provider::ProviderRepository::open_workspace(workspace)
+        .map_err(|e| e.to_string())?;
+    if repo
+        .list_connections()
+        .map_err(|error| error.to_string())?
+        .is_empty()
+    {
+        return sync_daemon_external_provider_registry(workspace);
+    }
+    Ok(())
+}
+
+fn daemon_external_provider_env_sync_disabled(workspace: &Path) -> bool {
+    workspace
+        .join(".opensks")
+        .join("providers")
+        .join("external-provider-env-sync.disabled")
+        .is_file()
+}
+
+fn is_codex_lb_model_id(model_id: &str) -> bool {
+    model_id
+        .strip_prefix(opensks_provider::CODEX_LB_PROVIDER_ID)
+        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+}
+
 fn max_output_tokens_for_model(model: &opensks_contracts::ModelCatalogEntry) -> u32 {
     model
         .limits
@@ -7351,6 +7963,11 @@ fn resolve_provider_secret_for_dispatch(
         opensks_contracts::SecretStoreKind::MacosKeychain => {
             resolve_macos_keychain_secret_for_dispatch(auth)
         }
+        opensks_contracts::SecretStoreKind::ExternalBroker
+            if auth.service == "env" && auth.account == "CODEX_LB_API_KEY" =>
+        {
+            resolve_external_broker_env_secret(auth, |account| std::env::var(account).ok())
+        }
         opensks_contracts::SecretStoreKind::TestMemory if cfg!(test) => {
             Ok("fixture-credential".to_string())
         }
@@ -7358,6 +7975,20 @@ fn resolve_provider_secret_for_dispatch(
             "provider secret store `{other:?}` is not supported by daemon dispatch"
         )),
     }
+}
+
+fn resolve_external_broker_env_secret(
+    auth: &opensks_contracts::SecretRef,
+    get_env: impl FnOnce(&str) -> Option<String>,
+) -> Result<String, String> {
+    get_env(&auth.account)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "provider external broker env `{}` is not configured",
+                auth.account
+            )
+        })
 }
 
 fn resolve_macos_keychain_secret_for_dispatch(
@@ -7555,8 +8186,15 @@ impl DaemonAgentEventSink {
     fn emit_run_failed(
         &self,
         request: &opensks_adapter::AgentRunRequest,
+        reason_code: &str,
+        message: &str,
         now_ms: u64,
     ) -> Result<(), DaemonError> {
+        let message = if message.trim().is_empty() {
+            "The agent run failed before a detailed assistant response was available.".to_string()
+        } else {
+            redacted_failure_text(message)
+        };
         let event = opensks_contracts::ExecutionEventEnvelope {
             schema: opensks_contracts::EXECUTION_EVENT_ENVELOPE_SCHEMA.to_string(),
             id: format!("agent-{}-run-failed", request.run_id),
@@ -7574,8 +8212,9 @@ impl DaemonAgentEventSink {
                 "turn_id": request.turn_id,
                 "stream_id": request.stream_id,
                 "state": "failed",
-                "reason_code": "turn_supervisor_failed",
-                "message": "TurnSupervisor failed."
+                "reason_code": reason_code,
+                "message": message.clone(),
+                "content_redacted": message
             }),
             sensitivity: opensks_contracts::Sensitivity::Internal,
             evidence_refs: vec![
@@ -8080,6 +8719,8 @@ fn integration_candidate_agent_event(
             "state": candidate.state,
             "reason_code": candidate.reason_code,
             "target_count": candidate.target_paths.len(),
+            "target_paths": &candidate.target_paths,
+            "applied_files": &candidate.applied_files,
             "aggregate_candidate_count": candidate.aggregate_candidate_count,
             "aggregate_target_count": candidate.aggregate_target_count,
             "source_candidate_count": candidate.source_candidates.len(),
@@ -8663,6 +9304,105 @@ mod tests {
         workspace
     }
 
+    fn disable_daemon_external_provider_env_sync(workspace: &Path) {
+        let provider_dir = workspace.join(".opensks").join("providers");
+        std::fs::create_dir_all(&provider_dir).expect("provider dir");
+        std::fs::write(
+            provider_dir.join("external-provider-env-sync.disabled"),
+            "disabled for deterministic daemon test\n",
+        )
+        .expect("disable provider env sync marker");
+    }
+
+    #[test]
+    fn agent_outcome_failure_signal_classifies_step_budget_exhaustion() {
+        let signal = agent_outcome_failure_signal(
+            "The agent exhausted its 16-step budget before producing a final answer.",
+        );
+
+        assert_eq!(signal.reason_code, "agentic_step_budget_exhausted");
+        assert!(signal.message.contains("step budget"));
+    }
+
+    #[test]
+    fn supervisor_failure_message_keeps_redacted_cause_visible() {
+        let message = supervisor_failure_message(
+            "provider said token sk-12345678901234567890 is invalid",
+        );
+
+        assert!(message.starts_with("TurnSupervisor failed:"));
+        assert!(message.contains("provider"));
+        assert!(!message.contains("sk-12345678901234567890"));
+    }
+
+    fn integration_apply_receipt_fixture(
+        state: &str,
+        reason_code: &str,
+        main_workspace_modified: bool,
+        approval_required: bool,
+    ) -> opensks_contracts::IntegrationApplyReceipt {
+        integration_apply_receipt(IntegrationApplyReceiptInput {
+            run_id: "run-assistant-text",
+            candidate_id: "candidate-assistant-text",
+            state,
+            reason_code,
+            target_paths: vec!["NOTE.md".to_string()],
+            approval_id: Some("approval-integration-run-assistant-text".to_string()),
+            approval_policy_id: Some(opensks_contracts::turn::APPROVAL_POLICY_AUTOPILOT),
+            turn_settings: None,
+            candidate_ref: "artifact://candidate.json",
+            patch_ref: "artifact://candidate.patch",
+            verification_ref: Some("artifact://verification.json"),
+            integration_ref: "artifact://integration.json",
+            final_diff_ref: "artifact://final.diff",
+            seal_ref: main_workspace_modified.then_some("artifact://seal.json"),
+            repair_ref: None,
+            cleanup_ref: main_workspace_modified.then_some("artifact://cleanup.json"),
+            main_workspace_modified,
+            verifier_passed: main_workspace_modified,
+            approval_required,
+            generated_at_ms: 1,
+        })
+    }
+
+    #[test]
+    fn final_assistant_text_preserves_model_reply_after_successful_autopilot_apply() {
+        let receipt = integration_apply_receipt_fixture(
+            "integrated",
+            "candidate_applied_to_main_workspace",
+            true,
+            false,
+        );
+
+        assert_eq!(
+            final_assistant_text_after_integration(
+                "goal live parallel proof ok",
+                None,
+                Some(&receipt),
+            ),
+            "goal live parallel proof ok"
+        );
+    }
+
+    #[test]
+    fn final_assistant_text_reports_approval_state_before_model_success_claim() {
+        let receipt = integration_apply_receipt_fixture(
+            "awaiting_approval",
+            "approval_required",
+            false,
+            true,
+        );
+
+        let text = final_assistant_text_after_integration(
+            "goal live parallel proof ok",
+            None,
+            Some(&receipt),
+        );
+
+        assert!(text.contains("Approval is required"), "{text}");
+        assert!(!text.contains("goal live parallel proof ok"), "{text}");
+    }
+
     fn run_git(workspace: &Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")
             .args(args)
@@ -8691,6 +9431,134 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    #[test]
+    fn codex_lb_external_broker_secret_ref_resolves_env_for_dispatch() {
+        let secret = "codex-lb-daemon-env-secret";
+        let auth = SecretRef {
+            schema: SECRET_REF_SCHEMA.to_string(),
+            store: SecretStoreKind::ExternalBroker,
+            service: "env".to_string(),
+            account: "CODEX_LB_API_KEY".to_string(),
+            version: 1,
+        };
+
+        let resolved = resolve_external_broker_env_secret(&auth, |_| Some(secret.to_string()))
+            .expect("codex-lb env dispatch");
+
+        assert_eq!(resolved, secret);
+    }
+
+    #[test]
+    fn daemon_provider_registry_sync_seeds_codex_lb_env_models() {
+        let workspace = temp_workspace("daemon-provider-registry-codex-lb-env-sync");
+
+        sync_daemon_external_provider_registry_from_config(&workspace, 7_000, true, None)
+            .expect("sync codex-lb env provider");
+
+        let repo = opensks_provider::ProviderRepository::open_workspace(&workspace).expect("repo");
+        let connection = repo
+            .get_connection(opensks_provider::CODEX_LB_PROVIDER_ID)
+            .expect("codex-lb connection");
+        assert_eq!(connection.kind, ProviderKind::CodexLb);
+        assert_eq!(connection.auth.service, "env");
+        assert_eq!(
+            connection.auth.account,
+            opensks_provider::CODEX_LB_API_KEY_ENV_VAR
+        );
+        let model = repo
+            .get_model("provider-codex-lb-env/gpt-5.4-nano")
+            .expect("seed model");
+        assert_eq!(model.provider_id, opensks_provider::CODEX_LB_PROVIDER_ID);
+        assert!(model.enabled);
+
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn daemon_provider_registry_sync_preserves_explicit_non_codex_model() {
+        let workspace = temp_workspace("daemon-provider-registry-explicit-provider-preserved");
+        seed_healthy_provider_model_with_endpoint(&workspace, "http://127.0.0.1:9/v1", true);
+        let settings = ConversationTurnSettings {
+            model: ModelSelection {
+                mode: ModelSelectionMode::Pinned,
+                model_id: Some("provider-1/code-model".to_string()),
+                fallback_model_ids: Vec::new(),
+            },
+            reasoning_effort: ReasoningEffort::Standard,
+            execution_mode: ExecutionMode::Worktree,
+            pipeline_id: "test".to_string(),
+            graph_revision: None,
+            max_parallelism: 4,
+            verifier_count: 1,
+            tool_policy_id: "project-default".to_string(),
+            approval_policy_id: "safe-interactive".to_string(),
+            token_budget: None,
+            cost_budget_usd: None,
+            timeout_ms: None,
+            image_model_id: None,
+        };
+
+        sync_daemon_external_provider_registry_for_settings(&workspace, &settings)
+            .expect("explicit non-codex model should not trigger env sync");
+
+        let repo = opensks_provider::ProviderRepository::open_workspace(&workspace).expect("repo");
+        let connections = repo.list_connections().expect("connections");
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].id, "provider-1");
+        assert!(
+            repo.get_connection(opensks_provider::CODEX_LB_PROVIDER_ID)
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn daemon_provider_registry_sync_resolves_explicit_codex_model() {
+        let workspace = temp_workspace("daemon-provider-registry-codex-resolves");
+        let settings = ConversationTurnSettings {
+            model: ModelSelection {
+                mode: ModelSelectionMode::Pinned,
+                model_id: Some("provider-codex-lb-env/gpt-5.4-nano".to_string()),
+                fallback_model_ids: Vec::new(),
+            },
+            reasoning_effort: ReasoningEffort::Standard,
+            execution_mode: ExecutionMode::Worktree,
+            pipeline_id: "objective-planner".to_string(),
+            graph_revision: None,
+            max_parallelism: 2,
+            verifier_count: 1,
+            tool_policy_id: "project-default".to_string(),
+            approval_policy_id: "safe-interactive".to_string(),
+            token_budget: None,
+            cost_budget_usd: None,
+            timeout_ms: None,
+            image_model_id: None,
+        };
+
+        sync_daemon_external_provider_registry_from_config(&workspace, 8_000, true, None)
+            .expect("sync codex-lb env provider");
+        let repo = opensks_provider::ProviderRepository::open_workspace(&workspace).expect("repo");
+        let decision = opensks_provider::resolve_routing_decision_from_repository(
+            &repo,
+            "route-explicit-codex",
+            &settings,
+        )
+        .expect("routing decision");
+
+        assert_eq!(decision.status, opensks_contracts::RoutingStatus::Resolved);
+        assert_eq!(decision.reason_code, "explicit_model_pin");
+        assert_eq!(
+            decision.selected_model_id.as_deref(),
+            Some("provider-codex-lb-env/gpt-5.4-nano")
+        );
+        let receipt = decision.route_receipt.expect("route receipt");
+        assert_eq!(
+            receipt.provider_id.as_deref(),
+            Some(opensks_provider::CODEX_LB_PROVIDER_ID)
+        );
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     fn fnv1a64(bytes: &[u8]) -> String {
@@ -8810,6 +9678,64 @@ mod tests {
         };
         repo.sync_models("provider-1", &[model], 1_160)
             .expect("model catalog");
+    }
+
+    #[test]
+    fn turn_scheduler_role_plan_honors_pinned_model_over_registry_specialists() {
+        let workspace = temp_workspace("role-plan-pinned-model");
+        seed_healthy_provider_model_with_endpoint(
+            &workspace,
+            "https://provider.example.test/v1",
+            false,
+        );
+        let repo = opensks_provider::ProviderRepository::open_workspace(&workspace)
+            .expect("provider repo");
+        let pinned = repo
+            .get_model("provider-1/code-model")
+            .expect("pinned code model");
+        let mut specialist = pinned.clone();
+        specialist.id = "provider-1/planning-specialist".to_string();
+        specialist.remote_model_id = "planning-specialist".to_string();
+        specialist.display_name = "Planning Specialist".to_string();
+        specialist.role_scores.insert(
+            ModelRole::Planning,
+            RoleScore {
+                score: 0.99,
+                evidence_refs: vec!["daemon-test-specialist".to_string()],
+            },
+        );
+        repo.sync_models("provider-1", &[pinned.clone(), specialist], 1_170)
+            .expect("sync specialist");
+
+        let settings = ConversationTurnSettings {
+            model: ModelSelection {
+                mode: ModelSelectionMode::Pinned,
+                model_id: Some("provider-1/code-model".to_string()),
+                fallback_model_ids: Vec::new(),
+            },
+            reasoning_effort: ReasoningEffort::Standard,
+            execution_mode: ExecutionMode::Worktree,
+            pipeline_id: "auto".to_string(),
+            graph_revision: None,
+            max_parallelism: 16,
+            verifier_count: 1,
+            tool_policy_id: "project-default".to_string(),
+            approval_policy_id: "autopilot".to_string(),
+            token_budget: None,
+            cost_budget_usd: None,
+            timeout_ms: None,
+            image_model_id: None,
+        };
+
+        let role_plan =
+            turn_scheduler_role_plan_for_settings(&workspace, &settings).expect("role plan");
+
+        assert_eq!(role_plan.distinct_model_count, 1);
+        assert_eq!(role_plan.reused_model_count, 3);
+        assert!(role_plan.assignments.iter().all(|assignment| {
+            assignment.selected_model_id.as_deref() == Some("provider-1/code-model")
+        }));
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     fn seed_healthy_image_provider_model_with_endpoint(
@@ -9116,25 +10042,7 @@ mod tests {
                 attachment_refs: vec![],
             },
             thread_settings_updated_at_ms: None,
-            settings: Some(ConversationTurnSettings {
-                model: ModelSelection {
-                    mode: ModelSelectionMode::Auto,
-                    model_id: None,
-                    fallback_model_ids: Vec::new(),
-                },
-                reasoning_effort: ReasoningEffort::Standard,
-                execution_mode: ExecutionMode::Worktree,
-                pipeline_id: "auto".to_string(),
-                graph_revision: None,
-                max_parallelism: 4,
-                verifier_count: 1,
-                tool_policy_id: "project-default".to_string(),
-                approval_policy_id: "safe-interactive".to_string(),
-                token_budget: None,
-                cost_budget_usd: None,
-                timeout_ms: None,
-                image_model_id: None,
-            }),
+            settings: None,
             context: TurnContextSelection::default(),
             idempotency_key: idempotency_key.to_string(),
         }
@@ -9237,6 +10145,32 @@ mod tests {
         );
         assert_eq!(openai_body["reasoning_effort"], "high");
         assert!(openai_body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn provider_chat_response_text_accepts_content_part_arrays() {
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "text",
+                        "text": "{\"max_parallelism\":3,\"role_count\":2,\"include_image_lane\":false,\"include_research_lane\":false}"
+                    }]
+                }
+            }]
+        });
+
+        let content =
+            provider_chat_response_text(&response, "objective_planner_model_call_returned_no_text")
+                .expect("content part text should be accepted");
+        let directive = parse_objective_planner_directive(&content)
+            .expect("planner JSON from content parts should parse");
+
+        assert_eq!(directive.max_parallelism, Some(3));
+        assert_eq!(directive.role_count, Some(2));
+        assert_eq!(directive.include_image_lane, Some(false));
+        assert_eq!(directive.include_research_lane, Some(false));
     }
 
     fn supervisor_tick_lines(output: &str) -> Vec<serde_json::Value> {
@@ -9395,6 +10329,31 @@ mod tests {
         std::fs::write(candidate_dir.join("candidate.patch"), patch).expect("write patch");
     }
 
+    fn set_candidate_fixture_approval_policy(workspace: &Path, run_id: &str, policy_id: &str) {
+        let candidate_dir = workspace
+            .join(".opensks")
+            .join("runtime")
+            .join("integration-candidates")
+            .join(run_id);
+        for file in ["candidate.json", "selection.json"] {
+            let path = candidate_dir.join(file);
+            let mut value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("fixture json"))
+                    .expect("fixture value");
+            value["approval_policy_id"] = serde_json::json!(policy_id);
+            value["approval_required"] =
+                serde_json::json!(policy_id != opensks_contracts::turn::APPROVAL_POLICY_MAD_SKS);
+            if let Some(settings) = value.get_mut("turn_settings") {
+                settings["approval_policy_id"] = serde_json::json!(policy_id);
+            }
+            std::fs::write(
+                path,
+                serde_json::to_string_pretty(&value).expect("updated fixture json"),
+            )
+            .expect("write updated fixture");
+        }
+    }
+
     fn write_aggregate_candidate_fixture(
         workspace: &Path,
         run_id: &str,
@@ -9550,6 +10509,23 @@ mod tests {
     }
 
     fn write_semantic_verifier_judgment_fixture(workspace: &Path, run_id: &str, verdict: &str) {
+        write_semantic_verifier_judgment_fixture_with_binding(workspace, run_id, verdict, true);
+    }
+
+    fn write_unbound_semantic_verifier_judgment_fixture(
+        workspace: &Path,
+        run_id: &str,
+        verdict: &str,
+    ) {
+        write_semantic_verifier_judgment_fixture_with_binding(workspace, run_id, verdict, false);
+    }
+
+    fn write_semantic_verifier_judgment_fixture_with_binding(
+        workspace: &Path,
+        run_id: &str,
+        verdict: &str,
+        candidate_bound: bool,
+    ) {
         let work_item_id = "turn-role-fixture-verification";
         let judgment_dir = workspace
             .join(".opensks")
@@ -9569,6 +10545,10 @@ mod tests {
                 vec!["semantic_verifier_verdict_passed".to_string()],
             )
         };
+        let mut evidence_refs = vec!["daemon:semantic-verifier-judgment".to_string()];
+        if candidate_bound {
+            evidence_refs.push(SEMANTIC_VERIFIER_CANDIDATE_BOUND_EVIDENCE.to_string());
+        }
         let receipt = opensks_contracts::SemanticVerifierJudgmentReceipt {
             schema: opensks_contracts::SEMANTIC_VERIFIER_JUDGMENT_SCHEMA.to_string(),
             id: format!("semantic-verifier-{run_id}-{work_item_id}"),
@@ -9594,7 +10574,7 @@ mod tests {
             path_redacted: true,
             content_redacted: true,
             generated_at_ms: 1_000,
-            evidence_refs: vec!["daemon:semantic-verifier-judgment".to_string()],
+            evidence_refs,
         };
         std::fs::write(
             judgment_dir.join("judgment.json"),
@@ -9871,13 +10851,16 @@ mod tests {
                 assert!(request.contains("\"model\":\"code-model\""));
                 if request.contains("OpenSKS objective planner") {
                     let body = serde_json::json!({
-                        "choices": [{
-                            "message": {
-                                "role": "assistant",
-                                "content": "{\"max_parallelism\":5,\"role_count\":5,\"include_image_lane\":false,\"include_research_lane\":false}"
-                            }
-                        }]
-                    })
+	                        "choices": [{
+	                            "message": {
+	                                "role": "assistant",
+	                                "content": [{
+	                                    "type": "text",
+	                                    "text": "{\"max_parallelism\":5,\"role_count\":5,\"include_image_lane\":false,\"include_research_lane\":false}"
+	                                }]
+	                            }
+	                        }]
+	                    })
                     .to_string();
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -9969,12 +10952,27 @@ mod tests {
                     let active_now = active_role_calls.fetch_add(1, Ordering::SeqCst) + 1;
                     max_active_role_calls.fetch_max(active_now, Ordering::SeqCst);
                     std::thread::sleep(Duration::from_millis(80));
+                    let code_path = if request.contains("objective-shard: 1/2") {
+                        "ROLE_CODE_NOTE_A.md"
+                    } else if request.contains("objective-shard: 2/2") {
+                        "ROLE_CODE_NOTE_B.md"
+                    } else {
+                        "ROLE_CODE_NOTE.md"
+                    };
+                    let code_value = if code_path.ends_with("_A.md") {
+                        "code role candidate a"
+                    } else if code_path.ends_with("_B.md") {
+                        "code role candidate b"
+                    } else {
+                        "code role candidate"
+                    };
+                    let code_applied_marker = format!("wrote {code_path}: applied=true");
                     let body = if request.contains("Role: code")
-                        && !request.contains("wrote ROLE_CODE_NOTE.md: applied=true")
+                        && !request.contains(&code_applied_marker)
                     {
                         let arguments = serde_json::json!({
-                            "path": "ROLE_CODE_NOTE.md",
-                            "value": "code role candidate"
+                            "path": code_path,
+                            "value": code_value
                         });
                         serde_json::json!({
                             "choices": [{
@@ -9991,7 +10989,7 @@ mod tests {
                                 }
                             }]
                         })
-                    } else if request.contains("wrote ROLE_CODE_NOTE.md: applied=true") {
+                    } else if request.contains(&code_applied_marker) {
                         serde_json::json!({
                             "choices": [{
                                 "message": {
@@ -10002,14 +11000,17 @@ mod tests {
                         })
                     } else if request.contains("Role: verification") {
                         assert!(request.contains("VERDICT: pass"));
-                        serde_json::json!({
-                            "choices": [{
-                                "message": {
-                                    "role": "assistant",
-                                    "content": "VERDICT: pass\n- Candidate is semantically aligned."
-                                }
-                            }]
-                        })
+	                        serde_json::json!({
+	                            "choices": [{
+	                                "message": {
+	                                    "role": "assistant",
+	                                    "content": [{
+	                                        "type": "text",
+	                                        "text": "VERDICT: pass\n- Candidate is semantically aligned."
+	                                    }]
+	                                }
+	                            }]
+	                        })
                     } else {
                         assert!(request.contains("Return at most three short bullets."));
                         serde_json::json!({
@@ -10035,6 +11036,136 @@ mod tests {
             }
             for handle in role_handles {
                 handle.join().expect("role chat handler");
+            }
+        });
+        (format!("http://{address}/v1"), max_active_role_calls)
+    }
+
+    fn spawn_objective_shard_chat_completion_server(
+        role_request_count: usize,
+    ) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind objective shard server");
+        let address = listener.local_addr().expect("local addr");
+        let active_role_calls = Arc::new(AtomicUsize::new(0));
+        let max_active_role_calls = Arc::new(AtomicUsize::new(0));
+        let active_role_calls_for_thread = Arc::clone(&active_role_calls);
+        let max_active_role_calls_for_thread = Arc::clone(&max_active_role_calls);
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept planner request");
+            let request = read_http_request(&mut stream);
+            assert!(request.starts_with("POST /v1/chat/completions "));
+            assert!(request.contains("OpenSKS objective planner"));
+            let body = serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "{\"max_parallelism\":2,\"role_count\":2,\"include_image_lane\":false,\"include_research_lane\":false}"
+                    }
+                }]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write planner response");
+
+            let mut role_handles = Vec::new();
+            for _ in 0..role_request_count {
+                let (mut stream, _) = listener.accept().expect("accept objective role request");
+                let active_role_calls = Arc::clone(&active_role_calls_for_thread);
+                let max_active_role_calls = Arc::clone(&max_active_role_calls_for_thread);
+                role_handles.push(thread::spawn(move || {
+                    let request = read_http_request(&mut stream);
+                    assert!(request.starts_with("POST /v1/chat/completions "));
+                    assert!(
+                        request
+                            .to_ascii_lowercase()
+                            .contains("authorization: bearer fixture-credential")
+                    );
+                    assert!(request.contains("\"model\":\"code-model\""));
+                    assert!(
+                        request.contains("bounded OpenSKS role worker")
+                            || request.contains("isolated OpenSKS Code role subcontract worker")
+                    );
+                    let active_now = active_role_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active_role_calls.fetch_max(active_now, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(80));
+                    let body = if request.contains("Role: code") {
+                        let (path, value) = if request.contains("objective-shard: 1/2") {
+                            ("ROLE_CODE_NOTE_A.md", "code role candidate a")
+                        } else {
+                            assert!(request.contains("objective-shard: 2/2"));
+                            ("ROLE_CODE_NOTE_B.md", "code role candidate b")
+                        };
+                        let marker = format!("wrote {path}: applied=true");
+                        if request.contains(&marker) {
+                            serde_json::json!({
+                                "choices": [{
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": format!("{path} shard candidate patch is ready.")
+                                    }
+                                }]
+                            })
+                        } else {
+                            let arguments = serde_json::json!({
+                                "path": path,
+                                "value": value
+                            });
+                            serde_json::json!({
+                                "choices": [{
+                                    "message": {
+                                        "role": "assistant",
+                                        "tool_calls": [{
+                                            "id": "call_objective_shard_append_line",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "append_line",
+                                                "arguments": arguments.to_string()
+                                            }
+                                        }]
+                                    }
+                                }]
+                            })
+                        }
+                    } else if request.contains("Role: verification") {
+                        assert!(request.contains("objective-shard:"));
+                        serde_json::json!({
+                            "choices": [{
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "VERDICT: pass\n- Shard candidate is semantically aligned."
+                                }
+                            }]
+                        })
+                    } else {
+                        serde_json::json!({
+                            "choices": [{
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Shard role readiness assessed."
+                                }
+                            }]
+                        })
+                    };
+                    let body = body.to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .expect("write objective role response");
+                    active_role_calls.fetch_sub(1, Ordering::SeqCst);
+                }));
+            }
+            for handle in role_handles {
+                handle.join().expect("objective role handler");
             }
         });
         (format!("http://{address}/v1"), max_active_role_calls)
@@ -10607,7 +11738,7 @@ mod tests {
             opensks_scheduler::conversation_turn_root_work_item_id(&accepted.turn_id)
         );
         assert_eq!(events[0].payload["to"], "Ready");
-        assert_eq!(events[0].payload["max_parallelism"], 4);
+        assert_eq!(events[0].payload["max_parallelism"], 16);
         assert_eq!(events[0].payload["work_item"]["kind"], "planning");
         let context_pack_ref = events[0].payload["work_item"]["context_pack_ref"]
             .as_str()
@@ -10774,6 +11905,14 @@ mod tests {
                 accepted[0].run_id
             )
         );
+        assert_eq!(
+            ticks[0]["executed"]["automatic_integration_apply_state"],
+            "failed"
+        );
+        assert_eq!(
+            ticks[0]["executed"]["automatic_integration_apply_reason_code"],
+            "git_repository_required"
+        );
 
         assert!(
             !workspace.join("SUPERVISOR_NOTE.md").exists(),
@@ -10802,7 +11941,7 @@ mod tests {
         assert_eq!(candidate["state"], "candidate_ready");
         assert_eq!(candidate["target_paths"][0], "SUPERVISOR_NOTE.md");
         assert_eq!(candidate["main_workspace_modified"], false);
-        assert_eq!(candidate["approval_required"], true);
+        assert_eq!(candidate["approval_required"], false);
         assert_eq!(candidate["content_redacted"], true);
         assert_eq!(
             candidate["selection_ref"],
@@ -10836,6 +11975,13 @@ mod tests {
             selection["required_verification_gates"][0],
             "candidate_receipt_valid"
         );
+        assert_eq!(
+            selection["required_verification_gates"]
+                .as_array()
+                .and_then(|gates| gates.last())
+                .expect("last required gate"),
+            "automatic_approval_policy"
+        );
         let patch = std::fs::read_to_string(candidate_dir.join("candidate.patch"))
             .expect("candidate patch");
         assert!(patch.contains("SUPERVISOR_NOTE.md"));
@@ -10846,11 +11992,9 @@ mod tests {
             .expect("messages");
         assert_eq!(messages[1].state, MessageState::Complete);
         assert!(messages[1].content_redacted.contains("SUPERVISOR_NOTE.md"));
-        assert!(
-            messages[1]
-                .content_redacted
-                .contains("integration is pending")
-        );
+        assert!(messages[1].content_redacted.contains(
+            "Autopilot could not apply code changes to SUPERVISOR_NOTE.md: git_repository_required"
+        ));
         assert_eq!(
             repo.run_projection_state(&accepted[0].run_id)
                 .expect("run state")
@@ -10964,8 +12108,19 @@ mod tests {
                     && event.payload["payload"]["code"] == "integration_candidate_ready"
                     && event.payload["payload"]["receipt_ref"] == candidate["receipt_ref"]
                     && event.payload["payload"]["main_workspace_modified"] == false
+                    && event.payload["payload"]["target_paths"] == candidate["target_paths"]
+                    && event.payload["payload"]["applied_files"] == candidate["applied_files"]
             }),
             "supervisor execution must persist integration candidate evidence: {events:#?}"
+        );
+        assert!(
+            events.iter().any(|event| {
+                event.kind == EventKind::Unknown
+                    && event.payload["source"] == "integration.candidate.apply"
+                    && event.payload["state"] == "failed"
+                    && event.payload["reason_code"] == "git_repository_required"
+            }),
+            "automatic apply failure must be visible without failing the conversation run: {events:#?}"
         );
         assert!(
             !serde_json::to_string(&events)
@@ -11019,6 +12174,124 @@ mod tests {
                 .expect("conversation present")
                 .status,
             ConversationStatus::Completed
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn conversation_supervisor_tick_autopilot_applies_low_risk_git_candidate() {
+        let workspace = git_workspace("conversation-supervisor-autopilot-git-apply");
+        let (project_id, conversation_id) = seed_conversation(&workspace);
+        let mut turn_request = turn_start_request(
+            &project_id,
+            &conversation_id,
+            "req-conversation-supervisor-autopilot-git-start",
+            "idem-conversation-supervisor-autopilot-git-start",
+        );
+        turn_request.message.text = r#"{"local_test":{"op":"create_file","path":"AUTOPILOT_NOTE.md","value":"applied by autopilot"}}"#.to_string();
+        let start = EngineRequest::conversation_turn_start(turn_request);
+        let tick = EngineRequest::conversation_supervisor_tick(
+            "req-conversation-supervisor-autopilot-git-tick",
+            "daemon-autopilot-supervisor",
+            1_000,
+        );
+        let output = run_stdio(
+            &([
+                serde_json::to_string(&start).expect("start request"),
+                serde_json::to_string(&tick).expect("tick request"),
+            ]
+            .join("\n")
+                + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("stdio");
+
+        let accepted = accepted_lines(&output);
+        assert_eq!(accepted.len(), 1);
+        let run_id = &accepted[0].run_id;
+        let ticks = supervisor_tick_lines(&output);
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0]["executed"]["status"], "executed", "{output}");
+        assert_eq!(ticks[0]["executed"]["run_state"], "completed");
+        assert_eq!(ticks[0]["executed"]["integration_state"], "candidate_ready");
+        assert_eq!(
+            ticks[0]["executed"]["automatic_integration_apply_state"],
+            "integrated"
+        );
+        assert_eq!(
+            ticks[0]["executed"]["automatic_integration_apply_reason_code"],
+            "candidate_applied_to_main_workspace"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("AUTOPILOT_NOTE.md")).expect("autopilot note"),
+            "applied by autopilot\n"
+        );
+
+        let candidate_dir = workspace
+            .join(".opensks")
+            .join("runtime")
+            .join("integration-candidates")
+            .join(run_id);
+        let candidate: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(candidate_dir.join("candidate.json"))
+                .expect("candidate receipt"),
+        )
+        .expect("candidate json");
+        assert_eq!(candidate["approval_policy_id"], "autopilot");
+        assert_eq!(candidate["approval_required"], false);
+        let integration: opensks_contracts::IntegrationApplyReceipt = serde_json::from_str(
+            &std::fs::read_to_string(candidate_dir.join("integration.json"))
+                .expect("integration receipt"),
+        )
+        .expect("integration json");
+        assert_eq!(integration.state, "integrated");
+        assert_eq!(
+            integration.reason_code,
+            "candidate_applied_to_main_workspace"
+        );
+        assert!(!integration.approval_required);
+        assert!(integration.main_workspace_modified);
+
+        let repo = ConversationRepository::open_workspace(&workspace).expect("repo");
+        let messages = repo
+            .message_page(&conversation_id, None, 10)
+            .expect("messages");
+        assert!(
+            messages[1]
+                .content_redacted
+                .contains("Edited `AUTOPILOT_NOTE.md` (1 file changed).")
+        );
+        assert!(
+            !messages[1].content_redacted.contains("Autopilot applied"),
+            "successful autopilot integration must not overwrite the model reply"
+        );
+        assert_eq!(
+            repo.run_projection_state(run_id)
+                .expect("run state")
+                .as_deref(),
+            Some("completed")
+        );
+
+        let events = opensks_event_store::EventStore::open_workspace(&workspace)
+            .expect("event store")
+            .replay(run_id)
+            .expect("events");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.kind != EventKind::ApprovalApproved),
+            "autopilot must not fabricate a human approval event"
+        );
+        assert!(
+            events.iter().any(|event| {
+                event.kind == EventKind::WorkItemCompleted
+                    && event.payload["source"] == "integration.candidate.apply"
+                    && event.payload["state"] == "integrated"
+                    && event.payload["reason_code"] == "candidate_applied_to_main_workspace"
+            }),
+            "autopilot integration apply event must be durable: {events:#?}"
         );
         let _ = std::fs::remove_dir_all(workspace);
     }
@@ -12312,6 +13585,16 @@ mod tests {
                 .evidence_refs
                 .contains(&"daemon:semantic-verifier-judgment".to_string())
         );
+        assert!(
+            semantic_judgment
+                .evidence_refs
+                .contains(&"daemon:role-verifier-advisory-not-candidate-bound".to_string())
+        );
+        assert!(
+            !semantic_judgment
+                .evidence_refs
+                .contains(&SEMANTIC_VERIFIER_CANDIDATE_BOUND_EVIDENCE.to_string())
+        );
         assert!(role_scheduler_completions.iter().any(|event| {
             event
                 .evidence_refs
@@ -12598,16 +13881,23 @@ mod tests {
                     .expect("aggregate candidate"),
             )
             .expect("aggregate candidate json");
-        assert!(aggregate_candidate.aggregate_candidate_count >= 2);
+        assert_eq!(aggregate_candidate.aggregate_candidate_count, 1);
         assert!(aggregate_candidate.source_candidates.iter().any(|source| {
             source.source == "role_subcontract"
                 && source.work_item_id.as_deref() == Some("work-template-workers")
                 && source.role.as_deref() == Some("code")
         }));
+        assert!(
+            aggregate_candidate
+                .source_candidates
+                .iter()
+                .all(|source| source.source != "turn_supervisor"),
+            "objective planner root must orchestrate instead of producing a duplicate implementation candidate"
+        );
         assert!(aggregate_candidate.shard_policy_id.is_some());
         assert_eq!(
             aggregate_candidate.reason_code,
-            "aggregate_isolated_patch_candidate_ready"
+            "role_candidate_aggregate_ready"
         );
         let integration: opensks_contracts::IntegrationApplyReceipt = serde_json::from_str(
             &std::fs::read_to_string(candidate_dir.join("integration.json"))
@@ -12784,6 +14074,192 @@ mod tests {
         .expect("objective final seal json");
         assert_eq!(seal.state, "sealed");
         assert_eq!(seal.reason_code, "integration_final_sealed");
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn conversation_supervisor_tick_objective_plan_runs_parallel_worker_shards_and_integrates() {
+        let workspace = git_workspace("conversation-supervisor-objective-parallel-shards");
+        let (project_id, conversation_id) = seed_conversation(&workspace);
+        let (endpoint, max_active_role_calls) = spawn_objective_shard_chat_completion_server(6);
+        seed_healthy_provider_model_with_endpoint(&workspace, &endpoint, true);
+        {
+            let repo = ConversationRepository::open_workspace(&workspace).expect("repo");
+            let thread_settings = ConversationThreadSettings {
+                schema: CONVERSATION_THREAD_SETTINGS_SCHEMA.to_string(),
+                conversation_id: conversation_id.clone(),
+                model_selection: ModelSelection {
+                    mode: ModelSelectionMode::Pinned,
+                    model_id: Some("provider-1/code-model".to_string()),
+                    fallback_model_ids: Vec::new(),
+                },
+                reasoning_effort: ReasoningEffort::Standard,
+                execution_mode: ExecutionMode::Worktree,
+                pipeline_id: "objective-planner".to_string(),
+                max_parallelism: 2,
+                verifier_count: 1,
+                tool_policy_id: "project-default".to_string(),
+                approval_policy_id: "safe-interactive".to_string(),
+                token_budget: None,
+                cost_budget_usd: None,
+                timeout_ms: None,
+                image_model_id: None,
+                updated_at_ms: 1_980,
+            };
+            repo.set_thread_settings(
+                &conversation_id,
+                &serde_json::to_string(&thread_settings).expect("settings json"),
+                1_980,
+            )
+            .expect("set objective settings");
+        }
+
+        let mut turn_request = turn_start_request(
+            &project_id,
+            &conversation_id,
+            "req-conversation-objective-parallel-shards-start",
+            "idem-conversation-objective-parallel-shards-start",
+        );
+        turn_request.message.text = "Create two independent shard files: shard 1 writes ROLE_CODE_NOTE_A.md and shard 2 writes ROLE_CODE_NOTE_B.md.".to_string();
+        let start = EngineRequest::conversation_turn_start(turn_request);
+        let start_output = run_stdio(
+            &(serde_json::to_string(&start).expect("start request") + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("start stdio");
+        let accepted = accepted_lines(&start_output);
+        assert_eq!(accepted.len(), 1);
+
+        let approval = integration_approval_request(&accepted[0].run_id);
+        let tick = EngineRequest::conversation_supervisor_tick(
+            "req-conversation-objective-parallel-shards-tick",
+            "daemon-test-supervisor",
+            1_000,
+        );
+        let output = run_stdio(
+            &([
+                serde_json::to_string(&approval).expect("approval request"),
+                serde_json::to_string(&tick).expect("tick request"),
+            ]
+            .join("\n")
+                + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("tick stdio");
+        assert!(
+            max_active_role_calls.load(Ordering::SeqCst) >= 2,
+            "objective planner worker shards should execute through parallel role requests"
+        );
+        assert!(!output.contains("fixture-credential"));
+        assert!(!output.contains(workspace.to_string_lossy().as_ref()));
+        let ticks = supervisor_tick_lines(&output);
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0]["executed"]["status"], "executed");
+        assert_eq!(ticks[0]["executed"]["run_state"], "completed");
+
+        let candidate_dir = workspace
+            .join(".opensks")
+            .join("runtime")
+            .join("integration-candidates")
+            .join(&accepted[0].run_id);
+        let aggregate_candidate: opensks_contracts::IntegrationCandidateReceipt =
+            serde_json::from_str(
+                &std::fs::read_to_string(candidate_dir.join("candidate.json"))
+                    .expect("aggregate candidate"),
+            )
+            .expect("aggregate candidate json");
+        assert_eq!(aggregate_candidate.aggregate_candidate_count, 2);
+        assert_eq!(
+            aggregate_candidate.planner_required_source_candidate_count,
+            2
+        );
+        assert_eq!(
+            aggregate_candidate.planner_selected_source_candidate_count,
+            2
+        );
+        assert_eq!(
+            aggregate_candidate.reason_code,
+            "aggregate_isolated_patch_candidate_ready"
+        );
+        assert!(
+            aggregate_candidate
+                .source_candidates
+                .iter()
+                .all(|source| source.source != "turn_supervisor"),
+            "objective planner root must orchestrate instead of producing duplicate implementation patches"
+        );
+        let source_work_item_ids = aggregate_candidate
+            .source_candidates
+            .iter()
+            .filter_map(|source| source.work_item_id.as_deref())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(source_work_item_ids.contains("work-template-workers-shard-1"));
+        assert!(source_work_item_ids.contains("work-template-workers-shard-2"));
+
+        let selection: opensks_contracts::IntegrationCandidateSelectionReceipt =
+            serde_json::from_str(
+                &std::fs::read_to_string(candidate_dir.join("selection.json"))
+                    .expect("selection receipt"),
+            )
+            .expect("selection json");
+        assert_eq!(selection.reason_code, "planner_required_shards_selected");
+        assert_eq!(selection.selected_source_candidate_ids.len(), 2);
+        assert_eq!(selection.planner_required_source_candidate_count, 2);
+        assert_eq!(selection.planner_selected_source_candidate_count, 2);
+
+        let integration: opensks_contracts::IntegrationApplyReceipt = serde_json::from_str(
+            &std::fs::read_to_string(candidate_dir.join("integration.json"))
+                .expect("objective integrated receipt"),
+        )
+        .expect("objective integrated json");
+        assert_eq!(integration.state, "integrated");
+        assert_eq!(
+            integration.reason_code,
+            "candidate_applied_to_main_workspace"
+        );
+        assert!(integration.main_workspace_modified);
+        assert!(integration.seal_ref.is_some());
+
+        let verification = read_integration_verification(&workspace, &accepted[0].run_id);
+        assert_eq!(verification.state, "passed");
+        assert!(
+            verification
+                .passed_gates
+                .contains(&"planner_required_shards_present".to_string())
+        );
+        assert!(
+            verification
+                .passed_gates
+                .contains(&"read_only_verifier_lanes_passed".to_string())
+        );
+
+        let events = opensks_event_store::EventStore::open_workspace(&workspace)
+            .expect("event store")
+            .replay(&accepted[0].run_id)
+            .expect("replay events");
+        let completed_work_item_ids = events
+            .iter()
+            .filter(|event| event.kind == EventKind::WorkItemCompleted)
+            .filter_map(|event| event.payload["work_item_id"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(completed_work_item_ids.contains("work-template-workers-shard-1"));
+        assert!(completed_work_item_ids.contains("work-template-workers-shard-2"));
+        assert!(completed_work_item_ids.contains("work-template-verifier-shard-1"));
+        assert!(completed_work_item_ids.contains("work-template-verifier-shard-2"));
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("ROLE_CODE_NOTE_A.md"))
+                .expect("first shard file"),
+            "code role candidate a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("ROLE_CODE_NOTE_B.md"))
+                .expect("second shard file"),
+            "code role candidate b\n"
+        );
         let _ = std::fs::remove_dir_all(workspace);
     }
 
@@ -13388,6 +14864,8 @@ diff --git a/NOTE.md b/NOTE.md
                 && event.payload["path_write_lease"]["lease_type"] == "path_write"
                 && event.payload["path_write_lease"]["holder"] == "integration-coordinator"
                 && event.payload["path_scope"]["workspace_relative_roots"][0] == "NOTE.md"
+                && event.payload["target_paths"][0] == "NOTE.md"
+                && event.payload["applied_files"][0] == "NOTE.md"
                 && event.payload["path_scope"]["allow_external_write"] == true
                 && event.payload["content_redacted"] == true
                 && event.payload["verification_ref"] == receipt.verification_ref.as_deref().unwrap()
@@ -13395,6 +14873,160 @@ diff --git a/NOTE.md b/NOTE.md
                 && event.payload["seal_ref"] == receipt.seal_ref.as_deref().unwrap()
                 && event.payload["cleanup_ref"] == receipt.cleanup_ref.as_deref().unwrap()
         }));
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn integration_candidate_apply_autopilot_applies_low_risk_candidate_without_approval_event() {
+        let workspace = git_workspace("integration-candidate-autopilot-apply");
+        let run_id = "run-integration-autopilot-apply";
+        let patch = "\
+diff --git a/NOTE.md b/NOTE.md
+--- a/NOTE.md
++++ b/NOTE.md
+@@ -1 +1 @@
+-before
++after autopilot
+";
+        write_candidate_fixture(&workspace, run_id, "NOTE.md", patch);
+        set_candidate_fixture_approval_policy(
+            &workspace,
+            run_id,
+            opensks_contracts::turn::APPROVAL_POLICY_AUTOPILOT,
+        );
+        let request = EngineRequest::integration_candidate_apply(
+            "req-integration-autopilot-apply",
+            run_id,
+            format!("approval-integration-{run_id}"),
+        );
+
+        let output = run_stdio(
+            &(serde_json::to_string(&request).expect("request") + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("stdio");
+
+        let receipts = integration_apply_receipt_lines(&output);
+        assert_eq!(receipts.len(), 1);
+        let receipt = &receipts[0];
+        assert_eq!(receipt.state, "integrated");
+        assert_eq!(receipt.reason_code, "candidate_applied_to_main_workspace");
+        assert_eq!(
+            receipt.approval_policy_id.as_deref(),
+            Some(opensks_contracts::turn::APPROVAL_POLICY_AUTOPILOT)
+        );
+        assert!(!receipt.approval_required);
+        assert!(receipt.main_workspace_modified);
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("NOTE.md")).expect("note"),
+            "after autopilot\n"
+        );
+        let events = opensks_event_store::EventStore::open_workspace(&workspace)
+            .expect("event store")
+            .replay(run_id)
+            .expect("events");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.kind != EventKind::ApprovalApproved),
+            "autopilot apply must not fabricate a human approval event"
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn integration_candidate_apply_autopilot_stops_for_high_impact_sql_without_approval() {
+        let workspace = git_workspace("integration-candidate-autopilot-high-impact");
+        let run_id = "run-integration-autopilot-high-impact";
+        let patch = "\
+diff --git a/NOTE.md b/NOTE.md
+--- a/NOTE.md
++++ b/NOTE.md
+@@ -1 +1 @@
+-before
++DROP TABLE users;
+";
+        write_candidate_fixture(&workspace, run_id, "NOTE.md", patch);
+        set_candidate_fixture_approval_policy(
+            &workspace,
+            run_id,
+            opensks_contracts::turn::APPROVAL_POLICY_AUTOPILOT,
+        );
+        let request = EngineRequest::integration_candidate_apply(
+            "req-integration-autopilot-high-impact",
+            run_id,
+            format!("approval-integration-{run_id}"),
+        );
+
+        let output = run_stdio(
+            &(serde_json::to_string(&request).expect("request") + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("stdio");
+
+        let receipts = integration_apply_receipt_lines(&output);
+        assert_eq!(receipts.len(), 1);
+        let receipt = &receipts[0];
+        assert_eq!(receipt.state, "awaiting_approval");
+        assert_eq!(receipt.reason_code, "approval_not_persisted");
+        assert!(receipt.approval_required);
+        assert!(!receipt.main_workspace_modified);
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("NOTE.md")).expect("note"),
+            "before\n"
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn integration_candidate_apply_mad_sks_applies_high_impact_candidate_without_approval_event() {
+        let workspace = git_workspace("integration-candidate-mad-sks-apply");
+        let run_id = "run-integration-mad-sks-apply";
+        let patch = "\
+diff --git a/NOTE.md b/NOTE.md
+--- a/NOTE.md
++++ b/NOTE.md
+@@ -1 +1 @@
+-before
++DROP TABLE users;
+";
+        write_candidate_fixture(&workspace, run_id, "NOTE.md", patch);
+        set_candidate_fixture_approval_policy(
+            &workspace,
+            run_id,
+            opensks_contracts::turn::APPROVAL_POLICY_MAD_SKS,
+        );
+        let request = EngineRequest::integration_candidate_apply(
+            "req-integration-mad-sks-apply",
+            run_id,
+            format!("approval-integration-{run_id}"),
+        );
+
+        let output = run_stdio(
+            &(serde_json::to_string(&request).expect("request") + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("stdio");
+
+        let receipts = integration_apply_receipt_lines(&output);
+        assert_eq!(receipts.len(), 1);
+        let receipt = &receipts[0];
+        assert_eq!(receipt.state, "integrated");
+        assert_eq!(
+            receipt.approval_policy_id.as_deref(),
+            Some(opensks_contracts::turn::APPROVAL_POLICY_MAD_SKS)
+        );
+        assert!(!receipt.approval_required);
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("NOTE.md")).expect("note"),
+            "DROP TABLE users;\n"
+        );
         let _ = std::fs::remove_dir_all(workspace);
     }
 
@@ -13526,6 +15158,148 @@ diff --git a/EXTRA.md b/EXTRA.md
         assert!(final_diff.contains("+after"));
         assert!(final_diff.contains("+new"));
         assert!(!output.contains(workspace.to_string_lossy().as_ref()));
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn integration_candidate_apply_deduplicates_identical_patch_fragments_before_apply() {
+        let workspace = git_workspace("integration-candidate-duplicate-fragment-apply");
+        let run_id = "run-integration-duplicate-fragment-apply";
+        let duplicate_patch = "\
+--- a/NOTE.md
++++ b/NOTE.md
+@@ -1 +1 @@
+-before
++after
+--- a/NOTE.md
++++ b/NOTE.md
+@@ -1 +1 @@
+-before
++after
+        ";
+        write_candidate_fixture(&workspace, run_id, "NOTE.md", duplicate_patch);
+        let turn_supervisor_isolation =
+            source_isolation_path(&workspace, run_id, "turn-supervisor");
+        std::fs::create_dir_all(&turn_supervisor_isolation).expect("source isolation");
+        std::fs::write(turn_supervisor_isolation.join("NOTE.md"), "after\n")
+            .expect("source isolation file");
+        let request = EngineRequest::integration_candidate_apply(
+            "req-integration-duplicate-fragment-apply",
+            run_id,
+            format!("approval-integration-{run_id}"),
+        );
+        let approval = integration_approval_request(run_id);
+
+        let output = run_stdio(
+            &([
+                serde_json::to_string(&approval).expect("approval"),
+                serde_json::to_string(&request).expect("request"),
+            ]
+            .join("\n")
+                + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("stdio");
+
+        let receipts = integration_apply_receipt_lines(&output);
+        assert_eq!(receipts.len(), 1);
+        let receipt = &receipts[0];
+        assert_eq!(receipt.state, "integrated");
+        assert!(receipt.main_workspace_modified);
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("NOTE.md")).expect("note"),
+            "after\n"
+        );
+        let normalized_patch = std::fs::read_to_string(integration_artifact_path(
+            &workspace,
+            run_id,
+            "candidate.patch",
+        ))
+        .expect("candidate patch");
+        assert_eq!(normalized_patch.matches("--- a/NOTE.md").count(), 1);
+        let verification = read_integration_verification(&workspace, run_id);
+        assert_eq!(verification.state, "passed");
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn integration_candidate_apply_is_idempotent_after_successful_apply() {
+        let workspace = git_workspace("integration-candidate-idempotent-apply");
+        let run_id = "run-integration-idempotent-apply";
+        let patch = "\
+diff --git a/NOTE.md b/NOTE.md
+--- a/NOTE.md
++++ b/NOTE.md
+@@ -1 +1 @@
+-before
++after
+        ";
+        write_candidate_fixture(&workspace, run_id, "NOTE.md", patch);
+        let turn_supervisor_isolation =
+            source_isolation_path(&workspace, run_id, "turn-supervisor");
+        std::fs::create_dir_all(&turn_supervisor_isolation).expect("source isolation");
+        std::fs::write(turn_supervisor_isolation.join("NOTE.md"), "after\n")
+            .expect("source isolation file");
+        let request = EngineRequest::integration_candidate_apply(
+            "req-integration-idempotent-apply",
+            run_id,
+            format!("approval-integration-{run_id}"),
+        );
+        let approval = integration_approval_request(run_id);
+
+        let first_output = run_stdio(
+            &([
+                serde_json::to_string(&approval).expect("approval"),
+                serde_json::to_string(&request).expect("request"),
+            ]
+            .join("\n")
+                + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("first stdio");
+        let first_receipts = integration_apply_receipt_lines(&first_output);
+        assert_eq!(first_receipts.len(), 1);
+        assert_eq!(first_receipts[0].state, "integrated");
+
+        let second_output = run_stdio(
+            &([
+                serde_json::to_string(&approval).expect("approval"),
+                serde_json::to_string(&request).expect("request"),
+            ]
+            .join("\n")
+                + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("second stdio");
+        let second_receipts = integration_apply_receipt_lines(&second_output);
+        assert_eq!(second_receipts.len(), 1);
+        assert_eq!(second_receipts[0].state, "integrated");
+        assert_eq!(
+            second_receipts[0].reason_code,
+            "candidate_already_applied_to_main_workspace"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("NOTE.md")).expect("note"),
+            "after\n"
+        );
+        let events = opensks_event_store::EventStore::open_workspace(&workspace)
+            .expect("event store")
+            .replay(run_id)
+            .expect("replay events");
+        let integrated_apply_event_count = events
+            .iter()
+            .filter(|event| {
+                event.payload["source"] == "integration.candidate.apply"
+                    && event.payload["state"] == "integrated"
+            })
+            .count();
+        assert_eq!(integrated_apply_event_count, 2);
         let _ = std::fs::remove_dir_all(workspace);
     }
 
@@ -13679,6 +15453,70 @@ diff --git a/NOTE.md b/NOTE.md
         assert_eq!(
             std::fs::read_to_string(workspace.join("NOTE.md")).expect("note"),
             "before\n"
+        );
+        assert!(!output.contains(workspace.to_string_lossy().as_ref()));
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn integration_candidate_apply_ignores_unbound_role_semantic_verifier_judgment() {
+        let workspace = git_workspace("integration-candidate-semantic-unbound");
+        let run_id = "run-integration-semantic-unbound";
+        let patch = "\
+diff --git a/NOTE.md b/NOTE.md
+--- a/NOTE.md
++++ b/NOTE.md
+@@ -1 +1 @@
+-before
++after
+";
+        write_candidate_fixture(&workspace, run_id, "NOTE.md", patch);
+        write_unbound_semantic_verifier_judgment_fixture(&workspace, run_id, "fail");
+        let request = EngineRequest::integration_candidate_apply(
+            "req-integration-semantic-unbound",
+            run_id,
+            format!("approval-integration-{run_id}"),
+        );
+        let approval = integration_approval_request(run_id);
+
+        let output = run_stdio(
+            &([
+                serde_json::to_string(&approval).expect("approval"),
+                serde_json::to_string(&request).expect("request"),
+            ]
+            .join("\n")
+                + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("stdio");
+
+        let receipts = integration_apply_receipt_lines(&output);
+        assert_eq!(receipts.len(), 1);
+        let receipt = &receipts[0];
+        assert_eq!(receipt.state, "integrated");
+        assert_eq!(receipt.reason_code, "candidate_applied_to_main_workspace");
+        assert!(receipt.main_workspace_modified);
+        assert!(receipt.verifier_passed);
+        let verification = read_integration_verification(&workspace, run_id);
+        assert_eq!(verification.state, "passed");
+        assert_eq!(verification.reason_code, "candidate_verification_passed");
+        assert_eq!(verification.verifier_lanes.len(), 1);
+        assert!(
+            verification
+                .verifier_lanes
+                .iter()
+                .all(|lane| lane.verifier_kind == "read_only_git_apply_check")
+        );
+        assert!(
+            !verification
+                .evidence_refs
+                .contains(&"integration:semantic-verifier-gate".to_string())
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("NOTE.md")).expect("note"),
+            "after\n"
         );
         assert!(!output.contains(workspace.to_string_lossy().as_ref()));
         let _ = std::fs::remove_dir_all(workspace);
@@ -14453,7 +16291,11 @@ diff --git a/NOTE.md b/NOTE.md
                     &request_id,
                     &idempotency_key,
                 );
-                turn_request.message.text = format!("coalesced resident rerun {index}");
+                let path = format!("STREAM_RESIDENT_RERUN_{index}.md");
+                let value = format!("coalesced resident rerun {index}");
+                turn_request.message.text = format!(
+                    r#"{{"local_test":{{"op":"create_file","path":"{path}","value":"{value}"}}}}"#
+                );
                 serde_json::to_string(&EngineRequest::conversation_turn_start(turn_request))
                     .expect("start request")
             })
@@ -14491,7 +16333,7 @@ diff --git a/NOTE.md b/NOTE.md
                 repo.run_projection_state(&accepted.run_id)
                     .expect("run state")
                     .as_deref(),
-                Some("failed")
+                Some("completed")
             );
             assert_eq!(
                 ticks
@@ -14514,7 +16356,7 @@ diff --git a/NOTE.md b/NOTE.md
                     .iter()
                     .find(|tick| tick["claimed"]["run_id"] == accepted.run_id)
                     .expect("claimed tick")["executed"]["run_state"],
-                "failed"
+                "completed"
             );
         }
         let _ = std::fs::remove_dir_all(workspace);
@@ -14847,6 +16689,7 @@ diff --git a/NOTE.md b/NOTE.md
     #[test]
     fn conversation_supervisor_tick_fails_setup_required_without_model_or_simulation() {
         let workspace = temp_workspace("conversation-supervisor-setup-required");
+        disable_daemon_external_provider_env_sync(&workspace);
         let (project_id, conversation_id) = seed_conversation(&workspace);
         let start = EngineRequest::conversation_turn_start(turn_start_request(
             &project_id,
@@ -14997,7 +16840,7 @@ diff --git a/NOTE.md b/NOTE.md
     }
 
     #[test]
-    fn conversation_turn_start_snapshots_persisted_thread_settings() {
+    fn conversation_turn_start_snapshots_request_settings_after_revision_check() {
         let workspace = temp_workspace("conversation-turn-start-thread-settings");
         let (project_id, conversation_id) = seed_conversation(&workspace);
         {
@@ -15038,12 +16881,38 @@ diff --git a/NOTE.md b/NOTE.md
             "idem-conversation-turn-start-settings",
         );
         turn_request.thread_settings_updated_at_ms = Some(1_900);
-        let legacy_settings = turn_request
+        turn_request.settings = Some(ConversationTurnSettings {
+            model: ModelSelection {
+                mode: ModelSelectionMode::Auto,
+                model_id: None,
+                fallback_model_ids: Vec::new(),
+            },
+            reasoning_effort: ReasoningEffort::Standard,
+            execution_mode: ExecutionMode::Worktree,
+            pipeline_id: "auto".to_string(),
+            graph_revision: None,
+            max_parallelism: 4,
+            verifier_count: 1,
+            tool_policy_id: "project-default".to_string(),
+            approval_policy_id: "safe-interactive".to_string(),
+            token_budget: None,
+            cost_budget_usd: None,
+            timeout_ms: None,
+            image_model_id: None,
+        });
+        let request_settings = turn_request
             .settings
             .as_mut()
-            .expect("legacy settings echo");
-        legacy_settings.pipeline_id = "client-request-ignored".to_string();
-        legacy_settings.max_parallelism = 99;
+            .expect("request settings snapshot");
+        request_settings.model = ModelSelection {
+            mode: ModelSelectionMode::Pinned,
+            model_id: Some("openrouter/client-selected-code-model".to_string()),
+            fallback_model_ids: Vec::new(),
+        };
+        request_settings.reasoning_effort = ReasoningEffort::Standard;
+        request_settings.execution_mode = ExecutionMode::Worktree;
+        request_settings.pipeline_id = "client-request-honored".to_string();
+        request_settings.max_parallelism = 99;
         let request = EngineRequest::conversation_turn_start(turn_request);
         let input = serde_json::to_string(&request).expect("request");
 
@@ -15069,19 +16938,23 @@ diff --git a/NOTE.md b/NOTE.md
         assert_eq!(accepted[0].settings_digest, settings_digest);
         let settings: ConversationTurnSettings =
             serde_json::from_str(&settings_raw).expect("effective settings");
-        assert_eq!(settings.pipeline_id, "daemon-thread-pipeline");
-        assert_eq!(settings.max_parallelism, 9);
-        assert_eq!(settings.verifier_count, 4);
-        assert_eq!(settings.token_budget, Some(150_000));
-        assert_eq!(settings.cost_budget_usd, Some(3.5));
-        assert_eq!(settings.timeout_ms, Some(750_000));
-        assert_eq!(settings.reasoning_effort, ReasoningEffort::Maximum);
-        assert_eq!(settings.execution_mode, ExecutionMode::ReadOnly);
+        assert_eq!(
+            settings.model.model_id.as_deref(),
+            Some("openrouter/client-selected-code-model")
+        );
+        assert_eq!(settings.pipeline_id, "client-request-honored");
+        assert_eq!(settings.max_parallelism, 99);
+        assert_eq!(settings.verifier_count, 1);
+        assert_eq!(settings.token_budget, None);
+        assert_eq!(settings.cost_budget_usd, None);
+        assert_eq!(settings.timeout_ms, None);
+        assert_eq!(settings.reasoning_effort, ReasoningEffort::Standard);
+        assert_eq!(settings.execution_mode, ExecutionMode::Worktree);
         assert_eq!(
             repo.run_projection_pipeline_id(&accepted[0].run_id)
                 .expect("projection pipeline")
                 .as_deref(),
-            Some("daemon-thread-pipeline")
+            Some("client-request-honored")
         );
         let routing_raw = repo
             .turn_model_routing_decision_json(&accepted[0].turn_id)
@@ -15092,7 +16965,7 @@ diff --git a/NOTE.md b/NOTE.md
         assert_eq!(routing.status, opensks_contracts::RoutingStatus::Requested);
         assert_eq!(
             routing.selected_model_id.as_deref(),
-            Some("openrouter/daemon-code-model")
+            Some("openrouter/client-selected-code-model")
         );
         assert_eq!(
             routing.reason_code,
@@ -15102,7 +16975,7 @@ diff --git a/NOTE.md b/NOTE.md
         assert!(receipt.provider_id.is_none());
         assert_eq!(
             receipt.model_id.as_deref(),
-            Some("openrouter/daemon-code-model")
+            Some("openrouter/client-selected-code-model")
         );
         assert_eq!(receipt.registry_revision, routing.model_snapshot_hash);
         let _ = std::fs::remove_dir_all(workspace);
@@ -15180,6 +17053,7 @@ diff --git a/NOTE.md b/NOTE.md
     #[test]
     fn conversation_turn_start_objective_planner_bootstraps_compiled_work_dag() {
         let workspace = temp_workspace("conversation-turn-start-objective-planner");
+        disable_daemon_external_provider_env_sync(&workspace);
         let (project_id, conversation_id) = seed_conversation(&workspace);
         {
             let repo = ConversationRepository::open_workspace(&workspace).expect("repo");
@@ -15482,6 +17356,107 @@ diff --git a/NOTE.md b/NOTE.md
                 .evidence_refs
                 .iter()
                 .any(|evidence| { evidence == "provider:role-routing" })
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn conversation_turn_start_scheduler_bootstrap_failure_marks_turn_failed() {
+        let workspace = temp_workspace("conversation-turn-start-objective-bootstrap-failed");
+        let (project_id, conversation_id) = seed_conversation(&workspace);
+        seed_healthy_provider_model_with_endpoint(&workspace, "http://127.0.0.1:9/v1", true);
+        {
+            let repo = ConversationRepository::open_workspace(&workspace).expect("repo");
+            let thread_settings = ConversationThreadSettings {
+                schema: CONVERSATION_THREAD_SETTINGS_SCHEMA.to_string(),
+                conversation_id: conversation_id.clone(),
+                model_selection: ModelSelection {
+                    mode: ModelSelectionMode::Pinned,
+                    model_id: Some("provider-1/code-model".to_string()),
+                    fallback_model_ids: Vec::new(),
+                },
+                reasoning_effort: ReasoningEffort::Standard,
+                execution_mode: ExecutionMode::Worktree,
+                pipeline_id: "objective-planner".to_string(),
+                max_parallelism: 2,
+                verifier_count: 1,
+                tool_policy_id: "project-default".to_string(),
+                approval_policy_id: "safe-interactive".to_string(),
+                token_budget: None,
+                cost_budget_usd: None,
+                timeout_ms: None,
+                image_model_id: None,
+                updated_at_ms: 1_975,
+            };
+            repo.set_thread_settings(
+                &conversation_id,
+                &serde_json::to_string(&thread_settings).expect("settings json"),
+                1_975,
+            )
+            .expect("set settings");
+        }
+        let mut turn_request = turn_start_request(
+            &project_id,
+            &conversation_id,
+            "req-conversation-turn-start-objective-bootstrap-failed",
+            "idem-conversation-turn-start-objective-bootstrap-failed",
+        );
+        turn_request.message.text = "Plan with an unavailable live planner".to_string();
+        let request = EngineRequest::conversation_turn_start(turn_request);
+        let output = run_stdio(
+            &(serde_json::to_string(&request).expect("request") + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("stdio");
+
+        assert!(accepted_lines(&output).is_empty());
+        assert!(output.contains("conversation turn start scheduler bootstrap failed"));
+        let repo = ConversationRepository::open_workspace(&workspace).expect("repo");
+        let accepted = repo
+            .lookup_turn_idempotency(
+                "idem-conversation-turn-start-objective-bootstrap-failed",
+                &conversation_id,
+            )
+            .expect("idempotency lookup")
+            .expect("accepted snapshot");
+        let messages = repo
+            .message_page(&conversation_id, None, 10)
+            .expect("messages");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].state, MessageState::Failed);
+        assert!(
+            messages[1]
+                .content_redacted
+                .contains("scheduler_bootstrap_failed")
+        );
+        assert_eq!(
+            repo.run_projection_state(&accepted.run_id)
+                .expect("projection")
+                .as_deref(),
+            Some("failed")
+        );
+        let cursor = repo
+            .stream_cursor_for_run(&accepted.run_id)
+            .expect("cursor")
+            .expect("cursor exists");
+        assert_eq!(cursor.terminal_kind.as_deref(), Some("failed"));
+        let events = opensks_event_store::EventStore::open_workspace(&workspace)
+            .expect("event store")
+            .replay(&accepted.run_id)
+            .expect("replay");
+        assert!(events.iter().any(|event| {
+            event.kind == EventKind::VerificationFailed
+                && event.payload["reason_code"] == "scheduler_bootstrap_failed"
+        }));
+        let timeline = repo
+            .timeline_items_for_conversation(&conversation_id, 20)
+            .expect("timeline");
+        assert!(
+            timeline
+                .iter()
+                .any(|item| item.kind == opensks_contracts::TimelineItemKind::Error)
         );
         let _ = std::fs::remove_dir_all(workspace);
     }

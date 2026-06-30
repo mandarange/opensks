@@ -554,6 +554,30 @@ struct ConversationTimelineItem: Codable, Sendable, Identifiable, Equatable {
     }
 }
 
+func orderedConversationTimelineItems(_ items: [ConversationTimelineItem]) -> [ConversationTimelineItem] {
+    items.sorted { lhs, rhs in
+        if lhs.createdAtMs != rhs.createdAtMs {
+            return lhs.createdAtMs < rhs.createdAtMs
+        }
+        if lhs.sequence != rhs.sequence {
+            return lhs.sequence < rhs.sequence
+        }
+        return lhs.id < rhs.id
+    }
+}
+
+func orderedConversationMessages(_ messages: [ConversationMessage]) -> [ConversationMessage] {
+    messages.sorted { lhs, rhs in
+        if lhs.sequence != rhs.sequence {
+            return lhs.sequence < rhs.sequence
+        }
+        if lhs.createdAtMs != rhs.createdAtMs {
+            return lhs.createdAtMs < rhs.createdAtMs
+        }
+        return lhs.id < rhs.id
+    }
+}
+
 /// Mirrors the `opensks.conversation-timeline.v1` envelope.
 struct ConversationTimeline: Codable, Sendable, Equatable {
     let schema: String
@@ -697,6 +721,63 @@ enum ExecutionMode: String, Codable, Sendable, Equatable, CaseIterable {
     }
 }
 
+enum ConversationApprovalPolicy {
+    static let autopilot = "autopilot"
+    static let madSKS = "mad-sks"
+    static let safeInteractive = "safe-interactive"
+    static let manualReview = "manual-review"
+
+    static let menuPolicyIds = [
+        autopilot,
+        madSKS
+    ]
+
+    static func displayLabel(for id: String) -> String {
+        switch canonicalId(for: id) {
+        case autopilot:
+            return "Autopilot"
+        case madSKS:
+            return "Mad Mode"
+        default:
+            return id
+        }
+    }
+
+    static func helpText(for id: String) -> String {
+        switch canonicalId(for: id) {
+        case madSKS:
+            return "Run without approval stops. Use only when you explicitly want every action to proceed."
+        default:
+            return "Automatically continue low-risk work and only stop for high-impact actions."
+        }
+    }
+
+    static func iconName(for id: String) -> String {
+        switch canonicalId(for: id) {
+        case madSKS:
+            return "flame"
+        default:
+            return "shield"
+        }
+    }
+
+    static func canonicalId(for id: String) -> String {
+        switch id {
+        case autopilot, madSKS:
+            return id
+        case safeInteractive, manualReview:
+            return autopilot
+        default:
+            return autopilot
+        }
+    }
+}
+
+enum ConversationParallelismOptions {
+    static let allowed: [UInt32] = [1, 2, 4, 8, 16, 32, 64, 128]
+    static let defaultValue: UInt32 = 16
+}
+
 /// Mirrors `opensks_contracts::ConversationTurnSettings`.
 struct ConversationTurnSettings: Codable, Sendable, Equatable {
     let model: ModelSelection
@@ -720,10 +801,10 @@ struct ConversationTurnSettings: Codable, Sendable, Equatable {
             executionMode: .worktree,
             pipelineId: "auto",
             graphRevision: nil,
-            maxParallelism: 4,
+            maxParallelism: ConversationParallelismOptions.defaultValue,
             verifierCount: 1,
             toolPolicyId: "project-default",
-            approvalPolicyId: "safe-interactive",
+            approvalPolicyId: ConversationApprovalPolicy.autopilot,
             tokenBudget: nil,
             costBudgetUsd: nil,
             timeoutMs: nil,
@@ -778,10 +859,10 @@ struct ConversationThreadSettings: Codable, Sendable, Equatable {
             reasoningEffort: .standard,
             executionMode: .worktree,
             pipelineId: "auto",
-            maxParallelism: 4,
+            maxParallelism: ConversationParallelismOptions.defaultValue,
             verifierCount: 1,
             toolPolicyId: "project-default",
-            approvalPolicyId: "safe-interactive",
+            approvalPolicyId: ConversationApprovalPolicy.autopilot,
             tokenBudget: nil,
             costBudgetUsd: nil,
             timeoutMs: nil,

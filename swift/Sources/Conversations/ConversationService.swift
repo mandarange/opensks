@@ -64,6 +64,11 @@ protocol ConversationService: Sendable {
         pollIntervalMs: UInt64?
     ) async throws -> EngineRunStream
 
+    /// Approve and apply a completed run's isolated integration candidate into
+    /// the main workspace. Chat uses this after the worker lanes produce a
+    /// verified worktree candidate.
+    func applyIntegrationCandidate(runID: String) async throws -> EngineRunStream
+
     /// The runs linked to a conversation (`opensks.conversation-run-list.v1`).
     func runs(conversationID: String) async throws -> [ConversationRunRef]
 
@@ -124,6 +129,8 @@ enum ConversationServiceError: LocalizedError {
     case decodeFailed(String, underlying: String)
     case nonZeroExit(Int32, stderr: String)
     case launchFailed(String)
+    case pinLimitExceeded(limit: Int)
+    case integrationApplyFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -133,10 +140,29 @@ enum ConversationServiceError: LocalizedError {
             return "could not decode conversation \(verb): \(underlying)"
         case .nonZeroExit(let code, let stderr):
             let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let limit = Self.pinLimit(from: trimmed) {
+                return Self.pinLimitDescription(limit: limit)
+            }
             return "conversation command exited \(code)\(trimmed.isEmpty ? "" : ": \(trimmed)")"
         case .launchFailed(let message):
             return "could not start conversation command: \(message)"
+        case .pinLimitExceeded(let limit):
+            return Self.pinLimitDescription(limit: limit)
+        case .integrationApplyFailed(let message):
+            return message
         }
+    }
+
+    static func pinLimitDescription(limit: Int) -> String {
+        "You can pin up to \(limit) conversations. Unpin one before pinning another."
+    }
+
+    private static func pinLimit(from text: String) -> Int? {
+        let marker = "conversation pin limit exceeded: max "
+        let lowercased = text.lowercased()
+        guard let range = lowercased.range(of: marker) else { return nil }
+        let digits = lowercased[range.upperBound...].prefix { $0.isNumber }
+        return Int(digits)
     }
 }
 
@@ -149,10 +175,17 @@ enum ConversationServiceError: LocalizedError {
 struct LiveConversationService: ConversationService {
     let cli: URL
     let workspace: URL
-    let engine = EngineProcess()
-    let supervisorEngine = EngineProcess()
+    let engine: EngineProcess
+    let supervisorEngine: EngineProcess
     private static let chatSupervisorId = "swift-chat-supervisor"
     private static let chatSupervisorLeaseTtlMs: UInt64 = 30_000
+
+    init(cli: URL, workspace: URL, engine: EngineProcess = EngineProcess()) {
+        self.cli = cli
+        self.workspace = workspace
+        self.engine = engine
+        self.supervisorEngine = engine
+    }
 
     func list(filter: ConversationFilter, limit: Int?) async throws -> ConversationList {
         var args = ["conversation", "list", "--workspace", workspace.path, "--filter", filter.rawValue]
@@ -353,6 +386,32 @@ struct LiveConversationService: ConversationService {
         return stream
     }
 
+    func applyIntegrationCandidate(runID: String) async throws -> EngineRunStream {
+        let approvalId = "approval-integration-\(runID)"
+        let approvalStream = await engine.approval(
+            cli: cli,
+            cwd: workspace,
+            kind: "approval_approve",
+            runId: runID,
+            approvalId: approvalId,
+            scope: "integration_apply",
+            message: "Apply isolated integration candidate to the main workspace",
+            reasonCode: "approved_by_user"
+        )
+        try Self.throwIfDaemonRequestFailed(approvalStream, verb: "integration-approval")
+
+        let applyStream = await engine.integrationCandidateApply(
+            cli: cli,
+            cwd: workspace,
+            runId: runID,
+            approvalId: approvalId
+        )
+        try Self.throwIfDaemonRequestFailed(applyStream, verb: "integration-apply")
+        let combined = Self.mergedRunStream(approvalStream, applyStream)
+        try Self.throwIfIntegrationApplyReceiptFailed(combined)
+        return combined
+    }
+
     func runs(conversationID: String) async throws -> [ConversationRunRef] {
         let list: ConversationRunList = try await run(
             ["conversation", "runs", "--workspace", workspace.path, "--conversation", conversationID],
@@ -411,6 +470,48 @@ struct LiveConversationService: ConversationService {
         return pieces.joined(separator: "\n")
     }
 
+    private static func throwIfDaemonRequestFailed(_ stream: EngineRunStream, verb: String) throws {
+        if stream.exitCode != 0 {
+            throw ConversationServiceError.nonZeroExit(
+                stream.exitCode ?? 1,
+                stderr: "\(verb): \(daemonErrorText(stream))"
+            )
+        }
+    }
+
+    private static func throwIfIntegrationApplyReceiptFailed(_ stream: EngineRunStream) throws {
+        guard let receipt = integrationApplyReceipts(in: stream.rawLines).last else { return }
+        guard receipt.state == "integrated", receipt.mainWorkspaceModified else {
+            let reason = receipt.reasonCode.isEmpty ? receipt.state : receipt.reasonCode
+            throw ConversationServiceError.integrationApplyFailed(
+                "Integration apply did not modify the main workspace: \(reason)"
+            )
+        }
+    }
+
+    private static func mergedRunStream(_ first: EngineRunStream, _ second: EngineRunStream) -> EngineRunStream {
+        EngineRunStream(
+            engineEvents: first.engineEvents + second.engineEvents,
+            executionEvents: first.executionEvents + second.executionEvents,
+            exitCode: second.exitCode,
+            stderr: [first.stderr, second.stderr].filter { !$0.isEmpty }.joined(separator: "\n"),
+            streamFailures: first.streamFailures + second.streamFailures,
+            rawLines: first.rawLines + second.rawLines
+        )
+    }
+
+    private static func integrationApplyReceipts(in lines: [String]) -> [IntegrationApplyReceipt] {
+        lines.compactMap { line in
+            guard let data = line.data(using: .utf8),
+                  let receipt = try? JSONDecoder.opensks.decode(IntegrationApplyReceipt.self, from: data),
+                  receipt.schema == "opensks.integration-apply-receipt.v1"
+            else {
+                return nil
+            }
+            return receipt
+        }
+    }
+
     private struct CaptureResult {
         let stdout: Data
         let stderr: String
@@ -440,6 +541,13 @@ struct LiveConversationService: ConversationService {
             throw ConversationServiceError.launchFailed(error.localizedDescription)
         }
     }
+}
+
+private struct IntegrationApplyReceipt: Decodable {
+    let schema: String
+    let state: String
+    let reasonCode: String
+    let mainWorkspaceModified: Bool
 }
 
 // MARK: - Mock service
@@ -472,6 +580,7 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         context: TurnContextSelection,
         idempotencyKey: String
     )] = []
+    private(set) var applyIntegrationCandidateRequests: [String] = []
 
     let projectId: String
 
@@ -479,17 +588,22 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
     /// matching the daemon accepted-handle path; a test can request `.failed` to
     /// exercise the danger pill without touching the engine.
     let runStateOnTurn: RunState
+    private let turnStartDelayNanoseconds: UInt64?
 
     init(
         projectId: String = "mock-project",
         summaries: [ConversationSummary] = [],
         messages: [String: [ConversationMessage]] = [:],
-        runStateOnTurn: RunState = .queued
+        runs: [String: [ConversationRunRef]] = [:],
+        runStateOnTurn: RunState = .queued,
+        turnStartDelayNanoseconds: UInt64? = nil
     ) {
         self.projectId = projectId
         self.summaries = summaries
         self.messagesByConversation = messages
+        self.runsByConversation = runs
         self.runStateOnTurn = runStateOnTurn
+        self.turnStartDelayNanoseconds = turnStartDelayNanoseconds
     }
 
     private func tick() -> Int64 {
@@ -557,7 +671,21 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
     }
 
     func setPinned(id: String, pinned: Bool) async throws {
-        try mutate(id) { $0.with(pinned: pinned, updatedAtMs: tick()) }
+        try withLock {
+            guard let idx = summaries.firstIndex(where: { $0.id == id }) else {
+                throw ConversationServiceError.emptyOutput("mutate")
+            }
+            let alreadyPinned = summaries[idx].pinned
+            if pinned && !alreadyPinned {
+                let pinnedCount = summaries.filter { $0.pinned && !$0.archived }.count
+                if pinnedCount >= ConversationStore.maxPinnedConversations {
+                    throw ConversationServiceError.pinLimitExceeded(
+                        limit: ConversationStore.maxPinnedConversations
+                    )
+                }
+            }
+            summaries[idx] = summaries[idx].with(pinned: pinned, updatedAtMs: tick())
+        }
     }
 
     func setArchived(id: String, archived: Bool) async throws {
@@ -833,10 +961,7 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
             )
         }
         items.append(contentsOf: timelineItemsByConversation[id] ?? [])
-        items.sort { lhs, rhs in
-            if lhs.sequence != rhs.sequence { return lhs.sequence < rhs.sequence }
-            return lhs.id < rhs.id
-        }
+        items = orderedConversationTimelineItems(items)
         if let limit, items.count > limit {
             items = Array(items.suffix(limit))
         }
@@ -856,7 +981,10 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         context: TurnContextSelection,
         idempotencyKey: String
     ) async throws -> ConversationTurn {
-        try withLock {
+        if let turnStartDelayNanoseconds {
+            try await Task.sleep(nanoseconds: turnStartDelayNanoseconds)
+        }
+        return try withLock {
             try turnStartLocked(
                 conversationID: conversationID,
                 projectID: projectID,
@@ -907,6 +1035,15 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
 
         let turnId = mintId("turn")
         let runId = mintId("run")
+
+        if let summaryIndex = summaries.firstIndex(where: { $0.id == id }),
+           shouldAutoNameMockConversation(summaries[summaryIndex]) {
+            summaries[summaryIndex] = summaries[summaryIndex].with(
+                title: generatedMockConversationTitle(from: text),
+                titleSource: .agent,
+                updatedAtMs: tick()
+            )
+        }
 
         // 1. Persist the redacted user message BEFORE the run.
         let userMessage = appendLocked(id: id, role: .user, text: text)
@@ -1067,6 +1204,59 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         )
     }
 
+    private func completeMockResidentRunIfNeededLocked(runID targetRunID: String) {
+        for conversationID in runsByConversation.keys.sorted() {
+            var runs = runsByConversation[conversationID] ?? []
+            guard let runIndex = runs.firstIndex(where: {
+                $0.runId == targetRunID && ($0.runState == .queued || $0.runState == .running)
+            }) else {
+                continue
+            }
+            let run = runs[runIndex]
+            let finalRunState: RunState = runStateOnTurn == .failed ? .failed : .completed
+            let now = tick()
+            let assistantState: MessageState = finalRunState == .failed ? .failed : .complete
+            let assistantText = finalRunState == .failed ? "Run failed." : "Mock supervisor completed."
+
+            if var messages = messagesByConversation[conversationID],
+               let messageIndex = messages.firstIndex(where: { $0.id == run.messageId }) {
+                messages[messageIndex] = messages[messageIndex].with(
+                    state: assistantState,
+                    contentRedacted: assistantText
+                )
+                messagesByConversation[conversationID] = messages
+            }
+
+            runs[runIndex] = ConversationRunRef(
+                turnId: run.turnId,
+                runId: run.runId,
+                messageId: run.messageId,
+                relation: run.relation,
+                runState: finalRunState
+            )
+            runsByConversation[conversationID] = runs
+
+            if let summaryIndex = summaries.firstIndex(where: { $0.id == conversationID }) {
+                summaries[summaryIndex] = summaries[summaryIndex].with(
+                    status: finalRunState == .failed ? .failed : .completed,
+                    updatedAtMs: now,
+                    lastMessageAtMs: now
+                )
+            }
+            if !(executionEventsByRun[run.runId] ?? []).contains(where: { $0.id == "evt-\(run.runId)-terminal" }) {
+                executionEventsByRun[run.runId, default: []].append(executionEvent(
+                    id: "evt-\(run.runId)-terminal",
+                    runID: run.runId,
+                    sequence: 2,
+                    kind: finalRunState == .failed ? .verificationFailed : .snapshotWritten,
+                    message: assistantText,
+                    occurredAtMs: now
+                ))
+            }
+            return
+        }
+    }
+
     func subscribeRunEvents(
         runID: String,
         sinceSequence: UInt64,
@@ -1076,6 +1266,7 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
         withLock {
             subscribeRunEventsCallCount += 1
             subscribeRunEventsRequests.append((runID, sinceSequence, tailMs, pollIntervalMs))
+            completeMockResidentRunIfNeededLocked(runID: runID)
             let events = (executionEventsByRun[runID] ?? [])
                 .filter { $0.sequence > sinceSequence }
             return EngineRunStream(
@@ -1085,6 +1276,34 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
                 stderr: "",
                 streamFailures: defaultSubscribeRunFailure.map { [$0] } ?? [],
                 rawLines: []
+            )
+        }
+    }
+
+    func applyIntegrationCandidate(runID: String) async throws -> EngineRunStream {
+        withLock {
+            applyIntegrationCandidateRequests.append(runID)
+            let now = tick()
+            let event = executionEvent(
+                id: "evt-\(runID)-integration-applied",
+                runID: runID,
+                sequence: UInt64((executionEventsByRun[runID] ?? []).count + 10_000),
+                kind: .snapshotWritten,
+                message: "Applied isolated integration candidate to the main workspace.",
+                occurredAtMs: now
+            )
+            executionEventsByRun[runID, default: []].append(event)
+            return EngineRunStream(
+                engineEvents: [],
+                executionEvents: [event],
+                exitCode: 0,
+                stderr: "",
+                streamFailures: [],
+                rawLines: [
+                    """
+                    {"schema":"opensks.integration-apply-receipt.v1","state":"integrated","reason_code":"candidate_applied_to_main_workspace","main_workspace_modified":true}
+                    """
+                ]
             )
         }
     }
@@ -1100,7 +1319,7 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
     }
 
     func threadSettings(conversationID id: String) async throws -> ConversationThreadSettings {
-        withLock { settingsByConversation[id] ?? ConversationThreadSettings.defaultFor(conversationID: id, updatedAtMs: clock) }
+        withLock { settingsByConversation[id] ?? ConversationThreadSettings.defaultFor(conversationID: id) }
     }
 
     func setThreadSettings(
@@ -1125,6 +1344,65 @@ final class MockConversationService: ConversationService, @unchecked Sendable {
             throw ConversationServiceError.emptyOutput("mutate")
         }
         summaries[idx] = transform(summaries[idx])
+    }
+
+    private func shouldAutoNameMockConversation(_ summary: ConversationSummary) -> Bool {
+        guard summary.titleSource == .generated else { return false }
+        let normalized = summary.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized.isEmpty || normalized == "new conversation" || normalized == "untitled"
+    }
+
+    private func generatedMockConversationTitle(from text: String) -> String {
+        var title = text
+            .components(separatedBy: .newlines)
+            .map(sanitizedMockConversationTitleLine)
+            .first { !$0.isEmpty } ?? ""
+        title = title.trimmingCharacters(in: CharacterSet(charactersIn: "#>-* \t"))
+        let lowercased = title.lowercased()
+        for prefix in ["/goal", "$goal", "$team", "$dfix", "$answer"] {
+            if lowercased == prefix {
+                title = ""
+                break
+            }
+            if lowercased.hasPrefix(prefix + " ") {
+                title = String(title.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                break
+            }
+        }
+        title = title
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard !title.isEmpty else { return "New conversation" }
+        let maxLength = 48
+        if title.count <= maxLength { return title }
+        return "\(String(title.prefix(maxLength)).trimmingCharacters(in: .whitespacesAndNewlines))..."
+    }
+
+    private func sanitizedMockConversationTitleLine(_ line: String) -> String {
+        var title = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if title.isEmpty
+            || title.hasPrefix("<hook_prompt")
+            || title.hasPrefix("<image ")
+            || title.lowercased() == "# files mentioned by the user:"
+            || title.lowercased() == "## my request for codex:" {
+            return ""
+        }
+
+        while let stripped = stripLeadingMarkdownLink(from: title) {
+            title = stripped.trimmingCharacters(in: .whitespaces)
+        }
+        return title
+    }
+
+    private func stripLeadingMarkdownLink(from input: String) -> String? {
+        guard input.hasPrefix("["),
+              let labelEnd = input.range(of: "]("),
+              let urlEnd = input[labelEnd.upperBound...].firstIndex(of: ")")
+        else {
+            return nil
+        }
+        return String(input[input.index(after: urlEnd)...])
     }
 }
 
