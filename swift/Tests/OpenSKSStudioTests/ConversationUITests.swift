@@ -286,6 +286,25 @@ final class ConversationUITests: XCTestCase {
         XCTAssertEqual(workerRailTimelineItems(timeline).map(\.id), ["timeline-worker-warning"])
     }
 
+    func testWorkerScopedErrorsMoveOutOfMainConversationRail() throws {
+        let json = """
+        {"schema":"opensks.conversation-timeline.v1","conversation_id":"c1","items":[{"schema":"opensks.timeline-item.v1","id":"timeline-user","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":1,"kind":"user_message","state":"complete","payload":{"message_id":"u1","role":"user","message_state":"complete","content_redacted":"hi"},"created_at_ms":10,"updated_at_ms":10},{"schema":"opensks.timeline-item.v1","id":"timeline-assistant","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":2,"kind":"assistant_message","state":"completed","payload":{"message_id":"a1","role":"assistant","message_state":"complete","content_redacted":"안녕하세요. 무엇을 도와드릴까요?"},"created_at_ms":11,"updated_at_ms":11},{"schema":"opensks.timeline-item.v1","id":"timeline-worker-error","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":3,"kind":"error","state":"verification_failed","payload":{"worker_id":"turn-supervisor","role_label":"verification","content_redacted":"role worker model call failed","code":"role_worker_model_call_failed"},"created_at_ms":12,"updated_at_ms":12},{"schema":"opensks.timeline-item.v1","id":"timeline-main-error","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":4,"kind":"error","state":"verification_failed","payload":{"content_redacted":"A main run failure."},"created_at_ms":13,"updated_at_ms":13}]}
+        """
+        let timeline = try JSONDecoder.opensks
+            .decode(ConversationTimeline.self, from: Data(json.utf8))
+            .items
+
+        XCTAssertEqual(
+            mainThreadTimelineItems(timeline).map(\.id),
+            ["timeline-user", "timeline-assistant", "timeline-main-error"]
+        )
+        XCTAssertEqual(workerRailTimelineItems(timeline).map(\.id), ["timeline-worker-error"])
+        XCTAssertEqual(
+            latestAssistantReplyMessage(in: mainThreadTimelineItems(timeline))?.contentRedacted,
+            "안녕하세요. 무엇을 도와드릴까요?"
+        )
+    }
+
     func testLatestErrorTextByRunIDUsesRunScopedErrorText() throws {
         let json = """
         {"schema":"opensks.conversation-timeline.v1","conversation_id":"c1","items":[{"schema":"opensks.timeline-item.v1","id":"timeline-assistant","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":2,"kind":"assistant_message","state":"failed","payload":{"message_id":"a1","role":"assistant","message_state":"complete","content_redacted":"What would you like me to do?"},"created_at_ms":10,"updated_at_ms":10},{"schema":"opensks.timeline-item.v1","id":"timeline-error-old","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":3,"kind":"error","state":"verification_failed","payload":{"content_redacted":"old provider error"},"created_at_ms":11,"updated_at_ms":11},{"schema":"opensks.timeline-item.v1","id":"timeline-error-new","project_id":"p1","conversation_id":"c1","turn_id":"t1","run_id":"r1","sequence":4,"kind":"error","state":"verification_failed","payload":{"content_redacted":"The model call failed: provider response had no message content"},"created_at_ms":12,"updated_at_ms":12}]}

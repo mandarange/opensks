@@ -2774,7 +2774,7 @@ fn execute_claimed_conversation_turn_inner(
             &failure_signal.message,
             timestamp_ms(),
         )
-            .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?;
     }
     sink.finish(&lease.run_id)
         .map_err(|error| error.to_string())?;
@@ -4802,12 +4802,10 @@ fn dispatch_claimed_turn_via_scheduler(
         let (_snapshot, child_report) = scheduler
             .dispatch_until_idle(&mut store, &mut worker)
             .map_err(|error| error.to_string())?;
-        if child_report.failed > 0 {
-            return Err(format!(
-                "conversation turn post-root workers failed: {} failed of {} attempted",
-                child_report.failed, child_report.attempted
-            ));
-        }
+        // Role children are advisory post-root diagnostics. The root assistant
+        // result has already been produced at this point, so a verifier/planning
+        // child failure must not replace the user's answer with a supervisor log.
+        let _post_root_failures_are_diagnostic_only = child_report.failed > 0;
     }
     root_result
 }
@@ -9326,9 +9324,8 @@ mod tests {
 
     #[test]
     fn supervisor_failure_message_keeps_redacted_cause_visible() {
-        let message = supervisor_failure_message(
-            "provider said token sk-12345678901234567890 is invalid",
-        );
+        let message =
+            supervisor_failure_message("provider said token sk-12345678901234567890 is invalid");
 
         assert!(message.starts_with("TurnSupervisor failed:"));
         assert!(message.contains("provider"));
@@ -13673,6 +13670,124 @@ mod tests {
                 && event.payload["payload"]["code"] == "integration_candidate_ready"
                 && event.payload["payload"]["approval_required"] == true
         }));
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn conversation_supervisor_tick_preserves_answer_when_post_root_role_worker_fails() {
+        let workspace = temp_workspace("conversation-supervisor-post-root-role-failure");
+        let (project_id, conversation_id) = seed_conversation(&workspace);
+        let (endpoint, _max_active_role_calls) = spawn_chat_completion_server_with_role_requests(
+            "ROUTED_NOTE.md",
+            "partial role failure route dispatched",
+            3,
+        );
+        seed_healthy_provider_model_with_endpoint(&workspace, &endpoint, true);
+        {
+            let repo = ConversationRepository::open_workspace(&workspace).expect("repo");
+            let thread_settings = ConversationThreadSettings {
+                schema: CONVERSATION_THREAD_SETTINGS_SCHEMA.to_string(),
+                conversation_id: conversation_id.clone(),
+                model_selection: ModelSelection {
+                    mode: ModelSelectionMode::Pinned,
+                    model_id: Some("provider-1/code-model".to_string()),
+                    fallback_model_ids: Vec::new(),
+                },
+                reasoning_effort: ReasoningEffort::Standard,
+                execution_mode: ExecutionMode::Worktree,
+                pipeline_id: "registry-route-test".to_string(),
+                max_parallelism: 8,
+                verifier_count: 1,
+                tool_policy_id: "project-default".to_string(),
+                approval_policy_id: "safe-interactive".to_string(),
+                token_budget: None,
+                cost_budget_usd: None,
+                timeout_ms: None,
+                image_model_id: None,
+                updated_at_ms: 1_900,
+            };
+            repo.set_thread_settings(
+                &conversation_id,
+                &serde_json::to_string(&thread_settings).expect("settings json"),
+                1_900,
+            )
+            .expect("set settings");
+        }
+
+        let mut turn_request = turn_start_request(
+            &project_id,
+            &conversation_id,
+            "req-conversation-supervisor-post-root-failure-start",
+            "idem-conversation-supervisor-post-root-failure-start",
+        );
+        turn_request.message.text = "Append a dispatch note to ROUTED_NOTE.md".to_string();
+        let start = EngineRequest::conversation_turn_start(turn_request);
+        let tick = EngineRequest::conversation_supervisor_tick(
+            "req-conversation-supervisor-post-root-failure-tick",
+            "daemon-test-supervisor",
+            1_000,
+        );
+        let input = [
+            serde_json::to_string(&start).expect("start request"),
+            serde_json::to_string(&tick).expect("tick request"),
+        ]
+        .join("\n");
+
+        let output = run_stdio(
+            &(input + "\n"),
+            &DaemonOptions {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("stdio");
+        assert!(
+            !output.contains("conversation turn post-root workers failed"),
+            "{output}"
+        );
+        let accepted = accepted_lines(&output);
+        assert_eq!(accepted.len(), 1);
+        let ticks = supervisor_tick_lines(&output);
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0]["executed"]["status"], "executed", "{output}");
+        assert_eq!(ticks[0]["executed"]["run_state"], "completed", "{output}");
+
+        let repo = ConversationRepository::open_workspace(&workspace).expect("repo");
+        let messages = repo
+            .message_page(&conversation_id, None, 10)
+            .expect("messages");
+        assert_eq!(messages[1].state, MessageState::Complete);
+        assert!(
+            !messages[1]
+                .content_redacted
+                .contains("TurnSupervisor failed"),
+            "{}",
+            messages[1].content_redacted
+        );
+        assert!(
+            !messages[1]
+                .content_redacted
+                .contains("post-root workers failed"),
+            "{}",
+            messages[1].content_redacted
+        );
+        assert_eq!(
+            repo.run_projection_state(&accepted[0].run_id)
+                .expect("run state")
+                .as_deref(),
+            Some("completed")
+        );
+        let events = opensks_event_store::EventStore::open_workspace(&workspace)
+            .expect("event store")
+            .replay(&accepted[0].run_id)
+            .expect("replay events");
+        assert!(
+            events.iter().any(|event| {
+                event.kind == EventKind::VerificationFailed
+                    && event.payload["agent_event_kind"] == "error"
+                    && event.payload["payload"]["code"] == "role_worker_model_call_failed"
+            }),
+            "post-root role failure must remain visible as worker diagnostics: {events:#?}"
+        );
         let _ = std::fs::remove_dir_all(workspace);
     }
 

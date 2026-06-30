@@ -1058,7 +1058,9 @@ private func isWorkerRailTimelineItem(
     switch item.kind {
     case .warning:
         return isWorkerScopedDiagnostic(item)
-    case .error, .userMessage, .assistantMessage, .commitReceipt, .pushReceipt, .imageArtifact, .unknown:
+    case .error:
+        return isWorkerScopedDiagnostic(item)
+    case .userMessage, .assistantMessage, .commitReceipt, .pushReceipt, .imageArtifact, .unknown:
         return false
     case .patch:
         return !isMainWorkspacePatchChangeItem(item)

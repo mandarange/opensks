@@ -3068,6 +3068,9 @@ fn timeline_state_for_execution_event(event: &ExecutionEventEnvelope) -> String 
 }
 
 fn terminal_kind_for_execution_event(event: &ExecutionEventEnvelope) -> Option<&'static str> {
+    if is_advisory_role_worker_failure_event(event) {
+        return None;
+    }
     match event.kind {
         EventKind::RunCancelled => Some("cancelled"),
         EventKind::RunCompleted => Some("completed"),
@@ -3079,6 +3082,9 @@ fn terminal_kind_for_execution_event(event: &ExecutionEventEnvelope) -> Option<&
 fn run_projection_state_for_execution_event(
     event: &ExecutionEventEnvelope,
 ) -> Option<RunProjectionState> {
+    if is_advisory_role_worker_failure_event(event) {
+        return None;
+    }
     match event.kind {
         EventKind::RunStarted | EventKind::RunResumed => Some(RunProjectionState::Running),
         EventKind::RunPaused => Some(RunProjectionState::Paused),
@@ -3087,6 +3093,20 @@ fn run_projection_state_for_execution_event(
         EventKind::VerificationFailed => Some(RunProjectionState::Failed),
         _ => None,
     }
+}
+
+fn is_advisory_role_worker_failure_event(event: &ExecutionEventEnvelope) -> bool {
+    if event.kind != EventKind::VerificationFailed {
+        return false;
+    }
+    let worker_id = payload_string_deep(event, "worker_id").unwrap_or_default();
+    let work_item_id = payload_string_deep(event, "work_item_id").unwrap_or_default();
+    let code = payload_string_deep(event, "code").unwrap_or_default();
+    let reason_code = payload_string_deep(event, "reason_code").unwrap_or_default();
+    worker_id.starts_with("role-subcontract-")
+        || work_item_id.starts_with("turn-role-")
+        || code.starts_with("role_worker_")
+        || reason_code == "provider_role_call_failed"
 }
 
 fn merge_run_projection_state(
@@ -5022,6 +5042,92 @@ mod tests {
                 .as_deref(),
             Some("failed"),
             "terminal event-derived state is sticky and snapshot metadata cannot overwrite it"
+        );
+    }
+
+    #[test]
+    fn execution_event_replay_keeps_role_worker_failures_diagnostic_after_run_completed() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let (pid, cid) = project_and_conversation(&repo);
+        let accepted = repo
+            .accept_conversation_turn(
+                &sample_turn_start_request(
+                    &pid,
+                    &cid,
+                    "req-role-worker-diagnostic",
+                    "idem-role-worker-diagnostic",
+                ),
+                2_000,
+            )
+            .unwrap();
+
+        let events = vec![
+            execution_event(
+                &accepted.run_id,
+                "evt-start",
+                1,
+                EventKind::RunStarted,
+                serde_json::json!({"message": "run started"}),
+            ),
+            execution_event(
+                &accepted.run_id,
+                "evt-role-worker-failed",
+                2,
+                EventKind::VerificationFailed,
+                serde_json::json!({
+                    "agent_event_kind": "error",
+                    "worker_id": "role-subcontract-turn-role-verification",
+                    "payload": {
+                        "code": "role_worker_model_call_failed",
+                        "reason_code": "provider_role_call_failed",
+                        "content_redacted": true
+                    }
+                }),
+            ),
+            execution_event(
+                &accepted.run_id,
+                "evt-role-work-item-failed",
+                3,
+                EventKind::VerificationFailed,
+                serde_json::json!({
+                    "work_item_id": "turn-role-abc-0-verification",
+                    "lease_holder": "turn-supervisor",
+                    "from": "Running",
+                    "to": "Failed"
+                }),
+            ),
+            execution_event(
+                &accepted.run_id,
+                "evt-completed",
+                4,
+                EventKind::RunCompleted,
+                serde_json::json!({"message": "root assistant completed"}),
+            ),
+        ];
+
+        let report = repo
+            .project_execution_events_into_timeline(&accepted.run_id, &events, 2_010)
+            .unwrap();
+        assert_eq!(report.terminal_kind.as_deref(), Some("completed"));
+        assert_eq!(
+            repo.run_projection_state(&accepted.run_id)
+                .unwrap()
+                .as_deref(),
+            Some("completed")
+        );
+        assert_eq!(
+            repo.get_conversation(&cid).unwrap().unwrap().status,
+            ConversationStatus::Completed
+        );
+        let items = repo.timeline_items_for_conversation(&cid, 20).unwrap();
+        assert!(
+            items.iter().any(|item| {
+                item.id == "timeline-event-evt-role-worker-failed"
+                    && item.kind == TimelineItemKind::Error
+                    && item.payload["worker_id"] == "role-subcontract-turn-role-verification"
+                    && item.payload["code"] == "role_worker_model_call_failed"
+            }),
+            "role worker failure should remain visible as diagnostics: {items:#?}"
         );
     }
 
