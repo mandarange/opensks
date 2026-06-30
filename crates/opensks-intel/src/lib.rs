@@ -66,6 +66,13 @@ pub struct StampedFreshness {
 
 /// Compute the current freshness stamp for `workspace`.
 pub fn freshness(workspace: &Path) -> Result<FreshnessStamp, IntelError> {
+    freshness_with_index_hash(workspace, index_hash(workspace)?)
+}
+
+fn freshness_with_index_hash(
+    workspace: &Path,
+    index_hash: String,
+) -> Result<FreshnessStamp, IntelError> {
     let in_repo = in_repo(workspace);
     let head_hash = if in_repo {
         head_commit(workspace)
@@ -73,7 +80,6 @@ pub fn freshness(workspace: &Path) -> Result<FreshnessStamp, IntelError> {
         None
     };
     let worktree_hash = worktree_hash(workspace, in_repo)?;
-    let index_hash = index_hash(workspace)?;
     Ok(FreshnessStamp {
         schema: INTEL_FRESHNESS_SCHEMA.to_string(),
         head_hash,
@@ -152,6 +158,18 @@ pub fn codegraph_query(
     limit: usize,
     offset: usize,
 ) -> Result<CodegraphQuery, IntelError> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(CodegraphQuery {
+            schema: INTEL_CODEGRAPH_SCHEMA.to_string(),
+            total: 0,
+            limit,
+            offset: 0,
+            records: Vec::new(),
+            freshness: freshness(workspace)?,
+        });
+    }
+
     let graph = load_or_build_graph(workspace)?;
     let mut hits = graph.query(query);
     // Deterministic ordering for stable paging across calls: by (path, line,
@@ -175,7 +193,7 @@ pub fn codegraph_query(
             line: record.line,
         })
         .collect();
-    let freshness = freshness(workspace)?;
+    let freshness = freshness_with_index_hash(workspace, graph.to_index().workspace_fingerprint)?;
     Ok(CodegraphQuery {
         schema: INTEL_CODEGRAPH_SCHEMA.to_string(),
         total,
@@ -231,12 +249,18 @@ pub fn architecture(workspace: &Path) -> Result<Architecture, IntelError> {
 
 // --- hashing internals ------------------------------------------------------
 
-/// The codegraph index hash: load a persisted index if present, else build one
-/// once. The `workspace_fingerprint` is a digest of every record's content hash,
-/// so any symbol-level change re-indexed into the graph flips it.
+/// The codegraph index hash: load a persisted index if present, else use the
+/// empty graph fingerprint.
+///
+/// `freshness()` is used on chat startup, so it must not trigger a full
+/// workspace codegraph build. Explicit codegraph query paths may still build
+/// when no persisted index exists and pass their in-memory fingerprint through
+/// `freshness_with_index_hash`.
 fn index_hash(workspace: &Path) -> Result<String, IntelError> {
-    let graph = load_or_build_graph(workspace)?;
-    Ok(graph.to_index().workspace_fingerprint)
+    match opensks_codegraph::read_index(workspace)? {
+        Some(graph) => Ok(graph.to_index().workspace_fingerprint),
+        None => Ok(CodeGraph::default().to_index().workspace_fingerprint),
+    }
 }
 
 /// Load the persisted codegraph index, or build it once when absent.
@@ -484,6 +508,25 @@ mod tests {
     }
 
     #[test]
+    fn freshness_without_persisted_index_uses_empty_index_fingerprint() {
+        let dir = temp_workspace("freshness-no-index-build");
+        fs::write(dir.join("src/lib.rs"), "pub fn expensive_marker() {}\n").expect("write");
+
+        let stamp = freshness(&dir).expect("stamp");
+        let empty_index_hash = CodeGraph::default().to_index().workspace_fingerprint;
+        let built_index_hash = CodeGraph::index_workspace(&dir)
+            .expect("index")
+            .to_index()
+            .workspace_fingerprint;
+
+        assert_eq!(stamp.index_hash, empty_index_hash);
+        assert_ne!(
+            stamp.index_hash, built_index_hash,
+            "freshness must not build a full codegraph when no persisted index exists"
+        );
+    }
+
+    #[test]
     fn matching_stamp_is_fresh() {
         let dir = init_repo("matching");
         let stamp = freshness(&dir).expect("stamp");
@@ -678,5 +721,26 @@ mod tests {
 
         // The freshness stamp rides along.
         assert!(page1.freshness.index_hash.starts_with("fnv1a64:"));
+    }
+
+    #[test]
+    fn blank_codegraph_query_returns_empty_page_without_building_index() {
+        let dir = temp_workspace("blank-query");
+        fs::write(dir.join("src/a.rs"), "pub fn sym_one() {}\n").expect("a");
+
+        let page = codegraph_query(&dir, "   \n", 50, 25).expect("blank page");
+
+        assert_eq!(page.total, 0);
+        assert_eq!(page.limit, 50);
+        assert_eq!(
+            page.offset, 0,
+            "blank queries always reset to the empty first page"
+        );
+        assert!(page.records.is_empty());
+        assert!(
+            !opensks_codegraph::index_path(&dir).exists(),
+            "blank queries must not build or persist a codegraph index"
+        );
+        assert!(page.freshness.index_hash.starts_with("fnv1a64:"));
     }
 }

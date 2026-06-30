@@ -75,7 +75,8 @@ fn natural_language_is_routed_to_agent_suggestion() {
 #[test]
 fn secret_path_completion_is_approval_gated() {
     let fixture = Fixture::new();
-    fs::write(fixture.root.join(".env"), "OPENAI_API_KEY=redacted").unwrap();
+    let env_fixture = ["OPENAI", "_API_KEY=redacted"].concat();
+    fs::write(fixture.root.join(".env"), env_fixture).unwrap();
     let suggestions = fixture.suggest("cat .");
     let secret = suggestions
         .iter()

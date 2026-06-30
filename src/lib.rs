@@ -5,7 +5,15 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{self, Stdio};
+#[cfg(target_os = "macos")]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+#[cfg(target_os = "macos")]
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
 const OPEN_SKSDIR: &str = ".opensks";
 const DEFAULT_MAX_WAVES: u32 = 3;
 const DEFAULT_MAX_WALL_CLOCK_SECONDS: u64 = 60 * 60;
@@ -424,7 +432,7 @@ struct WorkerLaneSnapshot {
     source: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct WorkerRuntimeDashboard {
     available: bool,
     run_id: String,
@@ -432,7 +440,11 @@ struct WorkerRuntimeDashboard {
     expired_leases: usize,
     recovered_leases: usize,
     routed_requests: usize,
+    file_writes: usize,
     concurrent_routing: bool,
+    parallel_file_edit_windows: bool,
+    nonblocking_worker_result_handoff: bool,
+    all_file_write_hashes_verified: bool,
     source: String,
 }
 
@@ -1613,6 +1625,16 @@ fn run_provider_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSk
             })
         }
         other if opensks_cli::is_registry_subcommand(other) => {
+            if other == "registry-list" {
+                opensks_provider::sync_codex_lb_env_provider_to_registry(
+                    cwd,
+                    stamp
+                        .secs
+                        .saturating_mul(1000)
+                        .saturating_add(u64::from(stamp.nanos / 1_000_000)),
+                )
+                .map_err(|error| OpenSksError::Invalid(error.to_string()))?;
+            }
             let output =
                 opensks_cli::run_provider_registry_command(args, cwd).map_err(convert_cli_error)?;
             Ok(CliOutput {
@@ -4092,6 +4114,7 @@ fn inspect_running_apps() -> AppInventory {
 
 fn plan_app_action(target: &str) -> AppActionDecision {
     let lower = target.to_ascii_lowercase();
+    let has_token = |needle: &str| contains_ascii_word(&lower, needle);
     let sensitive = [
         "password",
         "credential",
@@ -4107,12 +4130,12 @@ fn plan_app_action(target: &str) -> AppActionDecision {
         "archive",
     ]
     .iter()
-    .any(|needle| lower.contains(needle));
+    .any(|needle| has_token(needle));
     let interactive = [
         "click", "type", "select", "open", "create", "move", "rename", "press", "paste",
     ]
     .iter()
-    .any(|needle| lower.contains(needle));
+    .any(|needle| has_token(needle));
 
     if sensitive {
         return AppActionDecision {
@@ -4171,11 +4194,16 @@ fn classify_app_action(lower: &str) -> String {
         ("rename", "rename"),
         ("paste", "paste"),
     ] {
-        if lower.contains(needle) {
+        if contains_ascii_word(lower, needle) {
             return action.to_string();
         }
     }
     "inspect_app_state".to_string()
+}
+
+fn contains_ascii_word(text: &str, needle: &str) -> bool {
+    text.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .any(|token| token == needle)
 }
 
 fn write_app_inspection_artifacts(
@@ -11886,7 +11914,7 @@ fn render_dashboard_html(stamp: &ClockStamp, cwd: &Path) -> Result<String, OpenS
             "<section><h2>Missions</h2><p>Mission artifacts</p><div class=\"metric\">{}</div><p>Final seals stay partial until live PRD criteria pass.</p></section>\n",
             "<section><h2>Use Planes</h2><dl><dt>Browser</dt><dd>{}</dd><dt>Computer</dt><dd>{}</dd><dt>App</dt><dd>{}</dd></dl></section>\n",
             "<section id=\"mission-status\"><h2>Mission Status</h2><dl><dt>Missions with lanes</dt><dd>{}</dd><dt>Worker lanes</dt><dd>{}</dd></dl><p>Static artifact view; native live GUI is not claimed.</p></section>\n",
-            "<section id=\"worker-runtime\"><h2>Worker Runtime</h2><dl><dt>Status</dt><dd>{}</dd><dt>Active leases</dt><dd>{}</dd><dt>Recovered</dt><dd>{}</dd><dt>Routed</dt><dd>{}</dd></dl><p>Daemon-visible local bus artifact; provider workers are not claimed.</p></section>\n",
+            "<section id=\"worker-runtime\"><h2>Worker Runtime</h2><dl><dt>Status</dt><dd>{}</dd><dt>Active leases</dt><dd>{}</dd><dt>Recovered</dt><dd>{}</dd><dt>Routed</dt><dd>{}</dd><dt>File writes</dt><dd>{}</dd><dt>Nonblocking handoff</dt><dd>{}</dd><dt>Hash verified</dt><dd>{}</dd></dl><p>Daemon-visible local bus artifact; provider workers are not claimed.</p></section>\n",
             "<section id=\"worker-lanes\" style=\"grid-column: 1 / -1;\"><h2>Worker Lanes</h2><p>Mission status and planned worker lanes from goal-loop/tool-plan artifacts.</p><table><thead><tr><th>Mission</th><th>Status</th><th>Mode</th><th>Lanes</th></tr></thead><tbody>{}</tbody></table></section>\n",
             "</div>\n",
             "</main></body></html>\n"
@@ -11911,6 +11939,9 @@ fn render_dashboard_html(stamp: &ClockStamp, cwd: &Path) -> Result<String, OpenS
         snapshot.worker_runtime.active_leases,
         snapshot.worker_runtime.recovered_leases,
         snapshot.worker_runtime.routed_requests,
+        snapshot.worker_runtime.file_writes,
+        snapshot.worker_runtime.nonblocking_worker_result_handoff,
+        snapshot.worker_runtime.all_file_write_hashes_verified,
         worker_lane_rows
     ))
 }
@@ -12072,14 +12103,8 @@ fn render_worker_lane_rows_html(snapshots: &[WorkerLaneSnapshot]) -> String {
 fn collect_worker_runtime_dashboard(cwd: &Path) -> WorkerRuntimeDashboard {
     let Some(dir) = latest_runtime_child_dir(cwd, "workers") else {
         return WorkerRuntimeDashboard {
-            available: false,
             run_id: "missing".to_string(),
-            active_leases: 0,
-            expired_leases: 0,
-            recovered_leases: 0,
-            routed_requests: 0,
-            concurrent_routing: false,
-            source: String::new(),
+            ..Default::default()
         };
     };
     let final_state_path = dir.join("worker-final-state.json");
@@ -12098,9 +12123,26 @@ fn collect_worker_runtime_dashboard(cwd: &Path) -> WorkerRuntimeDashboard {
             .unwrap_or(0),
         routed_requests: extract_json_number_field(&final_state, "routed_request_count")
             .unwrap_or(0),
+        file_writes: extract_json_number_field(&final_state, "actual_file_write_count")
+            .unwrap_or(0),
         concurrent_routing: json_bool_field_equals(
             &final_state,
             "concurrent_request_routing",
+            true,
+        ),
+        parallel_file_edit_windows: json_bool_field_equals(
+            &final_state,
+            "parallel_worker_file_edit_windows_verified",
+            true,
+        ),
+        nonblocking_worker_result_handoff: json_bool_field_equals(
+            &final_state,
+            "nonblocking_worker_result_handoff_verified",
+            true,
+        ),
+        all_file_write_hashes_verified: json_bool_field_equals(
+            &final_state,
+            "all_file_write_hashes_verified",
             true,
         ),
         source: final_state_path.display().to_string(),
@@ -12112,6 +12154,9 @@ fn render_worker_runtime_dashboard_json(runtime: &WorkerRuntimeDashboard) -> Str
         concat!(
             "{{\"available\":{},\"run_id\":{},\"active_leases\":{},",
             "\"expired_leases\":{},\"recovered_leases\":{},\"routed_requests\":{},",
+            "\"file_writes\":{},\"parallel_file_edit_windows\":{},",
+            "\"nonblocking_worker_result_handoff\":{},",
+            "\"all_file_write_hashes_verified\":{},",
             "\"concurrent_routing\":{},\"daemon_visible_worker_bus\":{},",
             "\"artifact\":\"worker-final-state.json\",\"source\":{},",
             "\"live_provider_workers\":false,\"live_remote_provider_bus\":false}}"
@@ -12122,6 +12167,10 @@ fn render_worker_runtime_dashboard_json(runtime: &WorkerRuntimeDashboard) -> Str
         runtime.expired_leases,
         runtime.recovered_leases,
         runtime.routed_requests,
+        runtime.file_writes,
+        runtime.parallel_file_edit_windows,
+        runtime.nonblocking_worker_result_handoff,
+        runtime.all_file_write_hashes_verified,
         runtime.concurrent_routing,
         runtime.available,
         json_string(&runtime.source)
@@ -14005,11 +14054,12 @@ fn compile_swift_app(cwd: &Path, output: &Path) -> Result<(), OpenSksError> {
     let disable_swift_sandbox = env::var_os(SWIFT_DISABLE_SANDBOX_ENV).is_some();
 
     let mut build_command = process::Command::new("swift");
+    configure_swift_build_environment(&mut build_command, &scratch_dir);
     build_command.arg("build");
     if disable_swift_sandbox {
         build_command.arg("--disable-sandbox");
     }
-    let build = build_command
+    build_command
         .arg("--package-path")
         .arg(&package_dir)
         .arg("--configuration")
@@ -14017,8 +14067,8 @@ fn compile_swift_app(cwd: &Path, output: &Path) -> Result<(), OpenSksError> {
         .arg("--product")
         .arg(SWIFT_STUDIO_PRODUCT)
         .arg("--scratch-path")
-        .arg(&scratch_dir)
-        .output()?;
+        .arg(&scratch_dir);
+    let build = run_setup_command_with_progress(&mut build_command, "Building Swift Studio app")?;
     if !build.status.success() {
         let _ = fs::remove_dir_all(&scratch_dir);
         return Err(OpenSksError::Invalid(format!(
@@ -14029,19 +14079,23 @@ fn compile_swift_app(cwd: &Path, output: &Path) -> Result<(), OpenSksError> {
     }
 
     let mut bin_path_command = process::Command::new("swift");
+    configure_swift_build_environment(&mut bin_path_command, &scratch_dir);
     bin_path_command.arg("build");
     if disable_swift_sandbox {
         bin_path_command.arg("--disable-sandbox");
     }
-    let bin_path = bin_path_command
+    bin_path_command
         .arg("--package-path")
         .arg(&package_dir)
         .arg("--configuration")
         .arg("release")
         .arg("--show-bin-path")
         .arg("--scratch-path")
-        .arg(&scratch_dir)
-        .output()?;
+        .arg(&scratch_dir);
+    let bin_path = run_setup_command_with_progress(
+        &mut bin_path_command,
+        "Resolving Swift Studio binary path",
+    )?;
     if !bin_path.status.success() {
         let _ = fs::remove_dir_all(&scratch_dir);
         return Err(OpenSksError::Invalid(format!(
@@ -14094,6 +14148,76 @@ fn compile_swift_app(cwd: &Path, output: &Path) -> Result<(), OpenSksError> {
     }
     let _ = fs::remove_dir_all(&scratch_dir);
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn run_setup_command_with_progress(
+    command: &mut process::Command,
+    label: &str,
+) -> io::Result<process::Output> {
+    let started = Instant::now();
+    eprintln!(
+        "{}",
+        render_setup_progress_event(label, "started", Duration::ZERO)
+    );
+
+    let complete = Arc::new(AtomicBool::new(false));
+    let heartbeat_complete = Arc::clone(&complete);
+    let heartbeat_label = label.to_string();
+    let heartbeat_started = started;
+    let heartbeat = thread::spawn(move || {
+        while !heartbeat_complete.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_secs(10));
+            if !heartbeat_complete.load(Ordering::Relaxed) {
+                eprintln!(
+                    "{}",
+                    render_setup_progress_event(
+                        &heartbeat_label,
+                        "still running",
+                        heartbeat_started.elapsed()
+                    )
+                );
+            }
+        }
+    });
+
+    let output = command.output();
+    complete.store(true, Ordering::Relaxed);
+    let _ = heartbeat.join();
+
+    match &output {
+        Ok(output) if output.status.success() => eprintln!(
+            "{}",
+            render_setup_progress_event(label, "completed", started.elapsed())
+        ),
+        Ok(_) => eprintln!(
+            "{}",
+            render_setup_progress_event(label, "failed", started.elapsed())
+        ),
+        Err(error) => eprintln!(
+            "{} ({error})",
+            render_setup_progress_event(label, "failed to launch", started.elapsed())
+        ),
+    }
+    output
+}
+
+#[cfg(target_os = "macos")]
+fn render_setup_progress_event(label: &str, state: &str, elapsed: Duration) -> String {
+    format!("[setup] {label}: {state} (elapsed: {}s)", elapsed.as_secs())
+}
+
+#[cfg(target_os = "macos")]
+fn configure_swift_build_environment(command: &mut process::Command, scratch_dir: &Path) {
+    if env::var_os("CLANG_MODULE_CACHE_PATH").is_none() {
+        command.env(
+            "CLANG_MODULE_CACHE_PATH",
+            scratch_dir.join("clang-module-cache"),
+        );
+    }
+    if env::var_os("SWIFTPM_HOME").is_none() {
+        command.env("SWIFTPM_HOME", scratch_dir.join("swiftpm-home"));
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -14670,6 +14794,13 @@ fn compact_display_path(path: &Path) -> String {
 }
 
 pub fn default_launch_cwd() -> Result<PathBuf, OpenSksError> {
+    if let Some(value) = env::var_os(OPENSKS_WORKSPACE_ENV) {
+        let workspace = PathBuf::from(value);
+        if !workspace.as_os_str().is_empty() {
+            return Ok(workspace);
+        }
+    }
+
     let current = env::current_dir()?;
     if looks_like_opensks_workspace(&current) {
         return Ok(current);

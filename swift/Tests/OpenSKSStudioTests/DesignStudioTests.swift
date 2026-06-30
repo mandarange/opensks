@@ -63,66 +63,79 @@ final class FakeDesignStudioService: DesignStudioService, @unchecked Sendable {
 
     init() {}
 
+    private func withServiceLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body()
+    }
+
     // Test setup
 
     func setAudit(_ report: DesignAuditReport, forPackage packageId: String) {
-        lock.lock(); defer { lock.unlock() }
-        auditByPackage[packageId] = report
+        withServiceLock {
+            auditByPackage[packageId] = report
+        }
     }
 
     func setActive(_ status: DesignActiveStatus) {
-        lock.lock(); defer { lock.unlock() }
-        active = status
+        withServiceLock {
+            active = status
+        }
     }
 
     func setProposedRevision(_ revision: DesignRevision, forPackage packageId: String) {
-        lock.lock(); defer { lock.unlock() }
-        cannedRevisions["propose|\(packageId)"] = revision
+        withServiceLock {
+            cannedRevisions["propose|\(packageId)"] = revision
+        }
     }
 
     // DesignStudioService
 
     func audit(packageId: String) async throws -> DesignAuditReport {
-        lock.lock(); defer { lock.unlock() }
-        auditCalls.append(packageId)
-        return scriptedAudit(packageId)
+        withServiceLock {
+            auditCalls.append(packageId)
+            return scriptedAudit(packageId)
+        }
     }
 
     func activate(packageId: String) async throws -> DesignActivateResult {
-        lock.lock(); defer { lock.unlock() }
-        activateCalls.append(packageId)
-        // ATOMIC: audit gates the activation. A failing/blocking audit throws and
-        // does NOT change the active package — exactly the CLI's behaviour.
-        let report = scriptedAudit(packageId)
-        if !report.passed && report.blocksActivation {
-            throw DesignStudioServiceError.auditFailed(findings: report.findings)
+        try withServiceLock {
+            activateCalls.append(packageId)
+            // ATOMIC: audit gates the activation. A failing/blocking audit throws and
+            // does NOT change the active package — exactly the CLI's behaviour.
+            let report = scriptedAudit(packageId)
+            if !report.passed && report.blocksActivation {
+                throw DesignStudioServiceError.auditFailed(findings: report.findings)
+            }
+            let previous = active.activePackage
+            active = DesignActiveStatus(activePackage: packageId, activatedRevision: active.activatedRevision)
+            return DesignActivateResult(
+                activated: true,
+                packageId: packageId,
+                previousActive: previous,
+                auditPassed: true
+            )
         }
-        let previous = active.activePackage
-        active = DesignActiveStatus(activePackage: packageId, activatedRevision: active.activatedRevision)
-        return DesignActivateResult(
-            activated: true,
-            packageId: packageId,
-            previousActive: previous,
-            auditPassed: true
-        )
     }
 
     func activeStatus() async throws -> DesignActiveStatus {
-        lock.lock(); defer { lock.unlock() }
-        activeStatusCallCount += 1
-        return active
+        withServiceLock {
+            activeStatusCallCount += 1
+            return active
+        }
     }
 
     func proposeRevision(packageId: String) async throws -> DesignRevision {
-        lock.lock(); defer { lock.unlock() }
-        proposeCalls.append(packageId)
-        if let canned = cannedRevisions["propose|\(packageId)"] { return canned }
-        return DesignRevision(
-            revisionId: "rev-\(proposeCalls.count)",
-            packageId: packageId,
-            state: .proposed,
-            proofRef: "proof://\(packageId)/rev-\(proposeCalls.count)"
-        )
+        withServiceLock {
+            proposeCalls.append(packageId)
+            if let canned = cannedRevisions["propose|\(packageId)"] { return canned }
+            return DesignRevision(
+                revisionId: "rev-\(proposeCalls.count)",
+                packageId: packageId,
+                state: .proposed,
+                proofRef: "proof://\(packageId)/rev-\(proposeCalls.count)"
+            )
+        }
     }
 
     func acceptRevision(revisionId: String) async throws -> DesignRevision {
@@ -138,32 +151,36 @@ final class FakeDesignStudioService: DesignStudioService, @unchecked Sendable {
     }
 
     func setRegistryPackages(_ packages: [DesignPackageListEntry]) {
-        lock.lock(); defer { lock.unlock() }
-        registryPackages = packages
+        withServiceLock {
+            registryPackages = packages
+        }
     }
 
     func saveTokens(packageId: String, tokens: [DesignTokenEntry]) async throws -> DesignSaveResult {
-        lock.lock(); defer { lock.unlock() }
-        saveCalls.append((packageId: packageId, tokens: tokens))
-        return DesignSaveResult(
-            packageId: packageId,
-            updated: tokens.count,
-            unknownPaths: [],
-            total: tokens.count,
-            contentHash: "fake"
-        )
+        withServiceLock {
+            saveCalls.append((packageId: packageId, tokens: tokens))
+            return DesignSaveResult(
+                packageId: packageId,
+                updated: tokens.count,
+                unknownPaths: [],
+                total: tokens.count,
+                contentHash: "fake"
+            )
+        }
     }
 
     func compile(packageId: String) async throws -> DesignCompileResult {
-        lock.lock(); defer { lock.unlock() }
-        compileCalls.append(packageId)
-        return DesignCompileResult(packageId: packageId, ok: true, swiftBytes: 256, error: nil)
+        withServiceLock {
+            compileCalls.append(packageId)
+            return DesignCompileResult(packageId: packageId, ok: true, swiftBytes: 256, error: nil)
+        }
     }
 
     func listPackages() async throws -> [DesignPackageListEntry] {
-        lock.lock(); defer { lock.unlock() }
-        listCallCount += 1
-        return registryPackages
+        withServiceLock {
+            listCallCount += 1
+            return registryPackages
+        }
     }
 
     private func transition(
@@ -171,14 +188,15 @@ final class FakeDesignStudioService: DesignStudioService, @unchecked Sendable {
         to state: DesignRevisionState,
         record: (String) -> Void
     ) -> DesignRevision {
-        lock.lock(); defer { lock.unlock() }
-        record(revisionId)
-        return DesignRevision(
-            revisionId: revisionId,
-            packageId: "",
-            state: state,
-            proofRef: "proof://\(revisionId)/\(state.rawValue)"
-        )
+        withServiceLock {
+            record(revisionId)
+            return DesignRevision(
+                revisionId: revisionId,
+                packageId: "",
+                state: state,
+                proofRef: "proof://\(revisionId)/\(state.rawValue)"
+            )
+        }
     }
 
     private func scriptedAudit(_ packageId: String) -> DesignAuditReport {

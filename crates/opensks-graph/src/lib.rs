@@ -563,9 +563,12 @@ fn objective_pipeline_graph(request: &opensks_contracts::ObjectivePlanRequest) -
 
 const IMAGE_TERMS: &[&str] = &["image", "vision", "visual", "screenshot", "ui"];
 const RESEARCH_TERMS: &[&str] = &["research", "web", "docs", "current", "latest"];
+const MAX_OBJECTIVE_PLAN_PARALLELISM: u32 = 128;
 
 fn normalized_max_parallelism(request: &opensks_contracts::ObjectivePlanRequest) -> u32 {
-    request.max_parallelism.clamp(1, 32)
+    request
+        .max_parallelism
+        .clamp(1, MAX_OBJECTIVE_PLAN_PARALLELISM)
 }
 
 fn normalized_role_count(request: &opensks_contracts::ObjectivePlanRequest) -> u32 {
@@ -2065,6 +2068,53 @@ mod tests {
             template.shard_policy_required_verifier_count
                 == Some(shard_policy.verifier_shard_count as usize)
         }));
+    }
+
+    #[test]
+    fn objective_planner_preserves_x128_parallelism() {
+        let mut request =
+            opensks_contracts::ObjectivePlanRequest::new("Run a broad parallel coding review");
+        request.max_parallelism = 128;
+        request.role_count = 128;
+
+        let planned = plan_graph_from_objective(&request);
+        assert_eq!(planned.graph.policies.max_parallelism, 128);
+
+        let shard_policy = planned
+            .compiled_plan
+            .shard_policy
+            .as_ref()
+            .expect("planner shard policy");
+        assert_eq!(shard_policy.max_parallelism, 128);
+        assert_eq!(shard_policy.role_count, 128);
+        assert_eq!(shard_policy.implementation_shard_count, 128);
+        assert_eq!(shard_policy.verifier_shard_count, 128);
+    }
+
+    #[test]
+    fn objective_planner_clamps_parallelism_above_supported_cap() {
+        let mut request =
+            opensks_contracts::ObjectivePlanRequest::new("Run too many parallel workers");
+        request.max_parallelism = 256;
+        request.role_count = 256;
+
+        let planned = plan_graph_from_objective(&request);
+        assert_eq!(
+            planned.graph.policies.max_parallelism,
+            MAX_OBJECTIVE_PLAN_PARALLELISM
+        );
+
+        let shard_policy = planned
+            .compiled_plan
+            .shard_policy
+            .as_ref()
+            .expect("planner shard policy");
+        assert_eq!(shard_policy.max_parallelism, MAX_OBJECTIVE_PLAN_PARALLELISM);
+        assert_eq!(shard_policy.role_count, MAX_OBJECTIVE_PLAN_PARALLELISM);
+        assert_eq!(
+            shard_policy.implementation_shard_count,
+            MAX_OBJECTIVE_PLAN_PARALLELISM
+        );
     }
 
     #[test]

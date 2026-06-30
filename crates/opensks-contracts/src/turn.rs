@@ -17,6 +17,9 @@ pub const CONVERSATION_TURN_START_REQUEST_SCHEMA: &str =
     "opensks.conversation-turn-start-request.v1";
 pub const CONVERSATION_TURN_ACCEPTED_SCHEMA: &str = "opensks.conversation-turn-accepted.v1";
 pub const CONVERSATION_THREAD_SETTINGS_SCHEMA: &str = "opensks.thread-settings.v1";
+pub const APPROVAL_POLICY_AUTOPILOT: &str = "autopilot";
+pub const APPROVAL_POLICY_MAD_SKS: &str = "mad-sks";
+pub const APPROVAL_POLICY_SAFE_INTERACTIVE: &str = "safe-interactive";
 pub const TIMELINE_ITEM_SCHEMA: &str = "opensks.timeline-item.v1";
 
 /// Whether the model is auto-routed or pinned by the user.
@@ -176,10 +179,10 @@ impl ConversationThreadSettings {
             reasoning_effort: ReasoningEffort::Standard,
             execution_mode: ExecutionMode::Worktree,
             pipeline_id: "auto".to_string(),
-            max_parallelism: 4,
+            max_parallelism: 16,
             verifier_count: 1,
             tool_policy_id: "project-default".to_string(),
-            approval_policy_id: "safe-interactive".to_string(),
+            approval_policy_id: APPROVAL_POLICY_AUTOPILOT.to_string(),
             token_budget: None,
             cost_budget_usd: None,
             timeout_ms: None,
@@ -294,6 +297,12 @@ mod tests {
     }
 
     #[test]
+    fn thread_settings_default_to_autopilot_policy() {
+        let settings = ConversationThreadSettings::default_for("conv-1", 7);
+        assert_eq!(settings.approval_policy_id, APPROVAL_POLICY_AUTOPILOT);
+    }
+
+    #[test]
     fn accepted_state_is_not_terminal() {
         let accepted = ConversationTurnAccepted {
             schema: CONVERSATION_TURN_ACCEPTED_SCHEMA.to_string(),
@@ -314,6 +323,7 @@ mod tests {
         let settings = ConversationThreadSettings::default_for("conv-1", 42);
         assert_eq!(settings.model_selection.mode, ModelSelectionMode::Auto);
         assert_eq!(settings.execution_mode, ExecutionMode::Worktree);
+        assert_eq!(settings.max_parallelism, 16);
         let json = serde_json::to_string(&settings).unwrap();
         let parsed: ConversationThreadSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(settings, parsed);

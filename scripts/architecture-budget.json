@@ -54,8 +54,6 @@
       "reasoning_usage",
       "run_git_command",
       "git_usage",
-      "run_worker_command",
-      "worker_usage",
       "run_scheduler_command",
       "scheduler_usage",
       "run_perf_command",
@@ -77,6 +75,14 @@
       "render_scheduler_plan_json",
       "render_scheduler_events_jsonl",
       "render_scheduler_final_state_json"
+    ]
+  },
+  "crates/opensks-cli/src/worker_runtime.rs": {
+    "max_lines": 700,
+    "max_public_fns": 2,
+    "allowed_public_fns": [
+      "run_worker_command",
+      "worker_usage"
     ]
   },
   "crates/opensks-adapter/src/lib.rs": {

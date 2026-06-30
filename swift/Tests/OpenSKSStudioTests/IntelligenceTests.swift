@@ -191,6 +191,7 @@ final class IntelligenceTests: XCTestCase {
         let service = MockIntelligenceService(current: stamp())
         service.setCodeGraphCorpus(bigCorpus(5000))
         let store = IntelligenceStore(service: service, codeGraphLimit: 100)
+        store.codeGraphQuery = "sym"
 
         await store.loadCodeGraphPage(offset: 0)
 
@@ -203,6 +204,7 @@ final class IntelligenceTests: XCTestCase {
         let request = try XCTUnwrap(service.codeGraphPageRequests.first)
         XCTAssertEqual(request.limit, 100)
         XCTAssertEqual(request.offset, 0)
+        XCTAssertEqual(service.codeGraphQueries.first, "sym")
         XCTAssertLessThan(store.codeGraphRecords.count, store.codeGraphTotal, "never the whole graph")
 
         // Paging forward asks for the NEXT window (offset 100), still one page.
@@ -214,12 +216,37 @@ final class IntelligenceTests: XCTestCase {
         XCTAssertTrue(service.codeGraphPageRequests.allSatisfy { $0.limit == 100 })
     }
 
+    /// A blank code-graph query is not a query: it clears stale results locally
+    /// and must not spawn the live service's heavy `codegraph-query` process.
+    func testBlankCodeGraphQueryClearsResultsWithoutServiceCall() async throws {
+        let service = MockIntelligenceService(current: stamp())
+        service.setCodeGraphCorpus(bigCorpus(5000))
+        let store = IntelligenceStore(service: service, codeGraphLimit: 100)
+        store.codeGraphQuery = "  sym  "
+
+        await store.loadCodeGraphPage(offset: 0)
+        XCTAssertEqual(store.codeGraphRecords.count, 100)
+        XCTAssertEqual(service.codeGraphQueries, ["sym"], "queries are normalized before hitting the service")
+
+        store.codeGraphQuery = "   "
+        await store.runCodeGraphQuery()
+
+        XCTAssertTrue(store.codeGraphRecords.isEmpty)
+        XCTAssertEqual(store.codeGraphTotal, 0)
+        XCTAssertEqual(store.codeGraphOffset, 0)
+        XCTAssertNil(store.codeGraphStamp)
+        XCTAssertFalse(store.codeGraphBadge.isFresh)
+        XCTAssertEqual(service.codeGraphPageRequests.count, 1, "blank queries must not reach the service")
+        XCTAssertEqual(service.codeGraphQueries, ["sym"])
+    }
+
     /// A large fixture renders the explorer at a FIXED size (ImageRenderer non-nil)
     /// — proving the paged page draws regardless of the 5000-symbol corpus size.
     func testCodeGraphExplorerRendersLargeFixtureAtFixedSize() async throws {
         let service = MockIntelligenceService(current: stamp())
         service.setCodeGraphCorpus(bigCorpus(5000))
         let store = IntelligenceStore(service: service, codeGraphLimit: 100)
+        store.codeGraphQuery = "symbol"
         await store.loadCodeGraphPage(offset: 0)
 
         let explorer = CodeGraphExplorer(records: store.codeGraphRecords)
@@ -267,6 +294,7 @@ final class IntelligenceTests: XCTestCase {
             IntelCodeGraphRecord(path: "Sources/Graph.swift", symbol: "Foo", kind: "type", line: 9)
         ])
         let store = IntelligenceStore(service: service)
+        store.codeGraphQuery = "Foo"
         await store.loadArchitecture()
         await store.loadCodeGraphPage(offset: 0)
 
@@ -303,6 +331,7 @@ final class IntelligenceTests: XCTestCase {
         ))
         service.setCodeGraphCorpus(bigCorpus(5000))
         let store = IntelligenceStore(service: service, codeGraphLimit: 100)
+        store.codeGraphQuery = "symbol"
         await store.loadAll()
 
         let view = IntelligenceView(store: store).frame(width: 1280, height: 800)
@@ -318,6 +347,7 @@ final class IntelligenceTests: XCTestCase {
         service.setArchitecture(architecture(stamp: stamp(), refs: ["Sources/x.swift"]))
         service.setCodeGraphCorpus(bigCorpus(5000))
         let store = IntelligenceStore(service: service, codeGraphLimit: 100)
+        store.codeGraphQuery = "symbol"
         await store.loadAll()
 
         for width in [1024.0, 1440.0] {
@@ -338,6 +368,7 @@ final class IntelligenceTests: XCTestCase {
         let service = MockIntelligenceService(current: stamp())
         service.setCodeGraphCorpus(bigCorpus(5000))
         let store = IntelligenceStore(service: service, codeGraphLimit: 100)
+        store.codeGraphQuery = "symbol"
         await store.loadCodeGraphPage(offset: 0)
 
         for width in [1024.0, 1440.0] {

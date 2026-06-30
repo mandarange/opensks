@@ -99,16 +99,24 @@ pub fn create_isolation(
         if let Some(parent) = worktree_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        run_git(
+        let worktree_path_str = path_str(&worktree_path)?;
+        let mut reason_code = "git_worktree_created";
+        let add_result = run_git(
             &repo.root,
-            [
-                "worktree",
-                "add",
-                "--detach",
-                path_str(&worktree_path)?,
-                &repo.head,
-            ],
-        )?;
+            ["worktree", "add", "--detach", worktree_path_str, &repo.head],
+        );
+        if let Err(error) = add_result {
+            if is_stale_registered_worktree_error(&error) {
+                run_git(&repo.root, ["worktree", "prune"])?;
+                run_git(
+                    &repo.root,
+                    ["worktree", "add", "--detach", worktree_path_str, &repo.head],
+                )?;
+                reason_code = "git_worktree_created_after_prune";
+            } else {
+                return Err(error);
+            }
+        }
         return Ok(GitIsolationReport {
             schema: GIT_ISOLATION_SCHEMA.to_string(),
             id: format!("isolation-{run_id}-{worker_id}"),
@@ -117,7 +125,7 @@ pub fn create_isolation(
             base_commit: Some(repo.head),
             worktree_path: worktree_path.display().to_string(),
             git_available: true,
-            reason_code: "git_worktree_created".to_string(),
+            reason_code: reason_code.to_string(),
             submodule_detected: repo.submodule_detected,
             lfs_detected: repo.lfs_detected,
         });
@@ -381,6 +389,16 @@ pub fn check_unified_diff_apply(
     run_git_with_stdin(workspace, ["apply", "--check"], unified_diff)
 }
 
+pub fn check_unified_diff_reverse_apply(
+    workspace: &Path,
+    unified_diff: &str,
+) -> Result<(), GitError> {
+    if discover_repository(workspace).is_none() {
+        return Err(GitError::GitRequired);
+    }
+    run_git_with_stdin(workspace, ["apply", "--reverse", "--check"], unified_diff)
+}
+
 pub fn apply_unified_diff_with_rollback<F>(
     workspace: &Path,
     envelope: &PatchEnvelope,
@@ -422,7 +440,23 @@ pub fn working_tree_diff(workspace: &Path, target_paths: &[String]) -> Result<St
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    let mut diff = String::from_utf8_lossy(&output.stdout).to_string();
+    for target in target_paths {
+        let path = resolve_repo_path(workspace, target)?;
+        if path.is_file() && !is_tracked_path(workspace, target)? {
+            let untracked_diff = untracked_file_diff(workspace, target)?;
+            if !untracked_diff.trim().is_empty() {
+                if !diff.ends_with('\n') && !diff.is_empty() {
+                    diff.push('\n');
+                }
+                diff.push_str(&untracked_diff);
+                if !diff.ends_with('\n') {
+                    diff.push('\n');
+                }
+            }
+        }
+    }
+    Ok(diff)
 }
 
 pub fn target_paths_changed_since_base(
@@ -765,6 +799,34 @@ fn is_dirty_path(workspace: &Path, target: &str) -> Result<bool, GitError> {
     Ok(!output.trim().is_empty())
 }
 
+fn is_tracked_path(workspace: &Path, target: &str) -> Result<bool, GitError> {
+    let output = Command::new("git")
+        .arg("ls-files")
+        .arg("--error-unmatch")
+        .arg("--")
+        .arg(target)
+        .current_dir(workspace)
+        .output()?;
+    Ok(output.status.success())
+}
+
+fn untracked_file_diff(workspace: &Path, target: &str) -> Result<String, GitError> {
+    let output = Command::new("git")
+        .arg("diff")
+        .arg("--no-index")
+        .arg("--")
+        .arg("/dev/null")
+        .arg(target)
+        .current_dir(workspace)
+        .output()?;
+    if output.status.success() || output.status.code() == Some(1) {
+        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    }
+    Err(GitError::GitCommand(
+        String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    ))
+}
+
 fn copy_snapshot(source: &Path, target: &Path) -> Result<(), GitError> {
     if target.exists() {
         fs::remove_dir_all(target)?;
@@ -807,6 +869,13 @@ fn git<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String, GitError> 
 
 fn run_git<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<(), GitError> {
     git(cwd, args).map(|_| ())
+}
+
+fn is_stale_registered_worktree_error(error: &GitError) -> bool {
+    let GitError::GitCommand(message) = error else {
+        return false;
+    };
+    message.contains("is a missing but already registered worktree")
 }
 
 fn run_git_with_stdin<const N: usize>(
@@ -927,6 +996,28 @@ mod tests {
         assert!(!Path::new(&report.worktree_path).exists());
         let worktree_list = git(&repo, ["worktree", "list"]).expect("worktree list");
         assert!(!worktree_list.contains("worker1"));
+    }
+
+    #[test]
+    fn create_isolation_prunes_missing_registered_worktree_and_retries() {
+        let repo = init_repo("worktree-stale-registration");
+        let first = create_isolation(&repo, "run1", "worker1").expect("first isolation");
+        let stale_path = PathBuf::from(&first.worktree_path);
+        fs::remove_dir_all(&stale_path).expect("simulate externally removed worktree path");
+        let stale_list = git(&repo, ["worktree", "list", "--porcelain"]).expect("stale list");
+        assert!(
+            stale_list.contains(stale_path.to_string_lossy().as_ref()),
+            "git metadata should still reference the missing worktree before prune"
+        );
+
+        let recovered = create_isolation(&repo, "run1", "worker1").expect("recovered isolation");
+
+        assert_eq!(recovered.mode, IsolationMode::GitWorktree);
+        assert_eq!(recovered.reason_code, "git_worktree_created_after_prune");
+        assert!(Path::new(&recovered.worktree_path).join(".git").exists());
+        let recovered_list =
+            git(&repo, ["worktree", "list", "--porcelain"]).expect("recovered list");
+        assert!(recovered_list.contains(&recovered.worktree_path));
     }
 
     #[test]
@@ -1081,6 +1172,20 @@ index 3b18e51..a5df3c0 100644
         assert!(diff.contains("diff --git a/file.txt b/file.txt"));
         assert!(diff.contains("-before"));
         assert!(diff.contains("+after"));
+        assert!(!diff.contains("other.txt"));
+    }
+
+    #[test]
+    fn working_tree_diff_includes_untracked_target_file() {
+        let repo = init_repo("working-tree-diff-untracked");
+        fs::write(repo.join("new.txt"), "created\n").expect("write untracked file");
+        fs::write(repo.join("other.txt"), "other\n").expect("write other");
+
+        let diff = working_tree_diff(&repo, &["new.txt".to_string()]).expect("working tree diff");
+
+        assert!(diff.contains("diff --git a/new.txt b/new.txt"));
+        assert!(diff.contains("new file mode"));
+        assert!(diff.contains("+created"));
         assert!(!diff.contains("other.txt"));
     }
 

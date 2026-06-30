@@ -135,13 +135,11 @@ impl OpenRouterAdapter {
             return Err(AgentAdapterError::Provider(redact(message)));
         }
 
-        parsed
-            .pointer("/choices/0/message/content")
-            .and_then(|c| c.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| {
-                AgentAdapterError::Provider("provider response had no message content".to_string())
-            })
+        let message = parsed
+            .pointer("/choices/0/message")
+            .ok_or_else(|| AgentAdapterError::Provider(empty_chat_message_diagnostic(&parsed)))?;
+        assistant_text_from_chat_message(message)
+            .ok_or_else(|| AgentAdapterError::Provider(empty_chat_message_diagnostic(&parsed)))
     }
 }
 
@@ -770,7 +768,15 @@ fn parse_responses_transport_body(body: &str) -> Result<serde_json::Value, Agent
     let mut text = String::new();
     let mut completed_response = None;
     let mut function_arguments: BTreeMap<String, String> = BTreeMap::new();
+    let mut current_event_type: Option<String> = None;
     for line in body.lines() {
+        if let Some(event_type) = line.trim().strip_prefix("event:") {
+            let event_type = event_type.trim();
+            if !event_type.is_empty() {
+                current_event_type = Some(event_type.to_string());
+            }
+            continue;
+        }
         let Some(payload) = line.trim().strip_prefix("data:") else {
             continue;
         };
@@ -781,7 +787,11 @@ fn parse_responses_transport_body(body: &str) -> Result<serde_json::Value, Agent
         let Ok(event) = serde_json::from_str::<serde_json::Value>(payload) else {
             continue;
         };
-        match event.get("type").and_then(serde_json::Value::as_str) {
+        let event_type = event
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .or(current_event_type.as_deref());
+        match event_type {
             Some("response.completed") => {
                 if let Some(response) = event.get("response") {
                     completed_response = Some(response.clone());
@@ -822,6 +832,26 @@ fn parse_responses_transport_body(body: &str) -> Result<serde_json::Value, Agent
                     text.push_str(delta);
                 }
             }
+            Some("response.output_text.done")
+            | Some("response.refusal.done")
+            | Some("response.content_part.done") => {
+                collect_responses_event_text(&event, &mut text);
+            }
+            Some("response.message.done") => {
+                if let Some(item) = event
+                    .get("message")
+                    .or_else(|| event.get("item"))
+                    .or_else(|| event.get("response"))
+                {
+                    output_items.push(response_item_with_streamed_arguments(
+                        item,
+                        &event,
+                        &function_arguments,
+                    ));
+                } else {
+                    collect_responses_event_text(&event, &mut text);
+                }
+            }
             _ => {
                 if let Some(response) = event.get("response") {
                     completed_response = Some(response.clone());
@@ -831,6 +861,8 @@ fn parse_responses_transport_body(body: &str) -> Result<serde_json::Value, Agent
                         &event,
                         &function_arguments,
                     ));
+                } else {
+                    collect_responses_event_text(&event, &mut text);
                 }
             }
         }
@@ -847,6 +879,24 @@ fn parse_responses_transport_body(body: &str) -> Result<serde_json::Value, Agent
     Err(AgentAdapterError::Provider(
         "provider returned non-JSON".to_string(),
     ))
+}
+
+fn collect_responses_event_text(event: &serde_json::Value, text: &mut String) {
+    let mut parts = Vec::new();
+    for key in ["delta", "text", "output_text", "content", "refusal"] {
+        if let Some(value) = event.get(key) {
+            collect_chat_content_text(value, &mut parts);
+        }
+    }
+    for key in ["part", "message", "item"] {
+        if let Some(value) = event.get(key) {
+            collect_response_message_text(value, &mut parts);
+        }
+    }
+    let joined = parts.join("\n").trim().to_string();
+    if !joined.is_empty() {
+        text.push_str(&joined);
+    }
 }
 
 fn response_event_item_key(
@@ -908,8 +958,16 @@ fn response_body_has_output(response: &serde_json::Value) -> bool {
             .get("output_text")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|text| !text.trim().is_empty())
-        || response.pointer("/choices/0/message").is_some()
-        || response.pointer("/response/choices/0/message").is_some()
+        || response
+            .pointer("/response/output_text")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
+        || response
+            .pointer("/choices/0/message")
+            .is_some_and(chat_message_has_assistant_output)
+        || response
+            .pointer("/response/choices/0/message")
+            .is_some_and(chat_message_has_assistant_output)
 }
 
 fn responses_body_from_chat_body(
@@ -991,10 +1049,16 @@ fn response_tool_from_chat_tool(tool: &serde_json::Value) -> Option<serde_json::
 fn chat_completion_from_responses_body(
     response: &serde_json::Value,
 ) -> Result<serde_json::Value, AgentAdapterError> {
-    if response.pointer("/choices/0/message").is_some() {
+    if response
+        .pointer("/choices/0/message")
+        .is_some_and(chat_message_has_assistant_output)
+    {
         return Ok(response.clone());
     }
-    if let Some(message) = response.pointer("/response/choices/0/message") {
+    if let Some(message) = response
+        .pointer("/response/choices/0/message")
+        .filter(|message| chat_message_has_assistant_output(message))
+    {
         return Ok(serde_json::json!({
             "choices": [{
                 "index": 0,
@@ -1004,40 +1068,25 @@ fn chat_completion_from_responses_body(
             "usage": response.get("usage").cloned().unwrap_or(serde_json::Value::Null),
         }));
     }
-    let output = response
-        .get("output")
-        .or_else(|| response.pointer("/response/output"))
-        .and_then(serde_json::Value::as_array);
     let mut text_parts = Vec::new();
     let mut tool_calls = Vec::new();
-    if let Some(output) = output {
-        for item in output {
-            match item.get("type").and_then(serde_json::Value::as_str) {
-                Some("message") => collect_response_message_text(item, &mut text_parts),
-                Some("function_call") => {
-                    if let Some(call) = chat_tool_call_from_response_item(item) {
-                        tool_calls.push(call);
-                    }
-                }
-                Some("custom_tool_call") => {
-                    if let Some(call) = chat_tool_call_from_response_item(item) {
-                        tool_calls.push(call);
-                    }
-                }
-                Some("output_text") => {
-                    if let Some(text) = item.get("text").and_then(serde_json::Value::as_str) {
-                        text_parts.push(text.to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    if let Some(text) = response
-        .get("output_text")
-        .and_then(serde_json::Value::as_str)
+    collect_response_output(
+        response
+            .get("output")
+            .or_else(|| response.pointer("/response/output")),
+        &mut text_parts,
+        &mut tool_calls,
+    );
+    if text_parts.is_empty()
+        && let Some(text) = response
+            .get("output_text")
+            .or_else(|| response.pointer("/response/output_text"))
+            .and_then(serde_json::Value::as_str)
     {
         text_parts.push(text.to_string());
+    }
+    if text_parts.is_empty() && tool_calls.is_empty() {
+        collect_fallback_response_text(response, &mut text_parts);
     }
     let mut message = serde_json::json!({
         "role": "assistant",
@@ -1070,26 +1119,194 @@ fn chat_completion_from_responses_body(
     }))
 }
 
-fn collect_response_message_text(item: &serde_json::Value, text_parts: &mut Vec<String>) {
-    if let Some(content) = item.get("content").and_then(serde_json::Value::as_array) {
-        for part in content {
-            match part.get("type").and_then(serde_json::Value::as_str) {
-                Some("output_text") => {
-                    if let Some(text) = part.get("text").and_then(serde_json::Value::as_str) {
-                        text_parts.push(text.to_string());
-                    }
-                }
-                Some("refusal") => {
-                    if let Some(text) = part.get("refusal").and_then(serde_json::Value::as_str) {
-                        text_parts.push(text.to_string());
-                    }
-                }
-                _ => {}
+fn collect_response_output(
+    output: Option<&serde_json::Value>,
+    text_parts: &mut Vec<String>,
+    tool_calls: &mut Vec<serde_json::Value>,
+) {
+    match output {
+        Some(serde_json::Value::Array(items)) => {
+            for item in items {
+                collect_response_output_item(item, text_parts, tool_calls);
             }
         }
-    } else if let Some(text) = item.get("content").and_then(serde_json::Value::as_str) {
+        Some(serde_json::Value::Object(_)) => {
+            if let Some(value) = output {
+                collect_response_output_item(value, text_parts, tool_calls);
+            }
+        }
+        Some(value) => collect_chat_content_text(value, text_parts),
+        None => {}
+    }
+}
+
+fn collect_response_output_item(
+    item: &serde_json::Value,
+    text_parts: &mut Vec<String>,
+    tool_calls: &mut Vec<serde_json::Value>,
+) {
+    match item.get("type").and_then(serde_json::Value::as_str) {
+        Some("message") => collect_response_message_text(item, text_parts),
+        Some("function_call") | Some("custom_tool_call") => {
+            if let Some(call) = chat_tool_call_from_response_item(item) {
+                tool_calls.push(call);
+            }
+        }
+        Some("output_text") => {
+            if let Some(text) = item.get("text").and_then(serde_json::Value::as_str) {
+                push_nonempty_text(text_parts, text);
+            }
+        }
+        _ => collect_fallback_message_like_text(item, text_parts),
+    }
+}
+
+fn chat_message_has_assistant_output(message: &serde_json::Value) -> bool {
+    assistant_text_from_chat_message(message).is_some()
+        || message
+            .get("tool_calls")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|calls| !calls.is_empty())
+}
+
+fn collect_response_message_text(item: &serde_json::Value, text_parts: &mut Vec<String>) {
+    if let Some(content) = item.get("content") {
+        collect_chat_content_text(content, text_parts);
+    }
+    for key in ["text", "output_text"] {
+        if let Some(value) = item.get(key) {
+            collect_chat_content_text(value, text_parts);
+        }
+    }
+    if let Some(refusal) = item.get("refusal").and_then(serde_json::Value::as_str) {
+        push_nonempty_text(text_parts, refusal);
+    }
+}
+
+pub fn assistant_text_from_chat_message(message: &serde_json::Value) -> Option<String> {
+    let mut text_parts = Vec::new();
+    if let Some(content) = message.get("content") {
+        collect_chat_content_text(content, &mut text_parts);
+    }
+    for key in ["text", "output_text", "refusal"] {
+        if let Some(value) = message.get(key) {
+            collect_chat_content_text(value, &mut text_parts);
+        }
+    }
+    let text = text_parts.join("\n").trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+fn collect_chat_content_text(content: &serde_json::Value, text_parts: &mut Vec<String>) {
+    match content {
+        serde_json::Value::String(text) => push_nonempty_text(text_parts, text),
+        serde_json::Value::Array(parts) => {
+            for part in parts {
+                collect_chat_content_text(part, text_parts);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            let before = text_parts.len();
+            for key in ["text", "output_text", "refusal", "value", "parts"] {
+                if let Some(value) = object.get(key) {
+                    collect_chat_content_text(value, text_parts);
+                }
+            }
+            if text_parts.len() == before {
+                if let Some(nested) = object.get("content") {
+                    collect_chat_content_text(nested, text_parts);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_fallback_response_text(response: &serde_json::Value, text_parts: &mut Vec<String>) {
+    collect_fallback_message_like_text(response, text_parts);
+    if !text_parts.is_empty() {
+        return;
+    }
+    for pointer in [
+        "/content",
+        "/text",
+        "/message/content",
+        "/message/text",
+        "/message/output_text",
+        "/response/content",
+        "/response/text",
+        "/response/message/content",
+        "/response/message/text",
+        "/response/message/output_text",
+        "/data/content",
+        "/data/text",
+        "/data/output_text",
+        "/data/response/content",
+        "/data/response/text",
+        "/data/response/output_text",
+    ] {
+        if let Some(value) = response.pointer(pointer) {
+            collect_chat_content_text(value, text_parts);
+        }
+    }
+}
+
+fn collect_fallback_message_like_text(value: &serde_json::Value, text_parts: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_fallback_message_like_text(item, text_parts);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for key in [
+                "message",
+                "content",
+                "text",
+                "output_text",
+                "data",
+                "response",
+            ] {
+                if let Some(child) = object.get(key) {
+                    match key {
+                        "message" | "data" | "response" => {
+                            collect_fallback_message_like_text(child, text_parts)
+                        }
+                        _ => collect_chat_content_text(child, text_parts),
+                    }
+                }
+            }
+        }
+        _ => collect_chat_content_text(value, text_parts),
+    }
+}
+
+fn push_nonempty_text(text_parts: &mut Vec<String>, text: &str) {
+    let text = text.trim();
+    if !text.is_empty() {
         text_parts.push(text.to_string());
     }
+}
+
+fn empty_chat_message_diagnostic(response: &serde_json::Value) -> String {
+    let finish_reason = response
+        .pointer("/choices/0/finish_reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let status = response
+        .get("status")
+        .or_else(|| response.pointer("/response/status"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let message_keys = response
+        .pointer("/choices/0/message")
+        .and_then(serde_json::Value::as_object)
+        .map(|object| object.keys().cloned().collect::<Vec<_>>().join(","))
+        .filter(|keys| !keys.is_empty())
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "provider response had no message content (finish_reason={finish_reason}, status={status}, message_keys={message_keys})"
+    )
 }
 
 fn chat_tool_call_from_response_item(item: &serde_json::Value) -> Option<serde_json::Value> {
@@ -1244,48 +1461,59 @@ pub fn parse_step(response: &serde_json::Value) -> AgentStep {
         .and_then(|m| m.get("tool_calls"))
         .and_then(|t| t.as_array())
     {
-        let mut parsed = Vec::with_capacity(calls.len());
-        for call in calls {
-            match parse_tool_call(call) {
-                Ok(tool_call) => parsed.push(tool_call),
-                Err(reason) => {
-                    return failed_step(
-                        "malformed_tool_call",
-                        format!("The model returned a malformed tool call: {reason}"),
-                        true,
-                    );
+        if !calls.is_empty() {
+            let mut parsed = Vec::with_capacity(calls.len());
+            for call in calls {
+                match parse_tool_call(call) {
+                    Ok(tool_call) => parsed.push(tool_call),
+                    Err(reason) => {
+                        return failed_step(
+                            "malformed_tool_call",
+                            format!("The model returned a malformed tool call: {reason}"),
+                            true,
+                        );
+                    }
                 }
             }
+            return AgentStep::Tools(parsed);
         }
-        if calls.is_empty() {
+        if response
+            .pointer("/choices/0/finish_reason")
+            .and_then(serde_json::Value::as_str)
+            == Some("tool_calls")
+        {
             return failed_step(
                 "provider_protocol",
                 "The model returned an empty tool call list.".to_string(),
                 true,
             );
         }
-        return AgentStep::Tools(parsed);
     }
-    let Some(text) = message
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-    else {
+    let Some(message) = message else {
         return failed_step(
             "provider_protocol",
-            "The model response had no assistant content or tool calls.".to_string(),
+            "The model response had no assistant message.".to_string(),
             true,
         );
     };
-    if text.trim().is_empty() {
+    if let Some(text) = assistant_text_from_chat_message(message) {
+        return AgentStep::Final { text };
+    }
+    if message.get("content").is_some() {
         return failed_step(
             "empty_assistant_result",
             "The model returned an empty assistant result.".to_string(),
             true,
         );
     }
-    AgentStep::Final {
-        text: text.to_string(),
-    }
+    failed_step(
+        "provider_protocol",
+        format!(
+            "The model response had no assistant content or tool calls: {}.",
+            empty_chat_message_diagnostic(response)
+        ),
+        true,
+    )
 }
 
 /// Map one OpenAI/OpenRouter `tool_calls[]` entry to a workspace [`ToolCall`].
@@ -1940,6 +2168,45 @@ mod tests {
     }
 
     #[test]
+    fn assistant_text_from_chat_message_accepts_common_provider_text_shapes() {
+        let cases = [
+            (serde_json::json!({"content": "plain"}), "plain"),
+            (
+                serde_json::json!({"content": [{"type": "text", "text": "part"}]}),
+                "part",
+            ),
+            (
+                serde_json::json!({"content": {"content": {"text": "nested"}}}),
+                "nested",
+            ),
+            (
+                serde_json::json!({"content": null, "refusal": "I cannot do that."}),
+                "I cannot do that.",
+            ),
+            (
+                serde_json::json!({"content": null, "output_text": "message level"}),
+                "message level",
+            ),
+            (
+                serde_json::json!({
+                    "content": [{
+                        "type": "output_text",
+                        "text": {"value": "wrapped value"}
+                    }]
+                }),
+                "wrapped value",
+            ),
+        ];
+
+        for (message, expected) in cases {
+            assert_eq!(
+                assistant_text_from_chat_message(&message).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
     fn tool_driver_retries_one_malformed_tool_call() {
         let malformed = serde_json::json!({
             "choices": [{
@@ -2032,6 +2299,159 @@ mod tests {
     }
 
     #[test]
+    fn responses_empty_chat_choice_falls_back_to_output_text() {
+        let response = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": null
+                }
+            }],
+            "output_text": "recovered from response text"
+        });
+
+        let chat = chat_completion_from_responses_body(&response).expect("chat response");
+
+        assert_eq!(
+            chat["choices"][0]["message"]["content"],
+            "recovered from response text"
+        );
+    }
+
+    #[test]
+    fn responses_nested_response_output_text_maps_to_chat_completion_message() {
+        let response = serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_1",
+                "output_text": "nested response text"
+            }
+        });
+
+        let chat = chat_completion_from_responses_body(&response).expect("chat response");
+
+        assert_eq!(
+            chat["choices"][0]["message"]["content"],
+            "nested response text"
+        );
+    }
+
+    #[test]
+    fn responses_fallback_content_text_maps_to_chat_completion_message() {
+        let response = serde_json::json!({
+            "id": "proxy_1",
+            "content": [{"type": "output_text", "text": "proxy text"}]
+        });
+
+        let chat = chat_completion_from_responses_body(&response).expect("chat response");
+
+        assert_eq!(chat["choices"][0]["message"]["content"], "proxy text");
+    }
+
+    #[test]
+    fn responses_text_part_maps_to_chat_completion_message() {
+        let response = serde_json::json!({
+            "id": "resp_1",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "text",
+                    "text": "plain text part"
+                }]
+            }]
+        });
+
+        let chat = chat_completion_from_responses_body(&response).expect("chat response");
+
+        assert_eq!(chat["choices"][0]["message"]["content"], "plain text part");
+    }
+
+    #[test]
+    fn responses_output_object_maps_to_chat_completion_message() {
+        let response = serde_json::json!({
+            "id": "resp_1",
+            "output": {
+                "type": "message",
+                "role": "assistant",
+                "content": {
+                    "parts": [{ "text": "object output text" }]
+                }
+            }
+        });
+
+        let chat = chat_completion_from_responses_body(&response).expect("chat response");
+
+        assert_eq!(
+            chat["choices"][0]["message"]["content"],
+            "object output text"
+        );
+    }
+
+    #[test]
+    fn responses_proxy_data_array_maps_to_chat_completion_message() {
+        let response = serde_json::json!({
+            "id": "proxy_1",
+            "data": [{
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "data array text" }]
+                }
+            }]
+        });
+
+        let chat = chat_completion_from_responses_body(&response).expect("chat response");
+
+        assert_eq!(chat["choices"][0]["message"]["content"], "data array text");
+    }
+
+    #[test]
+    fn responses_output_text_does_not_duplicate_message_content() {
+        let response = serde_json::json!({
+            "id": "resp_1",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": "already collected"
+                }]
+            }],
+            "output_text": "already collected"
+        });
+
+        let chat = chat_completion_from_responses_body(&response).expect("chat response");
+
+        assert_eq!(
+            chat["choices"][0]["message"]["content"],
+            "already collected"
+        );
+    }
+
+    #[test]
+    fn responses_refusal_part_maps_to_visible_assistant_message() {
+        let response = serde_json::json!({
+            "id": "resp_1",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "refusal",
+                    "refusal": "I cannot help with that."
+                }]
+            }]
+        });
+
+        let chat = chat_completion_from_responses_body(&response).expect("chat response");
+
+        assert_eq!(
+            chat["choices"][0]["message"]["content"],
+            "I cannot help with that."
+        );
+    }
+
+    #[test]
     fn responses_function_call_maps_to_chat_tool_call() {
         let response = serde_json::json!({
             "id": "resp_1",
@@ -2071,6 +2491,46 @@ mod tests {
         let chat = chat_completion_from_responses_body(&parsed).expect("chat response");
 
         assert_eq!(chat["choices"][0]["message"]["content"], "ok");
+    }
+
+    #[test]
+    fn responses_sse_event_named_text_delta_maps_to_chat_completion() {
+        let sse = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"delta\":\"enter \"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"delta\":\"submit live ok\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"response\":{\"id\":\"resp_1\",\"output\":[]}}\n\n",
+            "data: [DONE]\n",
+        );
+
+        let parsed = parse_responses_transport_body(sse).expect("parse sse");
+        let chat = chat_completion_from_responses_body(&parsed).expect("chat response");
+
+        assert_eq!(
+            chat["choices"][0]["message"]["content"],
+            "enter submit live ok"
+        );
+    }
+
+    #[test]
+    fn responses_sse_event_named_text_done_maps_to_chat_completion() {
+        let sse = concat!(
+            "event: response.output_text.done\n",
+            "data: {\"text\":\"done from event name\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"response\":{\"id\":\"resp_1\",\"output\":[]}}\n\n",
+            "data: [DONE]\n",
+        );
+
+        let parsed = parse_responses_transport_body(sse).expect("parse sse");
+        let chat = chat_completion_from_responses_body(&parsed).expect("chat response");
+
+        assert_eq!(
+            chat["choices"][0]["message"]["content"],
+            "done from event name"
+        );
     }
 
     #[test]
@@ -2682,6 +3142,75 @@ mod tests {
                 text: "all done".to_string()
             }
         );
+    }
+
+    #[test]
+    fn parse_step_returns_final_text_from_chat_content_parts() {
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "part one"},
+                        {"type": "output_text", "text": "part two"}
+                    ]
+                }
+            }]
+        });
+
+        assert_eq!(
+            parse_step(&response),
+            AgentStep::Final {
+                text: "part one\npart two".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_step_uses_text_when_provider_sends_empty_tool_call_list() {
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "done without tools",
+                    "tool_calls": []
+                }
+            }]
+        });
+
+        assert_eq!(
+            parse_step(&response),
+            AgentStep::Final {
+                text: "done without tools".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_step_rejects_empty_tool_call_list_when_finish_reason_requires_tools() {
+        let response = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "I should call a tool.",
+                    "tool_calls": []
+                }
+            }]
+        });
+
+        match parse_step(&response) {
+            AgentStep::Failed {
+                code,
+                message,
+                retryable,
+            } => {
+                assert_eq!(code, "provider_protocol");
+                assert!(message.contains("empty tool call list"));
+                assert!(retryable);
+            }
+            other => panic!("expected failure, got {other:?}"),
+        }
     }
 
     #[test]

@@ -67,13 +67,7 @@ jobs:
           grep '"kind":"approval_requested"' /tmp/opensks-macos-daemon-approval.ndjson
           grep '"kind":"approval_denied"' /tmp/opensks-macos-daemon-approval.ndjson
       - name: Native app bundle smoke
-        run: |
-          rm -rf .opensks/macos
-          OPENSKS_SKIP_DASHBOARD_OPEN=1 cargo run --quiet
-          test -x .opensks/macos/OpenSKS.app/Contents/MacOS/OpenSKS
-          file .opensks/macos/OpenSKS.app/Contents/MacOS/OpenSKS | grep 'Mach-O'
-          test -x .opensks/macos/OpenSKS.app/Contents/Resources/opensks-cli
-          test -f .opensks/macos/OpenSKS.app/Contents/Resources/workspace-path.txt
+        run: scripts/install-macos-local-smoke.sh --clean --archive
       - name: Upload macOS evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -82,4 +76,6 @@ jobs:
           path: |
             /tmp/opensks-macos-*.ndjson
             .opensks/macos/OpenSKS.app/Contents/Resources/workspace-path.txt
+            .opensks/macos/install-smoke-receipt.json
+            .opensks/macos/OpenSKS-local-macos.zip
           if-no-files-found: warn

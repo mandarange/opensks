@@ -84,6 +84,46 @@ cargo run -- release proof
 cargo run -- prd coverage
 ```
 
+## Install on another Mac
+
+After cloning the repo on macOS 13 or newer, make sure the machine has a Rust
+toolchain that satisfies `Cargo.toml` (`rust-version = "1.85"`) and Xcode
+Command Line Tools so `swift` and `codesign` are available. From the repo root,
+run:
+
+```bash
+scripts/install-macos-local-smoke.sh --clean --archive --open
+```
+
+If `swift` or `codesign` is missing, install or reset the Xcode Command Line
+Tools with `xcode-select --install` before rerunning the smoke. Omit `--open`
+for a headless build/verification run; the script checks the CLI entrypoint,
+terminal smoke path, generated `OpenSKS.app`, bundled CLI resource, recorded
+workspace path, Mach-O binary shape, and ad-hoc code signature. With
+`--archive`, it also writes `.opensks/macos/OpenSKS-local-macos.zip`, extracts it
+back into a temporary directory, verifies the extracted app binary, bundled CLI,
+launcher script, recorded workspace path, Mach-O shape, and code signature, then
+runs the extracted bundled CLI against a separate temporary workspace through
+`OPENSKS_WORKSPACE`. The archive contains `OpenSKS-Launch.command`; run it with
+the target workspace path (`./OpenSKS-Launch.command /path/to/workspace`) so the
+app is not tied to the checkout path baked into the machine that created the
+archive. The result is recorded in `.opensks/macos/install-smoke-receipt.json`.
+This is still an ad-hoc signed local archive, not a notarized production binary
+distribution.
+
+To summarize the current local-commercial gates after building the archive, run:
+
+```bash
+scripts/commercial-readiness-check.sh
+```
+
+The report is written to `.opensks/qa/commercial-readiness.json` and
+`.opensks/qa/commercial-readiness.md`. It combines the install smoke receipt,
+runtime coding capability report, live provider adapter check, release proof,
+and acceptance audit without reading or printing provider secret values. Release
+builds do not treat the developer-only local test adapter as real coding
+execution evidence.
+
 Running `opensks` with no arguments, including double-clicking the built
 `target/debug/opensks` file on macOS, writes `.opensks/macos/OpenSKS.app` and
 opens the native SwiftUI shell. The current app is a local studio shell with

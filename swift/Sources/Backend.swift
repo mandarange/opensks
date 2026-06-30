@@ -186,6 +186,7 @@ final class EngineLineBuffer: @unchecked Sendable {
 
 private struct EngineSessionKey: Equatable {
     let cliPath: String
+    let cliFingerprint: String
     let cwdPath: String
 }
 
@@ -589,6 +590,20 @@ actor EngineProcess {
         return await sendRequest(cli: cli, cwd: cwd, request: request)
     }
 
+    func integrationCandidateApply(
+        cli: URL,
+        cwd: URL,
+        runId: String,
+        approvalId: String
+    ) async -> EngineRunStream {
+        let request = EngineRequestEnvelope.integrationCandidateApply(
+            id: "req-integration-apply-\(runId)",
+            runId: runId,
+            approvalId: approvalId
+        )
+        return await sendRequest(cli: cli, cwd: cwd, request: request)
+    }
+
     func subscribeEvents(
         cli: URL,
         cwd: URL,
@@ -662,7 +677,11 @@ actor EngineProcess {
     }
 
     private func ensureSession(cli: URL, cwd: URL) throws -> EngineDaemonSession {
-        let key = EngineSessionKey(cliPath: cli.path, cwdPath: cwd.path)
+        let key = EngineSessionKey(
+            cliPath: cli.path,
+            cliFingerprint: Self.cliFingerprint(cli),
+            cwdPath: cwd.path
+        )
         if let existing = session, existing.key == key, existing.isRunning {
             return existing
         }
@@ -670,6 +689,18 @@ actor EngineProcess {
         let next = try EngineDaemonSession(cli: cli, cwd: cwd, key: key)
         session = next
         return next
+    }
+
+    static func cliFingerprint(_ cli: URL) -> String {
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: cli.path)
+            let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+            let modifiedAt = (attributes[.modificationDate] as? Date)?
+                .timeIntervalSince1970 ?? 0
+            return "\(size):\(modifiedAt)"
+        } catch {
+            return "unavailable:\(cli.path)"
+        }
     }
 
     private func sendRequest(
@@ -1024,6 +1055,33 @@ struct EngineRequestEnvelope: Encodable {
                 reasonCode: reasonCode,
                 approvalId: approvalId,
                 scope: scope,
+                sinceSequence: nil,
+                tailMs: nil,
+                pollIntervalMs: nil
+            )
+        )
+    }
+
+    static func integrationCandidateApply(
+        id: String,
+        runId: String,
+        approvalId: String
+    ) -> EngineRequestEnvelope {
+        EngineRequestEnvelope(
+            schema: "opensks.engine-request.v1",
+            id: id,
+            kind: "integration_candidate_apply",
+            protocolVersion: "opensks.contracts.v1",
+            params: EngineRequestParams(
+                pipelineId: nil,
+                graphPath: nil,
+                objective: nil,
+                runId: runId,
+                targetId: nil,
+                message: nil,
+                reasonCode: "integration_apply_requested",
+                approvalId: approvalId,
+                scope: "integration_apply",
                 sinceSequence: nil,
                 tailMs: nil,
                 pollIntervalMs: nil
@@ -1430,7 +1488,7 @@ final class AppState: ObservableObject {
     let workspace: URL
     let cli: URL
     private let runner = CLIRunner()
-    private let engine = EngineProcess()
+    let engine = EngineProcess()
     private var runTask: Task<Void, Never>?
     private var proofRefreshTask: Task<Void, Never>?
     private var lastProofArtifactFingerprint: ProofArtifactFingerprint?
@@ -1441,10 +1499,17 @@ final class AppState: ObservableObject {
         let cwd = fileManager.currentDirectoryPath
         var ws = cwd == "/" ? fileManager.homeDirectoryForCurrentUser.path : cwd
         var cliPath = ws + "/target/debug/opensks"
+        let envWorkspace = ProcessInfo.processInfo.environment[OpenSKSCLIProcess.workspaceEnvironmentKey]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let workspaceLockedByEnvironment = envWorkspace?.isEmpty == false
+        if let envWorkspace, !envWorkspace.isEmpty {
+            ws = envWorkspace
+        }
         for res in Self.launchResourceDirectories() {
-            if let txt = try? String(contentsOf: res.appendingPathComponent("workspace-path.txt"), encoding: .utf8) {
+            if !workspaceLockedByEnvironment,
+               let txt = try? String(contentsOf: res.appendingPathComponent("workspace-path.txt"), encoding: .utf8) {
                 let trimmed = txt.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { ws = trimmed }
+                if !trimmed.isEmpty, fileManager.fileExists(atPath: trimmed) { ws = trimmed }
             }
             let candidate = res.appendingPathComponent("opensks-cli")
             if fileManager.fileExists(atPath: candidate.path) { cliPath = candidate.path }

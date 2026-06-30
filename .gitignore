@@ -17,6 +17,8 @@ swift/.build/
 
 # >>> OpenSKS managed local state
 .opensks/runtime/
+.opensks/*.sqlite
+.opensks/*.sqlite-*
 .opensks/cache/
 .opensks/design-cache/
 .opensks/tmp/

@@ -8,14 +8,17 @@ import SwiftUI
 
 struct ConversationSidebar: View {
     @ObservedObject var store: ConversationStore
+    @ObservedObject var providers: ProviderStore
     /// Project name for the header (resolved from AppState workspace label).
     var projectName: String = "Workspace"
+    var onOpenProviderSettings: () -> Void = {}
 
     @FocusState private var listFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+            providerControl
             searchField
             filterControl
             Divider().overlay(Theme.stroke)
@@ -57,6 +60,102 @@ struct ConversationSidebar: View {
         .padding(.horizontal, 12)
         .padding(.top, 14)
         .padding(.bottom, 8)
+    }
+
+    // MARK: - Providers
+
+    private var providerControl: some View {
+        HStack(spacing: 8) {
+            Menu {
+                if providers.connections.isEmpty {
+                    Button("Connect provider") {
+                        providers.showingAddProvider = true
+                    }
+                } else {
+                    ForEach(providers.connections) { provider in
+                        Button {
+                            providers.selectedProviderID = provider.id
+                        } label: {
+                            Label(
+                                provider.displayName,
+                                systemImage: provider.id == providers.selectedProviderID
+                                    ? "checkmark"
+                                    : providerStatusIcon(provider)
+                            )
+                        }
+                    }
+                    Divider()
+                    Button("Add provider") {
+                        providers.showingAddProvider = true
+                    }
+                }
+                Button("Provider settings") {
+                    onOpenProviderSettings()
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "dot.radiowaves.left.and.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(providers.hasEligibleTextModel ? Theme.accent : Theme.gold)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("LLM providers")
+                            .font(Theme.ui(11.5, .semibold))
+                            .foregroundStyle(Theme.textSoft)
+                        Text(providerSummaryText)
+                            .font(Theme.ui(10.5))
+                            .foregroundStyle(Theme.muted)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Theme.faint)
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 42)
+                .background(RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous).fill(Theme.input))
+                .overlay(RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous).strokeBorder(Theme.stroke, lineWidth: 1))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .help(providers.providerReadinessDetail)
+            .accessibilityLabel("LLM provider settings")
+            .accessibilityIdentifier("conversation.sidebar.providers.menu")
+
+            Button {
+                onOpenProviderSettings()
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.textSoft)
+            }
+            .buttonStyle(IconTileButtonStyle(size: 30))
+            .help("Open provider settings")
+            .accessibilityLabel("Open provider settings")
+            .accessibilityIdentifier("conversation.sidebar.providers.settings")
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
+        .accessibilityIdentifier("conversation.sidebar.providers")
+    }
+
+    private var providerSummaryText: String {
+        if providers.connections.isEmpty { return "No provider connected" }
+        let ready = providers.eligibleTextModels.count
+        if ready == 0 {
+            return "\(providers.enabledProviderCount) provider\(providers.enabledProviderCount == 1 ? "" : "s") · no ready model"
+        }
+        return "\(providers.enabledProviderCount) provider\(providers.enabledProviderCount == 1 ? "" : "s") · \(ready) code model\(ready == 1 ? "" : "s")"
+    }
+
+    private func providerStatusIcon(_ provider: ProviderConnectionViewModel) -> String {
+        switch provider.statusPillKind {
+        case .success: return "checkmark.circle"
+        case .warning: return "exclamationmark.triangle"
+        case .danger: return "xmark.octagon"
+        case .running: return "arrow.triangle.2.circlepath"
+        case .neutral: return "circle"
+        }
     }
 
     // MARK: - Search
@@ -131,7 +230,14 @@ struct ConversationSidebar: View {
                 action: store.searchText.isEmpty ? { Task { await store.create() } } : nil
             )
         } else {
-            list
+            VStack(spacing: 8) {
+                if let error = store.errorMessage {
+                    SidebarInlineError(message: error)
+                        .padding(.horizontal, 10)
+                        .padding(.top, 8)
+                }
+                list
+            }
         }
     }
 
@@ -142,7 +248,10 @@ struct ConversationSidebar: View {
                     ForEach(store.visibleSummaries) { summary in
                         ConversationRow(
                             summary: summary,
-                            isSelected: store.selectedConversationID == summary.id
+                            isSelected: store.selectedConversationID == summary.id,
+                            onTogglePinned: {
+                                Task { await store.togglePinned(summary.id) }
+                            }
                         ) {
                             Task { await store.select(summary.id) }
                         }
@@ -205,18 +314,48 @@ struct ConversationSidebar: View {
     }
 }
 
+private struct SidebarInlineError: View {
+    let message: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(Theme.ui(11, .semibold))
+                .foregroundStyle(Theme.fail)
+            Text(message)
+                .font(Theme.ui(11, .medium))
+                .foregroundStyle(Theme.text)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Theme.fail.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Theme.fail.opacity(0.35), lineWidth: 1)
+        )
+        .accessibilityIdentifier("conversation.sidebar.error")
+    }
+}
+
 // MARK: - Row
 
-/// A single conversation tile. The whole tile is one Button (entire row is the
-/// hit target via `contentShape`), showing title + relative time + status pill.
+/// A single conversation tile. The title/status area opens the thread, while the
+/// trailing pin button exposes the same pin/unpin action as the context menu.
 struct ConversationRow: View {
     let summary: ConversationSummary
     let isSelected: Bool
+    let onTogglePinned: () -> Void
     let onSelect: () -> Void
 
     var body: some View {
-        Button(action: onSelect) {
-            HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .center, spacing: 6) {
+            Button(action: onSelect) {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         if summary.pinned {
@@ -241,25 +380,38 @@ struct ConversationRow: View {
                         }
                     }
                 }
-                Spacer(minLength: 0)
-                StatusPill(kind: summary.status.pillKind, label: summary.status.displayLabel)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .contentShape(Rectangle())
-            .background(
-                RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous)
-                    .fill(isSelected ? Theme.accentTint : Color.clear)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous)
-                    .strokeBorder(isSelected ? Theme.strokeSoft : Color.clear, lineWidth: 1)
-            )
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier("conversation.row.\(summary.id)")
+            .accessibilityLabel("Conversation \(summary.title), \(summary.status.displayLabel)")
+            .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : .isButton)
+
+            Button(action: onTogglePinned) {
+                Image(systemName: summary.pinned ? "pin.slash.fill" : "pin")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(summary.pinned ? Theme.accent : Theme.muted)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .help(summary.pinned ? "Unpin conversation" : "Pin conversation (up to 5)")
+            .accessibilityLabel(summary.pinned ? "Unpin conversation" : "Pin conversation")
+            .accessibilityIdentifier("conversation.pin.\(summary.id)")
+
+            StatusPill(kind: summary.status.pillKind, label: summary.status.displayLabel)
         }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("conversation.row.\(summary.id)")
-        .accessibilityLabel("Conversation \(summary.title), \(summary.status.displayLabel)")
-        .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : .isButton)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous)
+                .fill(isSelected ? Theme.accentTint : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous)
+                .strokeBorder(isSelected ? Theme.strokeSoft : Color.clear, lineWidth: 1)
+        )
     }
 }
 

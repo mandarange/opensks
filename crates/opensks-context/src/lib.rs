@@ -701,10 +701,7 @@ fn load_context_graph(
     workspace: &Path,
     changed_paths: &[String],
 ) -> Result<CodeGraphIndex, ContextError> {
-    let mut graph = match opensks_codegraph::read_index(workspace)? {
-        Some(graph) => graph,
-        None => opensks_codegraph::CodeGraph::index_workspace(workspace)?,
-    };
+    let mut graph = opensks_codegraph::read_index(workspace)?.unwrap_or_default();
 
     for path in changed_paths {
         if !is_supported_source_path(path) {
@@ -712,7 +709,7 @@ fn load_context_graph(
         }
         let absolute = workspace.join(path);
         if absolute.is_file() {
-            graph.update_file(workspace, &absolute)?;
+            graph.update_file_for_context(workspace, &absolute)?;
         }
     }
 
@@ -1299,6 +1296,45 @@ mod tests {
                 .evidence_refs
                 .iter()
                 .any(|reference| reference == "opensks-context:worker-scoped-context-pack")
+        );
+    }
+
+    #[test]
+    fn workspace_pack_without_persisted_index_scans_only_changed_files() {
+        let root = temp_workspace("workspace-no-persisted-index");
+        run_git(&root, &["init"]);
+        run_git(&root, &["config", "user.email", "context@example.test"]);
+        run_git(&root, &["config", "user.name", "Context Test"]);
+
+        let source = root.join("src/lib.rs");
+        fs::write(
+            root.join("src/unrelated.rs"),
+            "pub fn unrelated_helper() {}\n",
+        )
+        .expect("seed unrelated");
+        fs::write(&source, "pub fn alpha() {}\n").expect("seed source");
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-m", "seed context"]);
+        run_git(&root, &["branch", "-M", "main"]);
+        run_git(&root, &["checkout", "-b", "feature/context-pack"]);
+
+        fs::write(&source, "pub fn alpha_changed() {}\n").expect("edit source");
+
+        let pack = pack_workspace_records(&root, "worker-context", 300).expect("pack");
+
+        assert_eq!(pack.changed_paths, vec!["src/lib.rs"]);
+        assert!(
+            pack.codegraph_record_ids
+                .iter()
+                .any(|id| id.contains("alpha_changed")),
+            "changed file symbols should still be available without a persisted index"
+        );
+        assert!(
+            !pack
+                .codegraph_record_ids
+                .iter()
+                .any(|id| id.contains("unrelated_helper")),
+            "context pack must not full-scan unrelated files when no persisted index exists"
         );
     }
 

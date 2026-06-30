@@ -23,6 +23,25 @@ final class ContractsTests: XCTestCase {
         XCTAssertEqual(buffer.drainLines(), ["second", "third"])
     }
 
+    func testEngineProcessFingerprintChangesWhenBundledCLIChanges() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("opensks-engine-fingerprint-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cli = root.appendingPathComponent("opensks-cli")
+
+        try Data("old-daemon".utf8).write(to: cli)
+        let first = EngineProcess.cliFingerprint(cli)
+        try Data("new-daemon-with-selected-model-routing".utf8).write(to: cli)
+        let second = EngineProcess.cliFingerprint(cli)
+
+        XCTAssertNotEqual(
+            first,
+            second,
+            "daemon sessions must be restarted when the bundled CLI is replaced at the same path"
+        )
+    }
+
     func testEnginePendingResponseRouterKeepsConcurrentRequestStreamsSeparate() {
         let router = EnginePendingResponseRouter()
         let left = EngineRequestEnvelope.health(id: "req-left")
@@ -406,6 +425,20 @@ final class ContractsTests: XCTestCase {
         XCTAssertTrue(json.contains("\"kind\":\"approval_request\""))
         XCTAssertTrue(json.contains("\"approval_id\":\"approval-1\""))
         XCTAssertTrue(json.contains("\"scope\":\"git_push\""))
+    }
+
+    func testIntegrationCandidateApplyRequestEncodesSnakeCaseParams() throws {
+        let request = EngineRequestEnvelope.integrationCandidateApply(
+            id: "req-integration-apply",
+            runId: "run-swift",
+            approvalId: "approval-integration-run-swift"
+        )
+        let json = String(decoding: try JSONEncoder.opensks.encode(request), as: UTF8.self)
+        XCTAssertTrue(json.contains("\"kind\":\"integration_candidate_apply\""))
+        XCTAssertTrue(json.contains("\"run_id\":\"run-swift\""))
+        XCTAssertTrue(json.contains("\"approval_id\":\"approval-integration-run-swift\""))
+        XCTAssertTrue(json.contains("\"scope\":\"integration_apply\""))
+        XCTAssertTrue(json.contains("\"reason_code\":\"integration_apply_requested\""))
     }
 
     func testSubscribeEventsRequestEncodesReplayCursor() throws {

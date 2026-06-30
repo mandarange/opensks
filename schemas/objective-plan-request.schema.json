@@ -23,7 +23,7 @@
       "type": "boolean"
     },
     "max_parallelism": {
-      "default": 8,
+      "default": 16,
       "type": "integer",
       "format": "uint32",
       "minimum": 0.0

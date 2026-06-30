@@ -227,7 +227,7 @@ impl TerminalRuntime {
             "type": "input",
             "session_id": session_id,
             "raw_local_only": true,
-            "bytes": text.as_bytes().len(),
+            "bytes": text.len(),
             "contains_newline": text.contains('\n'),
             "at_ms": now_ms(),
         }))?;

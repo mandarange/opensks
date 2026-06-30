@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const OPEN_SKSDIR: &str = ".opensks";
 
@@ -20,6 +20,8 @@ pub struct NativeCollaborationEvidence {
     native_cli_session_proof_ref: String,
     native_cli_session_proof_hash: String,
     native_session_proof_kind: String,
+    codex_app_subagent_event_log_ref: String,
+    codex_app_subagent_event_log_hash: String,
     session_count: usize,
     completed_session_count: usize,
     worker_lane_count: usize,
@@ -58,6 +60,8 @@ pub fn discover_native_collaboration_evidence(cwd: &Path) -> NativeCollaboration
         native_cli_session_proof_ref: String::new(),
         native_cli_session_proof_hash: String::new(),
         native_session_proof_kind: String::new(),
+        codex_app_subagent_event_log_ref: String::new(),
+        codex_app_subagent_event_log_hash: String::new(),
         session_count: 0,
         completed_session_count: 0,
         worker_lane_count: 0,
@@ -79,7 +83,8 @@ pub fn discover_native_collaboration_evidence(cwd: &Path) -> NativeCollaboration
         .collect::<Vec<_>>();
     mission_dirs.sort();
 
-    for mission_dir in mission_dirs.into_iter().rev() {
+    let mut first_unverified_native_evidence = None;
+    for mission_dir in mission_dirs.iter().rev() {
         let Some(mission_id) = mission_dir
             .file_name()
             .and_then(|value| value.to_str())
@@ -167,6 +172,20 @@ pub fn discover_native_collaboration_evidence(cwd: &Path) -> NativeCollaboration
                 else {
                     continue;
                 };
+                let (codex_app_subagent_event_log_ref, codex_app_subagent_event_log_hash) =
+                    if proof_ref.ends_with("codex-app-agent-session-proof.json") {
+                        codex_app_subagent_event_log_for_mission(mission_dir, &mission_id)
+                            .filter(|_| {
+                                codex_app_subagent_event_log_counts_match(
+                                    mission_dir,
+                                    session_count,
+                                    completed_session_count,
+                                )
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        (String::new(), String::new())
+                    };
                 let proof_expectations = NativeProvenanceProofExpectations {
                     mission_id: &mission_id,
                     agent_session_ref: &agent_session_ref,
@@ -179,6 +198,8 @@ pub fn discover_native_collaboration_evidence(cwd: &Path) -> NativeCollaboration
                     parallel_runtime_proof_hash: &parallel_runtime_proof_hash,
                     native_cli_session_proof_ref: proof_ref,
                     native_session_proof_filename: session_proof_filename,
+                    codex_app_subagent_event_log_ref: &codex_app_subagent_event_log_ref,
+                    codex_app_subagent_event_log_hash: &codex_app_subagent_event_log_hash,
                     session_count,
                     completed_session_count,
                     worker_lane_count: worker_count,
@@ -230,8 +251,24 @@ pub fn discover_native_collaboration_evidence(cwd: &Path) -> NativeCollaboration
             } else {
                 String::new()
             };
+        let (codex_app_subagent_event_log_ref, codex_app_subagent_event_log_hash) =
+            if native_agent_provenance_verified
+                && native_session_proof_kind == "codex_app_multi_agent_v1"
+            {
+                codex_app_subagent_event_log_for_mission(mission_dir, &mission_id)
+                    .filter(|_| {
+                        codex_app_subagent_event_log_counts_match(
+                            mission_dir,
+                            session_count,
+                            completed_session_count,
+                        )
+                    })
+                    .unwrap_or_default()
+            } else {
+                (String::new(), String::new())
+            };
 
-        return NativeCollaborationEvidence {
+        let evidence = NativeCollaborationEvidence {
             available: true,
             native_agent_provenance_verified,
             mission_id: mission_id.clone(),
@@ -258,6 +295,8 @@ pub fn discover_native_collaboration_evidence(cwd: &Path) -> NativeCollaboration
             },
             native_cli_session_proof_hash,
             native_session_proof_kind,
+            codex_app_subagent_event_log_ref,
+            codex_app_subagent_event_log_hash,
             session_count,
             completed_session_count,
             worker_lane_count: worker_count,
@@ -267,9 +306,154 @@ pub fn discover_native_collaboration_evidence(cwd: &Path) -> NativeCollaboration
             status: "native_multi_session_collaboration_recorded".to_string(),
             reason: "native agent session and consensus artifacts prove multi-session collaboration; live remote multi-provider worker collaboration is not claimed".to_string(),
         };
+        if evidence.native_agent_provenance_verified {
+            return evidence;
+        }
+        if first_unverified_native_evidence.is_none() {
+            first_unverified_native_evidence = Some(evidence);
+        }
+    }
+
+    if let Some(evidence) = first_unverified_native_evidence {
+        return evidence;
+    }
+
+    if let Some(evidence) = discover_codex_app_subagent_event_log(&mission_dirs) {
+        return evidence;
     }
 
     unavailable("no valid native agent session plus consensus evidence found")
+}
+
+fn discover_codex_app_subagent_event_log(
+    mission_dirs: &[PathBuf],
+) -> Option<NativeCollaborationEvidence> {
+    let mut first_partial = None;
+    for mission_dir in mission_dirs.iter().rev() {
+        let mission_id = mission_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(str::to_string)?;
+        let evidence_path = mission_dir.join("subagent-evidence.jsonl");
+        let Ok(evidence_log) = fs::read_to_string(&evidence_path) else {
+            continue;
+        };
+        let Some((session_count, completed_session_count)) =
+            codex_app_subagent_event_log_summary(&evidence_log)
+        else {
+            continue;
+        };
+        let evidence = NativeCollaborationEvidence {
+            available: true,
+            native_agent_provenance_verified: false,
+            mission_id: mission_id.clone(),
+            agent_session_ref: format!(".sneakoscope/missions/{mission_id}/subagent-evidence.jsonl"),
+            agent_session_hash: stable_content_hash(&evidence_log),
+            agent_consensus_ref: String::new(),
+            agent_consensus_hash: String::new(),
+            agent_proof_evidence_ref: String::new(),
+            agent_proof_evidence_hash: String::new(),
+            parallel_runtime_proof_ref: String::new(),
+            parallel_runtime_proof_hash: String::new(),
+            native_cli_session_proof_ref: String::new(),
+            native_cli_session_proof_hash: String::new(),
+            native_session_proof_kind: "codex_app_subagent_event_log".to_string(),
+            codex_app_subagent_event_log_ref: format!(
+                ".sneakoscope/missions/{mission_id}/subagent-evidence.jsonl"
+            ),
+            codex_app_subagent_event_log_hash: stable_content_hash(&evidence_log),
+            session_count,
+            completed_session_count,
+            worker_lane_count: session_count,
+            reviewer_lane_count: 0,
+            mapper_lane_count: 0,
+            roles: vec!["codex_app_subagent".to_string()],
+            status: "codex_app_subagent_events_recorded_unverified".to_string(),
+            reason: "Codex App subagent event log records multiple subagent sessions, but no hash-bound agent consensus/proof chain was present; native collaboration is recorded as partial and unverified".to_string(),
+        };
+        if completed_session_count >= 2 {
+            return Some(evidence);
+        }
+        if first_partial.is_none() {
+            first_partial = Some(evidence);
+        }
+    }
+    first_partial
+}
+
+fn codex_app_subagent_event_log_for_mission(
+    mission_dir: &Path,
+    mission_id: &str,
+) -> Option<(String, String)> {
+    let evidence_log = fs::read_to_string(mission_dir.join("subagent-evidence.jsonl")).ok()?;
+    codex_app_subagent_event_log_summary(&evidence_log)?;
+    Some((
+        format!(".sneakoscope/missions/{mission_id}/subagent-evidence.jsonl"),
+        stable_content_hash(&evidence_log),
+    ))
+}
+
+fn codex_app_subagent_event_log_counts_match(
+    mission_dir: &Path,
+    min_session_count: usize,
+    min_completed_session_count: usize,
+) -> bool {
+    let Ok(evidence_log) = fs::read_to_string(mission_dir.join("subagent-evidence.jsonl")) else {
+        return false;
+    };
+    codex_app_subagent_event_log_source_counts_match(
+        &evidence_log,
+        min_session_count,
+        min_completed_session_count,
+    )
+}
+
+fn codex_app_subagent_event_log_source_counts_match(
+    evidence_log: &str,
+    min_session_count: usize,
+    min_completed_session_count: usize,
+) -> bool {
+    codex_app_subagent_event_log_summary(evidence_log).is_some_and(
+        |(session_count, completed_session_count)| {
+            session_count >= min_session_count
+                && completed_session_count >= min_completed_session_count
+        },
+    )
+}
+
+fn codex_app_subagent_event_log_summary(evidence_log: &str) -> Option<(usize, usize)> {
+    let spawn_count = evidence_log
+        .lines()
+        .filter(|line| line.contains("\"stage\":\"spawn_agent\""))
+        .count();
+    let close_count = evidence_log
+        .lines()
+        .filter(|line| codex_app_subagent_tool_event(line, "close_agent"))
+        .count();
+    let wait_count = evidence_log
+        .lines()
+        .filter(|line| codex_app_subagent_tool_event(line, "wait_agent"))
+        .count();
+    let agent_payload_count = evidence_log
+        .lines()
+        .filter(|line| line.contains("\"agent_id\"") && line.contains("\"agent_type\""))
+        .count();
+    let explicit_session_count = spawn_count.max(close_count).max(wait_count);
+    let session_count = if explicit_session_count >= 2 {
+        explicit_session_count
+    } else {
+        agent_payload_count.min(128)
+    };
+    if session_count < 2 {
+        return None;
+    }
+    let completed_session_count = close_count.max(wait_count).min(session_count);
+    Some((session_count, completed_session_count))
+}
+
+fn codex_app_subagent_tool_event(line: &str, tool_name: &str) -> bool {
+    line.contains(&format!("multi_agent_v1{tool_name}"))
+        || (line.contains("multi_agent_v1") && line.contains(tool_name))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -285,6 +469,8 @@ struct NativeProvenanceProofExpectations<'a> {
     parallel_runtime_proof_hash: &'a str,
     native_cli_session_proof_ref: &'a str,
     native_session_proof_filename: &'a str,
+    codex_app_subagent_event_log_ref: &'a str,
+    codex_app_subagent_event_log_hash: &'a str,
     session_count: usize,
     completed_session_count: usize,
     worker_lane_count: usize,
@@ -405,7 +591,19 @@ fn native_agent_proof_evidence_valid(
             proof,
             "codex_app_unique_agent_session_count",
             expected.session_count,
-        ) && json_top_level_bool_field_equals(proof, "codex_app_agent_ids_hash_chain_ok", true);
+        ) && json_top_level_bool_field_equals(proof, "codex_app_agent_ids_hash_chain_ok", true)
+            && !expected.codex_app_subagent_event_log_ref.is_empty()
+            && !expected.codex_app_subagent_event_log_hash.is_empty()
+            && json_top_level_string_field_equals(
+                proof,
+                "codex_app_subagent_event_log_ref",
+                expected.codex_app_subagent_event_log_ref,
+            )
+            && json_top_level_string_field_equals(
+                proof,
+                "codex_app_subagent_event_log_hash",
+                expected.codex_app_subagent_event_log_hash,
+            );
 
     json_top_level_string_field_equals(proof, "schema", "sks.agent-proof-evidence.v1")
         && json_top_level_string_field_equals(proof, "mission_id", expected.mission_id)
@@ -495,6 +693,18 @@ fn native_parallel_runtime_proof_valid(
                 proof,
                 "completed_agent_sessions",
                 expected.completed_session_count,
+            )
+            && !expected.codex_app_subagent_event_log_ref.is_empty()
+            && !expected.codex_app_subagent_event_log_hash.is_empty()
+            && json_top_level_string_field_equals(
+                proof,
+                "codex_app_subagent_event_log_ref",
+                expected.codex_app_subagent_event_log_ref,
+            )
+            && json_top_level_string_field_equals(
+                proof,
+                "codex_app_subagent_event_log_hash",
+                expected.codex_app_subagent_event_log_hash,
             );
 
     json_top_level_string_field_equals(proof, "schema", "sks.parallel-runtime-proof.v1")
@@ -692,6 +902,18 @@ fn codex_app_agent_session_proof_valid(
             "parallel_runtime_proof_hash",
             expected.parallel_runtime_proof_hash,
         )
+        && !expected.codex_app_subagent_event_log_ref.is_empty()
+        && !expected.codex_app_subagent_event_log_hash.is_empty()
+        && json_top_level_string_field_equals(
+            proof,
+            "codex_app_subagent_event_log_ref",
+            expected.codex_app_subagent_event_log_ref,
+        )
+        && json_top_level_string_field_equals(
+            proof,
+            "codex_app_subagent_event_log_hash",
+            expected.codex_app_subagent_event_log_hash,
+        )
         && json_top_level_number_field_equals(
             proof,
             "codex_app_agent_session_count",
@@ -759,6 +981,9 @@ pub fn render_native_collaboration_execution(
             "  \"provenance_proof_kind\": {},\n",
             "  \"codex_app_agent_session_proof_ref\": {},\n",
             "  \"codex_app_agent_session_proof_hash\": {},\n",
+            "  \"codex_app_subagent_event_log_ref\": {},\n",
+            "  \"codex_app_subagent_event_log_hash\": {},\n",
+            "  \"codex_app_subagent_partial_artifact_hash\": {},\n",
             "  \"no_hidden_fallback\": true,\n",
             "  \"live_multi_provider_worker_collaboration\": false,\n",
             "  \"live_remote_provider_api_calls\": false,\n",
@@ -852,6 +1077,9 @@ pub fn render_native_collaboration_execution(
         } else {
             "null".to_string()
         },
+        codex_app_subagent_json_ref(evidence),
+        codex_app_subagent_json_hash(evidence),
+        codex_app_subagent_partial_artifact_hash_json(evidence),
         json_string(&evidence.reason)
     )
 }
@@ -867,7 +1095,7 @@ pub fn render_native_collaboration_events_jsonl(
             json_string(&evidence.reason)
         );
     }
-    [
+    let mut events = vec![
         format!(
             "{{\"schema\":\"opensks.native-collaboration-event.v1\",\"generated_at\":{},\"event\":\"native_sessions_discovered\",\"source_mission_id\":{},\"session_count\":{},\"completed_session_count\":{},\"executed\":true}}",
             generated_at_json,
@@ -877,28 +1105,36 @@ pub fn render_native_collaboration_events_jsonl(
         ),
         format!(
             "{{\"schema\":\"opensks.native-collaboration-event.v1\",\"generated_at\":{},\"event\":\"worker_lane_completed\",\"worker_lane_count\":{},\"executed\":true}}",
-            generated_at_json,
-            evidence.worker_lane_count
+            generated_at_json, evidence.worker_lane_count
         ),
         format!(
             "{{\"schema\":\"opensks.native-collaboration-event.v1\",\"generated_at\":{},\"event\":\"review_or_mapping_lane_completed\",\"reviewer_lane_count\":{},\"mapper_lane_count\":{},\"executed\":true}}",
-            generated_at_json,
-            evidence.reviewer_lane_count,
-            evidence.mapper_lane_count
+            generated_at_json, evidence.reviewer_lane_count, evidence.mapper_lane_count
         ),
-        format!(
+    ];
+    if evidence.agent_consensus_ref.is_empty() {
+        events.push(format!(
+            "{{\"schema\":\"opensks.native-collaboration-event.v1\",\"generated_at\":{},\"event\":\"native_provenance_unverified\",\"provenance_proof_kind\":{},\"subagent_event_log_ref\":{},\"subagent_event_log_hash\":{},\"subagent_partial_artifact_hash\":{},\"executed\":true,\"reason\":{}}}",
+            generated_at_json,
+            json_string(&evidence.native_session_proof_kind),
+            codex_app_subagent_json_ref(evidence),
+            codex_app_subagent_json_hash(evidence),
+            codex_app_subagent_partial_artifact_hash_json(evidence),
+            json_string(&evidence.reason)
+        ));
+    } else {
+        events.push(format!(
             "{{\"schema\":\"opensks.native-collaboration-event.v1\",\"generated_at\":{},\"event\":\"consensus_recorded\",\"agent_consensus_ref\":{},\"agent_consensus_hash\":{},\"executed\":true}}",
             generated_at_json,
             json_string(&evidence.agent_consensus_ref),
             json_string(&evidence.agent_consensus_hash)
-        ),
-        format!(
-            "{{\"schema\":\"opensks.native-collaboration-event.v1\",\"generated_at\":{},\"event\":\"remote_provider_collaboration_not_claimed\",\"live_multi_provider_worker_collaboration\":false,\"live_remote_provider_api_calls\":false,\"executed\":true}}",
-            generated_at_json
-        ),
-    ]
-    .join("\n")
-        + "\n"
+        ));
+    }
+    events.push(format!(
+        "{{\"schema\":\"opensks.native-collaboration-event.v1\",\"generated_at\":{},\"event\":\"remote_provider_collaboration_not_claimed\",\"live_multi_provider_worker_collaboration\":false,\"live_remote_provider_api_calls\":false,\"executed\":true}}",
+        generated_at_json
+    ));
+    events.join("\n") + "\n"
 }
 
 pub fn render_native_proof_diagnostics(
@@ -956,6 +1192,9 @@ pub fn render_native_proof_diagnostics(
             "  \"provenance_proof_kind\": {},\n",
             "  \"codex_app_agent_session_proof_ref\": {},\n",
             "  \"codex_app_agent_session_proof_hash\": {},\n",
+            "  \"codex_app_subagent_event_log_ref\": {},\n",
+            "  \"codex_app_subagent_event_log_hash\": {},\n",
+            "  \"codex_app_subagent_partial_artifact_hash\": {},\n",
             "  \"accepted_proof_shapes\": {},\n",
             "  \"rejected_proof_markers\": {},\n",
             "  \"missing_or_unverified\": {},\n",
@@ -1035,12 +1274,16 @@ pub fn render_native_proof_diagnostics(
         } else {
             "null".to_string()
         },
+        codex_app_subagent_json_ref(evidence),
+        codex_app_subagent_json_hash(evidence),
+        codex_app_subagent_partial_artifact_hash_json(evidence),
         json_array(&[
             "agent-sessions.sessions-array",
             "agent-sessions.sessions-object",
             "native-cli-session-proof.count-fields",
             "native-cli-session-proof.process_ids-plus-unique_worker_session_count",
-            "codex-app-agent-session-proof.count-fields"
+            "codex-app-agent-session-proof.count-fields",
+            "codex-app-subagent-evidence.event-log-partial"
         ]),
         json_array(&[
             "backend-or-proof_mode-containing-fake",
@@ -1195,6 +1438,35 @@ pub fn beta006_native_collaboration_gate_passed(cwd: &Path) -> bool {
     ) else {
         return false;
     };
+    let (codex_app_subagent_event_log_ref, codex_app_subagent_event_log_hash) =
+        if native_cli_session_proof_ref.ends_with("codex-app-agent-session-proof.json") {
+            let Some(event_log_ref) =
+                extract_json_top_level_string_field(&execution, "codex_app_subagent_event_log_ref")
+            else {
+                return false;
+            };
+            let Some(event_log_hash) = extract_json_top_level_string_field(
+                &execution,
+                "codex_app_subagent_event_log_hash",
+            ) else {
+                return false;
+            };
+            let Some(event_log) =
+                read_native_collaboration_source(cwd, &event_log_ref, &event_log_hash)
+            else {
+                return false;
+            };
+            if !codex_app_subagent_event_log_source_counts_match(
+                &event_log,
+                native_session_count,
+                completed_session_count,
+            ) {
+                return false;
+            }
+            (event_log_ref, event_log_hash)
+        } else {
+            (String::new(), String::new())
+        };
     let Some((
         source_session_count,
         source_completed_count,
@@ -1228,6 +1500,8 @@ pub fn beta006_native_collaboration_gate_passed(cwd: &Path) -> bool {
                 .rsplit('/')
                 .next()
                 .unwrap_or(""),
+            codex_app_subagent_event_log_ref: &codex_app_subagent_event_log_ref,
+            codex_app_subagent_event_log_hash: &codex_app_subagent_event_log_hash,
             session_count: source_session_count,
             completed_session_count: source_completed_count,
             worker_lane_count: source_worker_count,
@@ -1756,6 +2030,58 @@ fn stable_content_hash_u64(value: &str) -> u64 {
     hash
 }
 
+fn codex_app_subagent_json_ref(evidence: &NativeCollaborationEvidence) -> String {
+    if !evidence.codex_app_subagent_event_log_ref.is_empty() {
+        json_string(&evidence.codex_app_subagent_event_log_ref)
+    } else {
+        "null".to_string()
+    }
+}
+
+fn codex_app_subagent_json_hash(evidence: &NativeCollaborationEvidence) -> String {
+    if !evidence.codex_app_subagent_event_log_hash.is_empty() {
+        json_string(&evidence.codex_app_subagent_event_log_hash)
+    } else {
+        "null".to_string()
+    }
+}
+
+fn codex_app_subagent_partial_artifact(evidence: &NativeCollaborationEvidence) -> Option<String> {
+    if evidence.native_session_proof_kind != "codex_app_subagent_event_log"
+        || evidence.codex_app_subagent_event_log_ref.is_empty()
+        || evidence.codex_app_subagent_event_log_hash.is_empty()
+    {
+        return None;
+    }
+    Some(format!(
+        concat!(
+            "{{",
+            "\"schema\":\"opensks.codex-app-subagent-partial-artifact.v1\",",
+            "\"source_mission_id\":{},",
+            "\"subagent_event_log_ref\":{},",
+            "\"subagent_event_log_hash\":{},",
+            "\"session_count\":{},",
+            "\"completed_session_count\":{},",
+            "\"native_agent_provenance_verified\":false,",
+            "\"proof_status\":\"partial_unverified\",",
+            "\"live_multi_provider_worker_collaboration\":false,",
+            "\"live_remote_provider_api_calls\":false",
+            "}}"
+        ),
+        json_string(&evidence.mission_id),
+        json_string(&evidence.codex_app_subagent_event_log_ref),
+        json_string(&evidence.codex_app_subagent_event_log_hash),
+        evidence.session_count,
+        evidence.completed_session_count
+    ))
+}
+
+fn codex_app_subagent_partial_artifact_hash_json(evidence: &NativeCollaborationEvidence) -> String {
+    codex_app_subagent_partial_artifact(evidence)
+        .map(|artifact| json_string(&stable_content_hash(&artifact)))
+        .unwrap_or_else(|| "null".to_string())
+}
+
 fn json_array(values: &[&str]) -> String {
     let strings = values
         .iter()
@@ -1789,4 +2115,306 @@ fn json_string(value: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(test_name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "opensks-native-collaboration-{test_name}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    fn write_codex_app_verified_fixture(root: &Path, mission_id: &str) {
+        let mission_dir = root.join(".sneakoscope").join("missions").join(mission_id);
+        let agents_dir = mission_dir.join("agents");
+        fs::create_dir_all(&agents_dir).expect("create agents dir");
+        let sessions_ref = format!(".sneakoscope/missions/{mission_id}/agents/agent-sessions.json");
+        let consensus_ref =
+            format!(".sneakoscope/missions/{mission_id}/agents/agent-consensus.json");
+        let proof_ref =
+            format!(".sneakoscope/missions/{mission_id}/agents/agent-proof-evidence.json");
+        let runtime_ref =
+            format!(".sneakoscope/missions/{mission_id}/agents/parallel-runtime-proof.json");
+        let codex_proof_ref =
+            format!(".sneakoscope/missions/{mission_id}/agents/codex-app-agent-session-proof.json");
+        let event_log_ref = format!(".sneakoscope/missions/{mission_id}/subagent-evidence.jsonl");
+        let sessions = format!(
+            concat!(
+                "{{\n",
+                "  \"schema\": \"sks.agent-sessions.v1\",\n",
+                "  \"mission_id\": {},\n",
+                "  \"native_sessions_required\": true,\n",
+                "  \"sessions\": {{\n",
+                "    \"agent-worker\": {{\"agent_id\":\"agent-worker\",\"role\":\"implementation_worker\",\"status\":\"completed\"}},\n",
+                "    \"agent-reviewer\": {{\"agent_id\":\"agent-reviewer\",\"role\":\"qa_reviewer\",\"status\":\"completed\"}},\n",
+                "    \"agent-scout\": {{\"agent_id\":\"agent-scout\",\"role\":\"analysis_scout\",\"status\":\"completed\"}}\n",
+                "  }}\n",
+                "}}\n"
+            ),
+            json_string(mission_id)
+        );
+        fs::write(agents_dir.join("agent-sessions.json"), &sessions).expect("write sessions");
+        let consensus = format!(
+            concat!(
+                "{{\n",
+                "  \"schema\": \"sks.agent-consensus.v1\",\n",
+                "  \"mission_id\": {},\n",
+                "  \"consensus\": \"verified codex app multi-agent fixture\"\n",
+                "}}\n"
+            ),
+            json_string(mission_id)
+        );
+        fs::write(agents_dir.join("agent-consensus.json"), &consensus).expect("write consensus");
+        let event_log = concat!(
+            "{\"stage\":\"spawn_agent\",\"agent_id\":\"agent-worker\",\"agent_type\":\"implementation_worker\"}\n",
+            "{\"stage\":\"spawn_agent\",\"agent_id\":\"agent-reviewer\",\"agent_type\":\"qa_reviewer\"}\n",
+            "{\"stage\":\"spawn_agent\",\"agent_id\":\"agent-scout\",\"agent_type\":\"analysis_scout\"}\n",
+            "{\"tool\":\"multi_agent_v1\",\"action\":\"close_agent\",\"agent_id\":\"agent-worker\"}\n",
+            "{\"tool\":\"multi_agent_v1\",\"action\":\"close_agent\",\"agent_id\":\"agent-reviewer\"}\n",
+            "{\"tool\":\"multi_agent_v1\",\"action\":\"close_agent\",\"agent_id\":\"agent-scout\"}\n"
+        );
+        fs::write(mission_dir.join("subagent-evidence.jsonl"), event_log)
+            .expect("write subagent log");
+        let sessions_hash = stable_content_hash(&sessions);
+        let consensus_hash = stable_content_hash(&consensus);
+        let event_log_hash = stable_content_hash(event_log);
+        let runtime = format!(
+            concat!(
+                "{{\n",
+                "  \"schema\": \"sks.parallel-runtime-proof.v1\",\n",
+                "  \"mission_id\": {},\n",
+                "  \"proof_mode\": \"codex-app-multi-agent-v1\",\n",
+                "  \"codex_app_multi_agent_sessions\": true,\n",
+                "  \"requested_workers\": 3,\n",
+                "  \"max_observed_agent_sessions\": 3,\n",
+                "  \"unique_agent_session_ids\": 3,\n",
+                "  \"completed_agent_sessions\": 3,\n",
+                "  \"codex_app_subagent_event_log_ref\": {},\n",
+                "  \"codex_app_subagent_event_log_hash\": {},\n",
+                "  \"utilization_proof_consistency\": {{\"ok\": true}},\n",
+                "  \"passed\": true,\n",
+                "  \"blockers\": []\n",
+                "}}\n"
+            ),
+            json_string(mission_id),
+            json_string(&event_log_ref),
+            json_string(&event_log_hash)
+        );
+        fs::write(agents_dir.join("parallel-runtime-proof.json"), &runtime).expect("write runtime");
+        let runtime_hash = stable_content_hash(&runtime);
+        let proof = format!(
+            concat!(
+                "{{\n",
+                "  \"schema\": \"sks.agent-proof-evidence.v1\",\n",
+                "  \"mission_id\": {},\n",
+                "  \"ok\": true,\n",
+                "  \"status\": \"passed\",\n",
+                "  \"backend\": \"codex-app-multi-agent-v1\",\n",
+                "  \"route_blackbox_kind\": \"actual_agent_command\",\n",
+                "  \"real_route_command_used\": true,\n",
+                "  \"real_parallel_claim\": true,\n",
+                "  \"codex_app_agent_session_proof\": \"codex-app-agent-session-proof.json\",\n",
+                "  \"native_session_proof\": \"codex-app-agent-session-proof.json\",\n",
+                "  \"agent_session_ref\": {},\n",
+                "  \"agent_session_hash\": {},\n",
+                "  \"agent_consensus_ref\": {},\n",
+                "  \"agent_consensus_hash\": {},\n",
+                "  \"parallel_runtime_proof_ref\": {},\n",
+                "  \"parallel_runtime_proof_hash\": {},\n",
+                "  \"native_cli_session_proof_ref\": {},\n",
+                "  \"codex_app_agent_session_count\": 3,\n",
+                "  \"codex_app_completed_agent_count\": 3,\n",
+                "  \"codex_app_unique_agent_session_count\": 3,\n",
+                "  \"codex_app_agent_ids_hash_chain_ok\": true,\n",
+                "  \"codex_app_subagent_event_log_ref\": {},\n",
+                "  \"codex_app_subagent_event_log_hash\": {},\n",
+                "  \"all_sessions_closed\": true,\n",
+                "  \"terminal_sessions_closed\": true,\n",
+                "  \"ledger_hash_chain_ok\": true,\n",
+                "  \"consensus_ok\": true,\n",
+                "  \"blockers\": []\n",
+                "}}\n"
+            ),
+            json_string(mission_id),
+            json_string(&sessions_ref),
+            json_string(&sessions_hash),
+            json_string(&consensus_ref),
+            json_string(&consensus_hash),
+            json_string(&runtime_ref),
+            json_string(&runtime_hash),
+            json_string(&codex_proof_ref),
+            json_string(&event_log_ref),
+            json_string(&event_log_hash)
+        );
+        fs::write(agents_dir.join("agent-proof-evidence.json"), &proof).expect("write proof");
+        let proof_hash = stable_content_hash(&proof);
+        let codex_proof = format!(
+            concat!(
+                "{{\n",
+                "  \"schema\": \"sks.codex-app-agent-session-proof.v1\",\n",
+                "  \"mission_id\": {},\n",
+                "  \"ok\": true,\n",
+                "  \"backend\": \"codex-app-multi-agent-v1\",\n",
+                "  \"proof_mode\": \"multi_agent_v1\",\n",
+                "  \"real_parallel_claim\": true,\n",
+                "  \"codex_app_agent_session_proof\": true,\n",
+                "  \"agent_ids\": [\"agent-worker\", \"agent-reviewer\", \"agent-scout\"],\n",
+                "  \"agent_ids_hash_chain_ok\": true,\n",
+                "  \"agent_session_ref\": {},\n",
+                "  \"agent_session_hash\": {},\n",
+                "  \"agent_consensus_ref\": {},\n",
+                "  \"agent_consensus_hash\": {},\n",
+                "  \"agent_proof_evidence_ref\": {},\n",
+                "  \"agent_proof_evidence_hash\": {},\n",
+                "  \"parallel_runtime_proof_ref\": {},\n",
+                "  \"parallel_runtime_proof_hash\": {},\n",
+                "  \"codex_app_subagent_event_log_ref\": {},\n",
+                "  \"codex_app_subagent_event_log_hash\": {},\n",
+                "  \"codex_app_agent_session_count\": 3,\n",
+                "  \"codex_app_completed_agent_count\": 3,\n",
+                "  \"worker_lane_count\": 1,\n",
+                "  \"reviewer_lane_count\": 1,\n",
+                "  \"mapper_lane_count\": 1,\n",
+                "  \"all_sessions_closed\": true,\n",
+                "  \"blockers\": []\n",
+                "}}\n"
+            ),
+            json_string(mission_id),
+            json_string(&sessions_ref),
+            json_string(&sessions_hash),
+            json_string(&consensus_ref),
+            json_string(&consensus_hash),
+            json_string(&proof_ref),
+            json_string(&proof_hash),
+            json_string(&runtime_ref),
+            json_string(&runtime_hash),
+            json_string(&event_log_ref),
+            json_string(&event_log_hash)
+        );
+        fs::write(
+            agents_dir.join("codex-app-agent-session-proof.json"),
+            codex_proof,
+        )
+        .expect("write codex proof");
+    }
+
+    fn write_unverified_native_fixture(root: &Path, mission_id: &str) {
+        let agents_dir = root
+            .join(".sneakoscope")
+            .join("missions")
+            .join(mission_id)
+            .join("agents");
+        fs::create_dir_all(&agents_dir).expect("create unverified agents dir");
+        fs::write(
+            agents_dir.join("agent-sessions.json"),
+            format!(
+                concat!(
+                    "{{\n",
+                    "  \"schema\": \"sks.agent-sessions.v1\",\n",
+                    "  \"mission_id\": {},\n",
+                    "  \"native_sessions_required\": true,\n",
+                    "  \"sessions\": {{\n",
+                    "    \"worker\": {{\"agent_id\":\"worker\",\"role\":\"implementation_worker\",\"status\":\"completed\"}},\n",
+                    "    \"reviewer\": {{\"agent_id\":\"reviewer\",\"role\":\"qa_reviewer\",\"status\":\"completed\"}}\n",
+                    "  }}\n",
+                    "}}\n"
+                ),
+                json_string(mission_id)
+            ),
+        )
+        .expect("write unverified sessions");
+        fs::write(
+            agents_dir.join("agent-consensus.json"),
+            format!(
+                "{{\"schema\":\"sks.agent-consensus.v1\",\"mission_id\":{},\"consensus\":\"newer but unverified\"}}\n",
+                json_string(mission_id)
+            ),
+        )
+        .expect("write unverified consensus");
+    }
+
+    #[test]
+    fn verified_native_proof_wins_over_newer_unverified_native_evidence() {
+        let root = unique_temp_dir("verified-wins");
+        write_codex_app_verified_fixture(&root, "M-20990101-000001-verified");
+        write_unverified_native_fixture(&root, "M-20990101-000002-unverified");
+
+        let evidence = discover_native_collaboration_evidence(&root);
+        assert!(evidence.native_agent_provenance_verified);
+        assert_eq!(evidence.mission_id, "M-20990101-000001-verified");
+        assert_eq!(
+            evidence.native_session_proof_kind,
+            "codex_app_multi_agent_v1"
+        );
+
+        fs::remove_dir_all(&root).expect("remove test temp dir");
+    }
+
+    #[test]
+    fn codex_app_subagent_log_becomes_hash_bound_partial_not_verified() {
+        let root = unique_temp_dir("partial");
+        let mission_id = "M-20990101-000000-test";
+        let mission_dir = root.join(".sneakoscope").join("missions").join(mission_id);
+        fs::create_dir_all(&mission_dir).expect("create test mission dir");
+        let evidence_log = concat!(
+            "{\"stage\":\"spawn_agent\",\"tool\":\"spawn_agent\"}\n",
+            "{\"stage\":\"spawn_agent\",\"tool\":\"spawn_agent\"}\n",
+            "{\"stage\":\"result\",\"tool\":\"multi_agent_v1\",\"action\":\"close_agent\"}\n",
+            "{\"stage\":\"result\",\"tool\":\"multi_agent_v1\",\"action\":\"close_agent\"}\n"
+        );
+        fs::write(mission_dir.join("subagent-evidence.jsonl"), evidence_log)
+            .expect("write test subagent log");
+
+        let evidence = discover_native_collaboration_evidence(&root);
+        assert!(evidence.available);
+        assert!(!evidence.native_agent_provenance_verified);
+        assert_eq!(
+            evidence.native_session_proof_kind,
+            "codex_app_subagent_event_log"
+        );
+        assert_eq!(evidence.session_count, 2);
+        assert_eq!(evidence.completed_session_count, 2);
+        assert_eq!(
+            evidence.agent_session_hash,
+            stable_content_hash(evidence_log)
+        );
+
+        let execution =
+            render_native_collaboration_execution("\"2099-01-01T00:00:00Z\"", &evidence);
+        let diagnostics = render_native_proof_diagnostics("\"2099-01-01T00:00:00Z\"", &evidence);
+        let events =
+            render_native_collaboration_events_jsonl("\"2099-01-01T00:00:00Z\"", &evidence);
+        let partial_artifact_hash = codex_app_subagent_partial_artifact_hash_json(&evidence);
+
+        assert!(execution.contains("\"native_agent_provenance_verified\": false"));
+        assert!(execution.contains("\"codex_app_subagent_event_log_ref\""));
+        assert!(execution.contains(&partial_artifact_hash));
+        assert!(diagnostics.contains("\"status\": \"partial_unverified\""));
+        assert!(events.contains("\"event\":\"native_provenance_unverified\""));
+        assert!(events.contains("\"live_multi_provider_worker_collaboration\":false"));
+        assert!(!beta006_native_collaboration_gate_passed(&root));
+
+        fs::remove_dir_all(&root).expect("remove test temp dir");
+    }
+
+    #[test]
+    fn codex_app_subagent_summary_accepts_separate_tool_and_action_fields() {
+        let log = concat!(
+            "{\"stage\":\"spawn_agent\",\"tool\":\"spawn_agent\"}\n",
+            "{\"stage\":\"spawn_agent\",\"tool\":\"spawn_agent\"}\n",
+            "{\"stage\":\"result\",\"tool\":\"multi_agent_v1\",\"name\":\"wait_agent\"}\n",
+            "{\"stage\":\"result\",\"tool\":\"multi_agent_v1\",\"name\":\"wait_agent\"}\n"
+        );
+
+        assert_eq!(codex_app_subagent_event_log_summary(log), Some((2, 2)));
+    }
 }

@@ -39,8 +39,8 @@ pub use agentic::{
 pub use openrouter::{
     ChatCompleter, ChatReasoningEffortWire, NativeHttpChatCompleter, OpenAiCompatibleChatCompleter,
     OpenAiCompatibleImageGenerator, OpenAiResponsesChatCompleter, OpenRouterAdapter,
-    OpenRouterToolDriver, ProviderChatCompleter, openai_reasoning_effort_value,
-    openrouter_reasoning_effort_value, parse_step, tool_definitions,
+    OpenRouterToolDriver, ProviderChatCompleter, assistant_text_from_chat_message,
+    openai_reasoning_effort_value, openrouter_reasoning_effort_value, parse_step, tool_definitions,
     tool_definitions_with_extra_available_tools,
 };
 pub use patch_write::{PatchPathLease, PlannedWrite, apply_file_writes_with_path_lease};

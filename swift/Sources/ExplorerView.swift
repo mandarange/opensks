@@ -15,7 +15,11 @@ struct ExplorerView: View {
         if nav.route == .chat {
             ConversationSidebar(
                 store: coordinator.conversations,
-                projectName: state.data?.workspaceLabel ?? "Workspace"
+                providers: coordinator.providers,
+                projectName: state.data?.workspaceLabel ?? "Workspace",
+                onOpenProviderSettings: {
+                    coordinator.navigation.route = .settings
+                }
             )
         } else {
             legacyPane

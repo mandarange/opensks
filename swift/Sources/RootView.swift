@@ -38,7 +38,7 @@ struct RootView: View {
             // Feed streamed execution events into the pipeline projection that
             // drives the graph (PIPE-001 — it previously never received any).
             state.pipelines = coordinator.pipelines
-            coordinator.bindConversations(cli: state.cli, workspace: state.workspace)
+            coordinator.bindConversations(cli: state.cli, workspace: state.workspace, engine: state.engine)
             // Bind the Git studio to the same resolved CLI + workspace, then wire
             // it to the editor (dirty-switch preflight) + conversations (commit
             // card sink) for the PR-035 local mutations.

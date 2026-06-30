@@ -80,6 +80,24 @@ final class RuntimeHardeningTests: XCTestCase {
         )
     }
 
+    func testAppStatePrefersWorkspaceEnvironmentForRelocatedArchiveLaunch() throws {
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("opensks-env-workspace-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        defer {
+            unsetenv(OpenSKSCLIProcess.workspaceEnvironmentKey)
+            try? FileManager.default.removeItem(at: workspace)
+        }
+        setenv(OpenSKSCLIProcess.workspaceEnvironmentKey, workspace.path, 1)
+
+        let state = AppState()
+
+        XCTAssertEqual(
+            state.workspace.standardizedFileURL.path,
+            workspace.standardizedFileURL.path
+        )
+    }
+
     private static func count(_ nodes: [FileNode]) -> Int {
         nodes.reduce(0) { total, node in
             total + 1 + count(node.children ?? [])
@@ -94,7 +112,7 @@ final class RuntimeHardeningTests: XCTestCase {
     func testEventBatcherCoalescesBurstIntoBoundedFlushes() {
         var delivered: [Int] = []
         // autoFlush off → fully deterministic; we drive ticks ourselves.
-        let batcher = EventBatcher<Int>(interval: 0, autoFlush: false) { delivered.append($0) }
+        let batcher = EventBatcher<Int>(interval: 0, autoFlush: false, onFlush: { delivered.append($0) })
 
         let eventCount = 10_000
         // Submit a huge burst with NO tick in between: all collapse into one slot.
@@ -125,7 +143,7 @@ final class RuntimeHardeningTests: XCTestCase {
     /// carrying that burst's latest value — and total flushes stay tiny.
     func testEventBatcherFlushCountBoundedByTicksNotEvents() {
         var delivered: [Int] = []
-        let batcher = EventBatcher<Int>(interval: 0, autoFlush: false) { delivered.append($0) }
+        let batcher = EventBatcher<Int>(interval: 0, autoFlush: false, onFlush: { delivered.append($0) })
 
         for burst in 0..<5 {
             for i in 0..<2_000 {
@@ -150,7 +168,7 @@ final class RuntimeHardeningTests: XCTestCase {
     /// asynchronously, still as a single coalesced flush.
     func testEventBatcherAutoFlushDeliversLatestAsynchronously() async {
         var delivered: [Int] = []
-        let batcher = EventBatcher<Int>(interval: 0.001, autoFlush: true) { delivered.append($0) }
+        let batcher = EventBatcher<Int>(interval: 0.001, autoFlush: true, onFlush: { delivered.append($0) })
         for i in 0..<1_000 { batcher.submit(i) }
 
         // Wait for the scheduled flush to fire.

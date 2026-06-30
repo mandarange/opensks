@@ -27,6 +27,7 @@ pub const CONVERSATION_DB_RELATIVE_PATH: &str = ".opensks/runtime/conversations.
 const CONVERSATION_TIMELINE_SEQUENCE_STRIDE: i64 = 1_000_000;
 const ASSISTANT_EVENT_SNIPPET_CHARS: usize = 700;
 const GIT_RECEIPT_ANCHOR_PREFIX: &str = "[OpenSKS git receipt anchor]";
+pub const MAX_PINNED_CONVERSATIONS: usize = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConversationError {
@@ -36,6 +37,8 @@ pub enum ConversationError {
     Json(#[from] serde_json::Error),
     #[error("conversation not found: {0}")]
     NotFound(String),
+    #[error("conversation pin limit exceeded: max {limit}")]
+    PinLimitExceeded { limit: usize },
     #[error("invalid stored enum value: {0}")]
     InvalidEnum(String),
     #[error("external event anchor already exists: {0}")]
@@ -310,18 +313,18 @@ fn trim_timeline_items(items: Vec<TimelineItem>, limit: usize) -> Vec<TimelineIt
 
     let mut selected_ids = HashSet::new();
     let mut selected = Vec::with_capacity(limit);
-    for preserved_kind in [
-        TimelineItemKind::UserMessage,
-        TimelineItemKind::AssistantMessage,
+    for (preserved_kind, preserved_role) in [
+        (TimelineItemKind::UserMessage, "user"),
+        (TimelineItemKind::AssistantMessage, "assistant"),
     ] {
         if selected.len() >= limit {
             break;
         }
-        if let Some(item) = items
-            .iter()
-            .rev()
-            .find(|item| item.kind == preserved_kind && !selected_ids.contains(&item.id))
-        {
+        if let Some(item) = items.iter().rev().find(|item| {
+            item.kind == preserved_kind
+                && is_message_backed_timeline_item(item, preserved_role)
+                && !selected_ids.contains(&item.id)
+        }) {
             selected_ids.insert(item.id.clone());
             selected.push(item.clone());
         }
@@ -343,6 +346,14 @@ fn trim_timeline_items(items: Vec<TimelineItem>, limit: usize) -> Vec<TimelineIt
             .then(lhs.id.cmp(&rhs.id))
     });
     selected
+}
+
+fn is_message_backed_timeline_item(item: &TimelineItem, role: &str) -> bool {
+    item.payload
+        .get("message_id")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+        && item.payload.get("role").and_then(serde_json::Value::as_str) == Some(role)
 }
 
 fn conversation_status_for_projected_run_state(raw: &str) -> &'static str {
@@ -779,11 +790,66 @@ impl ConversationRepository {
         Ok(())
     }
 
-    pub fn set_pinned(&self, id: &str, pinned: bool, now_ms: u64) -> Result<()> {
+    pub fn auto_name_conversation_if_placeholder(
+        &self,
+        id: &str,
+        user_text: &str,
+        now_ms: u64,
+    ) -> Result<bool> {
+        let existing = self
+            .conn
+            .query_row(
+                "SELECT title, title_source FROM conversations WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| ConversationError::NotFound(id.to_string()))?;
+        let (title, title_source) = existing;
+        if !should_auto_name_conversation(&title, &title_source) {
+            return Ok(false);
+        }
+        let generated = generated_conversation_title_from_text(user_text);
+        if generated.trim().is_empty() || generated == title {
+            return Ok(false);
+        }
         self.conn.execute(
+            "UPDATE conversations SET title = ?1, title_source = 'agent', updated_at_ms = ?2 WHERE id = ?3",
+            params![generated, now_ms as i64, id],
+        )?;
+        Ok(true)
+    }
+
+    pub fn set_pinned(&self, id: &str, pinned: bool, now_ms: u64) -> Result<()> {
+        let existing = self
+            .conn
+            .query_row(
+                "SELECT project_id, pinned FROM conversations WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0)),
+            )
+            .optional()?
+            .ok_or_else(|| ConversationError::NotFound(id.to_string()))?;
+        let (project_id, already_pinned) = existing;
+        if pinned && !already_pinned {
+            let pinned_count: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM conversations WHERE project_id = ?1 AND pinned = 1 AND archived = 0",
+                params![project_id],
+                |row| row.get(0),
+            )?;
+            if pinned_count >= MAX_PINNED_CONVERSATIONS as i64 {
+                return Err(ConversationError::PinLimitExceeded {
+                    limit: MAX_PINNED_CONVERSATIONS,
+                });
+            }
+        }
+        let n = self.conn.execute(
             "UPDATE conversations SET pinned = ?1, updated_at_ms = ?2 WHERE id = ?3",
             params![pinned as i64, now_ms as i64, id],
         )?;
+        if n == 0 {
+            return Err(ConversationError::NotFound(id.to_string()));
+        }
         Ok(())
     }
 
@@ -2558,6 +2624,14 @@ impl ConversationRepository {
                 params![request.conversation_id],
                 |r| r.get(0),
             )?;
+            let existing_title: (String, String) = self.conn.query_row(
+                "SELECT title, title_source FROM conversations WHERE id = ?1",
+                params![request.conversation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let auto_title = should_auto_name_conversation(&existing_title.0, &existing_title.1)
+                .then(|| generated_conversation_title_from_text(&user_content_redacted))
+                .filter(|title| !title.is_empty());
             let assistant_sequence = user_sequence + 1;
             self.conn.execute(
                 "INSERT INTO messages(id, project_id, conversation_id, turn_id, role, state, content_redacted, content_ciphertext, content_nonce, created_at_ms, updated_at_ms, sequence)
@@ -2672,14 +2746,27 @@ impl ConversationRepository {
                  VALUES(?1, ?2, 0, NULL, ?3)",
                 params![stream_id, run_id, now_ms as i64],
             )?;
-            self.conn.execute(
-                "UPDATE conversations
-                 SET status = 'running',
-                     last_message_at_ms = ?1,
-                     updated_at_ms = ?1
-                 WHERE id = ?2",
-                params![now_ms as i64, request.conversation_id],
-            )?;
+            if let Some(title) = auto_title {
+                self.conn.execute(
+                    "UPDATE conversations
+                     SET title = ?1,
+                         title_source = 'agent',
+                         status = 'running',
+                         last_message_at_ms = ?2,
+                         updated_at_ms = ?2
+                     WHERE id = ?3",
+                    params![title, now_ms as i64, request.conversation_id],
+                )?;
+            } else {
+                self.conn.execute(
+                    "UPDATE conversations
+                     SET status = 'running',
+                         last_message_at_ms = ?1,
+                         updated_at_ms = ?1
+                     WHERE id = ?2",
+                    params![now_ms as i64, request.conversation_id],
+                )?;
+            }
             Ok(())
         })();
         match result {
@@ -2740,7 +2827,10 @@ impl ConversationRepository {
                 });
             }
         }
-        Ok(turn_settings_from_thread(&thread_settings))
+        Ok(request
+            .settings
+            .clone()
+            .unwrap_or_else(|| turn_settings_from_thread(&thread_settings)))
     }
 
     /// Look up the identifiers previously recorded for an idempotency key within
@@ -2909,6 +2999,77 @@ fn conversation_from_row(row: &Row<'_>) -> Result<ConversationSummary> {
         updated_at_ms: row.get::<_, i64>(8)? as u64,
         last_message_at_ms: last.map(|v| v as u64),
     })
+}
+
+fn should_auto_name_conversation(title: &str, title_source: &str) -> bool {
+    if title_source != enum_to_str(&TitleSource::Generated) {
+        return false;
+    }
+    let normalized = title.trim().to_ascii_lowercase();
+    normalized.is_empty() || normalized == "new conversation" || normalized == "untitled"
+}
+
+fn generated_conversation_title_from_text(text: &str) -> String {
+    let mut title = text
+        .lines()
+        .map(sanitized_conversation_title_line)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    title = title
+        .trim_matches(|c: char| matches!(c, '#' | '>' | '-' | '*' | ' ' | '\t'))
+        .to_string();
+    let lower = title.to_ascii_lowercase();
+    for prefix in ["/goal", "$goal", "$team", "$dfix", "$answer"] {
+        if lower == prefix {
+            title.clear();
+            break;
+        }
+        if lower.starts_with(&format!("{prefix} ")) {
+            title = title[prefix.len()..].trim().to_string();
+            break;
+        }
+    }
+    title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.is_empty() {
+        return "New conversation".to_string();
+    }
+    const MAX_TITLE_CHARS: usize = 48;
+    if title.chars().count() <= MAX_TITLE_CHARS {
+        return title;
+    }
+    let shortened = title
+        .chars()
+        .take(MAX_TITLE_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    format!("{shortened}...")
+}
+
+fn sanitized_conversation_title_line(line: &str) -> String {
+    let mut title = line.trim();
+    if title.is_empty()
+        || title.starts_with("<hook_prompt")
+        || title.starts_with("<image ")
+        || title.eq_ignore_ascii_case("# files mentioned by the user:")
+        || title.eq_ignore_ascii_case("## my request for codex:")
+    {
+        return String::new();
+    }
+
+    while let Some(stripped) = strip_leading_markdown_link(title) {
+        title = stripped.trim_start();
+    }
+    title.to_string()
+}
+
+fn strip_leading_markdown_link(input: &str) -> Option<&str> {
+    if !input.starts_with('[') {
+        return None;
+    }
+    let close_label = input.find("](")?;
+    let close_url = input[close_label + 2..].find(')')? + close_label + 2;
+    Some(&input[close_url + 1..])
 }
 
 fn message_from_row(row: &Row<'_>) -> Result<ConversationMessage> {
@@ -3797,25 +3958,7 @@ mod tests {
                 attachment_refs: vec![],
             },
             thread_settings_updated_at_ms: None,
-            settings: Some(opensks_contracts::ConversationTurnSettings {
-                model: opensks_contracts::ModelSelection {
-                    mode: opensks_contracts::ModelSelectionMode::Auto,
-                    model_id: None,
-                    fallback_model_ids: vec![],
-                },
-                reasoning_effort: opensks_contracts::ReasoningEffort::Standard,
-                execution_mode: opensks_contracts::ExecutionMode::Worktree,
-                pipeline_id: "auto".to_string(),
-                graph_revision: None,
-                max_parallelism: 4,
-                verifier_count: 1,
-                tool_policy_id: "project-default".to_string(),
-                approval_policy_id: "safe-interactive".to_string(),
-                token_budget: None,
-                cost_budget_usd: None,
-                timeout_ms: None,
-                image_model_id: None,
-            }),
+            settings: None,
             context: opensks_contracts::TurnContextSelection::default(),
             idempotency_key: idempotency_key.to_string(),
         }
@@ -4267,7 +4410,7 @@ mod tests {
     }
 
     #[test]
-    fn accept_conversation_turn_snapshots_persisted_thread_settings() {
+    fn accept_conversation_turn_snapshots_request_settings_after_revision_check() {
         let repo = ConversationRepository::open_memory().unwrap();
         let (pid, cid) = project_and_conversation(&repo);
         let thread_settings = ConversationThreadSettings {
@@ -4301,9 +4444,36 @@ mod tests {
         let mut request =
             sample_turn_start_request(&pid, &cid, "req-thread-settings", "idem-thread-settings");
         request.thread_settings_updated_at_ms = Some(1_900);
-        let legacy_settings = request.settings.as_mut().expect("legacy settings echo");
-        legacy_settings.pipeline_id = "client-sent-ignored".to_string();
-        legacy_settings.max_parallelism = 99;
+        request.settings = Some(opensks_contracts::ConversationTurnSettings {
+            model: opensks_contracts::ModelSelection {
+                mode: opensks_contracts::ModelSelectionMode::Auto,
+                model_id: None,
+                fallback_model_ids: vec![],
+            },
+            reasoning_effort: opensks_contracts::ReasoningEffort::Standard,
+            execution_mode: opensks_contracts::ExecutionMode::Worktree,
+            pipeline_id: "auto".to_string(),
+            graph_revision: None,
+            max_parallelism: 4,
+            verifier_count: 1,
+            tool_policy_id: "project-default".to_string(),
+            approval_policy_id: "safe-interactive".to_string(),
+            token_budget: None,
+            cost_budget_usd: None,
+            timeout_ms: None,
+            image_model_id: None,
+        });
+        let request_settings = request
+            .settings
+            .as_mut()
+            .expect("request settings snapshot");
+        request_settings.model = opensks_contracts::ModelSelection {
+            mode: opensks_contracts::ModelSelectionMode::Pinned,
+            model_id: Some("openrouter/client-selected-code-model".to_string()),
+            fallback_model_ids: vec!["openrouter/client-selected-fallback".to_string()],
+        };
+        request_settings.pipeline_id = "client-sent-honored".to_string();
+        request_settings.max_parallelism = 99;
 
         let accepted = repo.accept_conversation_turn(&request, 2_000).unwrap();
         let effective_raw = repo
@@ -4317,31 +4487,35 @@ mod tests {
             .expect("stored settings digest");
         assert_eq!(accepted.settings_digest, stored_digest);
 
-        assert_eq!(effective.pipeline_id, "parallel-build");
-        assert_eq!(effective.max_parallelism, 7);
-        assert_eq!(effective.verifier_count, 3);
-        assert_eq!(effective.tool_policy_id, "strict-tools");
-        assert_eq!(effective.approval_policy_id, "review-everything");
-        assert_eq!(effective.token_budget, Some(200_000));
-        assert_eq!(effective.cost_budget_usd, Some(4.25));
-        assert_eq!(effective.timeout_ms, Some(900_000));
+        assert_eq!(effective.pipeline_id, "client-sent-honored");
+        assert_eq!(effective.max_parallelism, 99);
+        assert_eq!(effective.verifier_count, 1);
+        assert_eq!(effective.tool_policy_id, "project-default");
+        assert_eq!(effective.approval_policy_id, "safe-interactive");
+        assert_eq!(effective.token_budget, None);
+        assert_eq!(effective.cost_budget_usd, None);
+        assert_eq!(effective.timeout_ms, None);
         assert_eq!(
             effective.reasoning_effort,
-            opensks_contracts::ReasoningEffort::Deep
+            opensks_contracts::ReasoningEffort::Standard
         );
         assert_eq!(
             effective.execution_mode,
-            opensks_contracts::ExecutionMode::ReadOnly
+            opensks_contracts::ExecutionMode::Worktree
         );
         assert_eq!(
             effective.model.model_id.as_deref(),
-            Some("openrouter/production-code-model")
+            Some("openrouter/client-selected-code-model")
+        );
+        assert_eq!(
+            effective.model.fallback_model_ids,
+            vec!["openrouter/client-selected-fallback".to_string()]
         );
         assert_eq!(
             repo.run_projection_pipeline_id(&accepted.run_id)
                 .unwrap()
                 .as_deref(),
-            Some("parallel-build")
+            Some("client-sent-honored")
         );
         let replayed = repo.accept_conversation_turn(&request, 2_050).unwrap();
         assert_eq!(replayed.turn_id, accepted.turn_id);
@@ -4421,7 +4595,80 @@ mod tests {
         let effective: ConversationTurnSettings = serde_json::from_str(&effective_raw).unwrap();
 
         assert_eq!(effective.pipeline_id, "auto");
-        assert_eq!(effective.max_parallelism, 4);
+        assert_eq!(effective.max_parallelism, 16);
+    }
+
+    #[test]
+    fn accept_conversation_turn_auto_names_placeholder_conversation() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let pid = repo.create_project("/ws/demo", "Demo", 1_000).unwrap();
+        let cid = repo
+            .create_conversation(&pid, "New conversation", 1_100)
+            .unwrap();
+        let mut request =
+            sample_turn_start_request(&pid, &cid, "req-auto-title", "idem-auto-title");
+        request.message.text = "$goal Fix chat model picker and add tests".to_string();
+
+        repo.accept_conversation_turn(&request, 2_000).unwrap();
+
+        let summary = repo.get_conversation(&cid).unwrap().unwrap();
+        assert_eq!(summary.title, "Fix chat model picker and add tests");
+        assert_eq!(summary.title_source, TitleSource::Agent);
+    }
+
+    #[test]
+    fn accept_conversation_turn_auto_name_strips_leading_markdown_skill_link() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let pid = repo.create_project("/ws/demo", "Demo", 1_000).unwrap();
+        let cid = repo
+            .create_conversation(&pid, "New conversation", 1_100)
+            .unwrap();
+        let mut request =
+            sample_turn_start_request(&pid, &cid, "req-auto-title-link", "idem-auto-title-link");
+        request.message.text = "[$dfix](/tmp/dfix/SKILL.md) 푸쉬한번해줘".to_string();
+
+        repo.accept_conversation_turn(&request, 2_000).unwrap();
+
+        let summary = repo.get_conversation(&cid).unwrap().unwrap();
+        assert_eq!(summary.title, "푸쉬한번해줘");
+        assert!(!summary.title.contains("/tmp/"));
+        assert_eq!(summary.title_source, TitleSource::Agent);
+    }
+
+    #[test]
+    fn accept_conversation_turn_does_not_overwrite_user_title() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let pid = repo.create_project("/ws/demo", "Demo", 1_000).unwrap();
+        let cid = repo
+            .create_conversation(&pid, "New conversation", 1_100)
+            .unwrap();
+        repo.rename_conversation(&cid, "Release checklist", 1_200)
+            .unwrap();
+        let mut request =
+            sample_turn_start_request(&pid, &cid, "req-user-title", "idem-user-title");
+        request.message.text = "Replace the saved title".to_string();
+
+        repo.accept_conversation_turn(&request, 2_000).unwrap();
+
+        let summary = repo.get_conversation(&cid).unwrap().unwrap();
+        assert_eq!(summary.title, "Release checklist");
+        assert_eq!(summary.title_source, TitleSource::User);
+    }
+
+    #[test]
+    fn accept_conversation_turn_does_not_overwrite_non_placeholder_generated_title() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let pid = repo.create_project("/ws/demo", "Demo", 1_000).unwrap();
+        let cid = repo.create_conversation(&pid, "Thread", 1_100).unwrap();
+        let mut request =
+            sample_turn_start_request(&pid, &cid, "req-generated-title", "idem-generated-title");
+        request.message.text = "Rename should not happen from a later send".to_string();
+
+        repo.accept_conversation_turn(&request, 2_000).unwrap();
+
+        let summary = repo.get_conversation(&cid).unwrap().unwrap();
+        assert_eq!(summary.title, "Thread");
+        assert_eq!(summary.title_source, TitleSource::Generated);
     }
 
     #[test]
@@ -4804,6 +5051,77 @@ mod tests {
                 .iter()
                 .any(|item| item.kind == TimelineItemKind::Worker),
             "the latest event window should still be included: {items:#?}"
+        );
+    }
+
+    #[test]
+    fn timeline_limit_prefers_message_backed_assistant_over_raw_assistant_event() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let (pid, cid) = project_and_conversation(&repo);
+        let accepted = repo
+            .accept_conversation_turn(
+                &sample_turn_start_request(
+                    &pid,
+                    &cid,
+                    "req-timeline-raw-assistant",
+                    "idem-timeline-raw-assistant",
+                ),
+                2_000,
+            )
+            .unwrap();
+        let raw_assistant_event = execution_event(
+            &accepted.run_id,
+            "evt-raw-assistant-completed",
+            99,
+            EventKind::WorkItemCompleted,
+            serde_json::json!({
+                "agent_event_kind": "assistant_text_completed",
+                "assistant_message_id": accepted.assistant_message_id,
+                "worker_id": "agentic",
+                "payload": {
+                    "text": "Stopped after the 16-step budget without a final answer."
+                }
+            }),
+        );
+        repo.project_execution_events_into_timeline(
+            &accepted.run_id,
+            std::slice::from_ref(&raw_assistant_event),
+            2_020,
+        )
+        .unwrap();
+
+        let items = repo.timeline_items_for_conversation(&cid, 2).unwrap();
+        assert!(
+            items.len() <= 2,
+            "timeline limit must still be enforced: {items:#?}"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| item.kind == TimelineItemKind::UserMessage),
+            "user message must stay visible: {items:#?}"
+        );
+        assert!(
+            items.iter().any(|item| {
+                item.kind == TimelineItemKind::AssistantMessage
+                    && item
+                        .payload
+                        .get("message_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(accepted.assistant_message_id.as_str())
+                    && item.payload.get("role").and_then(serde_json::Value::as_str)
+                        == Some("assistant")
+            }),
+            "message-backed assistant must beat raw assistant execution events: {items:#?}"
+        );
+        assert!(
+            !items.iter().any(|item| {
+                item.payload
+                    .get("agent_event_kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("assistant_text_completed")
+            }),
+            "raw assistant execution event must not consume the protected assistant slot: {items:#?}"
         );
     }
 
@@ -5921,6 +6239,81 @@ mod tests {
         let counts = repo.delete_conversation(&cid).unwrap();
         assert_eq!(counts.messages, 2);
         assert!(repo.get_conversation(&cid).unwrap().is_none());
+    }
+
+    #[test]
+    fn set_pinned_enforces_project_pin_limit() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let pid = repo.create_project("/ws/demo", "Demo", 1_000).unwrap();
+        let ids: Vec<_> = (0..=MAX_PINNED_CONVERSATIONS)
+            .map(|index| {
+                repo.create_conversation(
+                    &pid,
+                    &format!("Conversation {index}"),
+                    1_100 + index as u64,
+                )
+                .unwrap()
+            })
+            .collect();
+
+        for id in ids.iter().take(MAX_PINNED_CONVERSATIONS) {
+            repo.set_pinned(id, true, 2_000).unwrap();
+        }
+
+        let err = repo
+            .set_pinned(&ids[MAX_PINNED_CONVERSATIONS], true, 2_100)
+            .unwrap_err();
+        match err {
+            ConversationError::PinLimitExceeded { limit } => {
+                assert_eq!(limit, MAX_PINNED_CONVERSATIONS);
+            }
+            other => panic!("expected pin limit error, got {other:?}"),
+        }
+        assert_eq!(
+            repo.list_conversations(&pid, ConversationFilter::Pinned, 50)
+                .unwrap()
+                .len(),
+            MAX_PINNED_CONVERSATIONS
+        );
+
+        repo.set_pinned(&ids[0], false, 2_200).unwrap();
+        repo.set_pinned(&ids[MAX_PINNED_CONVERSATIONS], true, 2_300)
+            .unwrap();
+        assert_eq!(
+            repo.list_conversations(&pid, ConversationFilter::Pinned, 50)
+                .unwrap()
+                .len(),
+            MAX_PINNED_CONVERSATIONS
+        );
+    }
+
+    #[test]
+    fn archived_pinned_conversations_do_not_consume_visible_pin_limit() {
+        let repo = ConversationRepository::open_memory().unwrap();
+        let pid = repo.create_project("/ws/demo", "Demo", 1_000).unwrap();
+        let ids: Vec<_> = (0..=MAX_PINNED_CONVERSATIONS)
+            .map(|index| {
+                repo.create_conversation(
+                    &pid,
+                    &format!("Conversation {index}"),
+                    1_100 + index as u64,
+                )
+                .unwrap()
+            })
+            .collect();
+
+        for id in ids.iter().take(MAX_PINNED_CONVERSATIONS) {
+            repo.set_pinned(id, true, 2_000).unwrap();
+        }
+        repo.set_archived(&ids[0], true, 2_100).unwrap();
+
+        repo.set_pinned(&ids[MAX_PINNED_CONVERSATIONS], true, 2_200)
+            .unwrap();
+        let visible_pinned = repo
+            .list_conversations(&pid, ConversationFilter::Pinned, 50)
+            .unwrap();
+        assert_eq!(visible_pinned.len(), MAX_PINNED_CONVERSATIONS);
+        assert!(!visible_pinned.iter().any(|item| item.id == ids[0]));
     }
 
     #[test]

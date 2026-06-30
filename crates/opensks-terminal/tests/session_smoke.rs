@@ -1,7 +1,7 @@
 #![cfg(not(windows))]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -78,10 +78,10 @@ fn invalid_cwd_returns_error() {
     assert!(matches!(error, TerminalRuntimeError::InvalidCwd { .. }));
 }
 
-fn config(session_id: &str, workspace: &PathBuf) -> TerminalSessionConfig {
+fn config(session_id: &str, workspace: &Path) -> TerminalSessionConfig {
     TerminalSessionConfig {
         session_id: session_id.to_string(),
-        cwd: workspace.clone(),
+        cwd: workspace.to_path_buf(),
         shell: Some(PathBuf::from("/bin/sh")),
         cols: 80,
         rows: 24,

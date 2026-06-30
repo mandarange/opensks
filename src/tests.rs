@@ -409,6 +409,23 @@ fn write_codex_app_agent_session_proof_fixture(root: &Path, mission_id: &str, pr
         format!(".sneakoscope/missions/{mission_id}/agents/parallel-runtime-proof.json");
     let codex_app_session_proof_ref =
         format!(".sneakoscope/missions/{mission_id}/agents/codex-app-agent-session-proof.json");
+    let mission_dir = agents_dir.parent().expect("mission dir");
+    let subagent_event_log_ref =
+        format!(".sneakoscope/missions/{mission_id}/subagent-evidence.jsonl");
+    let subagent_event_log = concat!(
+        "{\"stage\":\"spawn_agent\",\"agent_id\":\"019-agent-a\",\"agent_type\":\"worker\"}\n",
+        "{\"stage\":\"spawn_agent\",\"agent_id\":\"019-agent-b\",\"agent_type\":\"reviewer\"}\n",
+        "{\"stage\":\"spawn_agent\",\"agent_id\":\"019-agent-c\",\"agent_type\":\"mapper\"}\n",
+        "{\"tool\":\"multi_agent_v1\",\"action\":\"close_agent\",\"agent_id\":\"019-agent-a\"}\n",
+        "{\"tool\":\"multi_agent_v1\",\"action\":\"close_agent\",\"agent_id\":\"019-agent-b\"}\n",
+        "{\"tool\":\"multi_agent_v1\",\"action\":\"close_agent\",\"agent_id\":\"019-agent-c\"}\n",
+    );
+    fs::write(
+        mission_dir.join("subagent-evidence.jsonl"),
+        subagent_event_log,
+    )
+    .expect("write codex app subagent evidence log");
+    let subagent_event_log_hash = stable_content_hash(subagent_event_log);
     let parallel_runtime_proof = format!(
         concat!(
             "{{\n",
@@ -420,12 +437,16 @@ fn write_codex_app_agent_session_proof_fixture(root: &Path, mission_id: &str, pr
             "  \"max_observed_agent_sessions\": 3,\n",
             "  \"unique_agent_session_ids\": 3,\n",
             "  \"completed_agent_sessions\": 3,\n",
+            "  \"codex_app_subagent_event_log_ref\": {},\n",
+            "  \"codex_app_subagent_event_log_hash\": {},\n",
             "  \"utilization_proof_consistency\": {{\"ok\": true}},\n",
             "  \"passed\": true,\n",
             "  \"blockers\": []\n",
             "}}\n"
         ),
         json_string(mission_id),
+        json_string(&subagent_event_log_ref),
+        json_string(&subagent_event_log_hash),
     );
     fs::write(
         agents_dir.join("parallel-runtime-proof.json"),
@@ -457,6 +478,8 @@ fn write_codex_app_agent_session_proof_fixture(root: &Path, mission_id: &str, pr
             "  \"codex_app_completed_agent_count\": 3,\n",
             "  \"codex_app_unique_agent_session_count\": 3,\n",
             "  \"codex_app_agent_ids_hash_chain_ok\": true,\n",
+            "  \"codex_app_subagent_event_log_ref\": {},\n",
+            "  \"codex_app_subagent_event_log_hash\": {},\n",
             "  \"all_sessions_closed\": true,\n",
             "  \"terminal_sessions_closed\": true,\n",
             "  \"ledger_hash_chain_ok\": true,\n",
@@ -472,6 +495,8 @@ fn write_codex_app_agent_session_proof_fixture(root: &Path, mission_id: &str, pr
         json_string(&parallel_runtime_proof_ref),
         json_string(&parallel_runtime_proof_hash),
         json_string(&codex_app_session_proof_ref),
+        json_string(&subagent_event_log_ref),
+        json_string(&subagent_event_log_hash),
     );
     fs::write(agents_dir.join("agent-proof-evidence.json"), &agent_proof)
         .expect("write codex app agent proof evidence");
@@ -496,6 +521,8 @@ fn write_codex_app_agent_session_proof_fixture(root: &Path, mission_id: &str, pr
             "  \"agent_proof_evidence_hash\": {},\n",
             "  \"parallel_runtime_proof_ref\": {},\n",
             "  \"parallel_runtime_proof_hash\": {},\n",
+            "  \"codex_app_subagent_event_log_ref\": {},\n",
+            "  \"codex_app_subagent_event_log_hash\": {},\n",
             "  \"codex_app_agent_session_count\": 3,\n",
             "  \"codex_app_completed_agent_count\": 3,\n",
             "  \"worker_lane_count\": 1,\n",
@@ -514,6 +541,8 @@ fn write_codex_app_agent_session_proof_fixture(root: &Path, mission_id: &str, pr
         json_string(&agent_proof_evidence_hash),
         json_string(&parallel_runtime_proof_ref),
         json_string(&parallel_runtime_proof_hash),
+        json_string(&subagent_event_log_ref),
+        json_string(&subagent_event_log_hash),
     );
     fs::write(
         agents_dir.join("codex-app-agent-session-proof.json"),
@@ -881,6 +910,21 @@ fn default_cli_cwd_prefers_workspace_environment() {
     assert_eq!(cwd, root);
 }
 
+#[test]
+fn default_launch_cwd_prefers_workspace_environment() {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let root = temp_workspace("launch-env-cwd");
+    unsafe {
+        env::set_var(OPENSKS_WORKSPACE_ENV, &root);
+    }
+    let cwd = default_launch_cwd().expect("launch workspace env cwd");
+    unsafe {
+        env::remove_var(OPENSKS_WORKSPACE_ENV);
+    }
+
+    assert_eq!(cwd, root);
+}
+
 // macOS-only (compile_swift_app errs off macOS; ci-core is ubuntu, ci-macos-app covers it).
 #[cfg(target_os = "macos")]
 #[test]
@@ -956,6 +1000,68 @@ fn empty_args_creates_native_app_bundle() {
             .join("app")
             .join("gui-data.json")
             .exists()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn swift_app_bundle_build_uses_scratch_caches_when_env_missing() {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let old_clang = env::var_os("CLANG_MODULE_CACHE_PATH");
+    let old_swiftpm = env::var_os("SWIFTPM_HOME");
+    unsafe {
+        env::remove_var("CLANG_MODULE_CACHE_PATH");
+        env::remove_var("SWIFTPM_HOME");
+    }
+
+    let scratch = temp_workspace("swift-build-scratch-env");
+    let mut command = process::Command::new("swift");
+    configure_swift_build_environment(&mut command, &scratch);
+    let clang_module_cache = command
+        .get_envs()
+        .find(|(key, _)| *key == std::ffi::OsStr::new("CLANG_MODULE_CACHE_PATH"))
+        .and_then(|(_, value)| value.map(PathBuf::from));
+    let swiftpm_home = command
+        .get_envs()
+        .find(|(key, _)| *key == std::ffi::OsStr::new("SWIFTPM_HOME"))
+        .and_then(|(_, value)| value.map(PathBuf::from));
+
+    unsafe {
+        match old_clang {
+            Some(value) => env::set_var("CLANG_MODULE_CACHE_PATH", value),
+            None => env::remove_var("CLANG_MODULE_CACHE_PATH"),
+        }
+        match old_swiftpm {
+            Some(value) => env::set_var("SWIFTPM_HOME", value),
+            None => env::remove_var("SWIFTPM_HOME"),
+        }
+    }
+
+    assert_eq!(
+        clang_module_cache,
+        Some(scratch.join("clang-module-cache")),
+        "Swift bundle builds should not require writing clang modules under the user's home cache"
+    );
+    assert_eq!(
+        swiftpm_home,
+        Some(scratch.join("swiftpm-home")),
+        "SwiftPM should use a writable scratch home during bundle generation"
+    );
+    fs::remove_dir_all(scratch).ok();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn setup_progress_event_names_phase_and_elapsed_time() {
+    let event = render_setup_progress_event(
+        "Building Swift Studio app",
+        "still running",
+        Duration::from_secs(23),
+    );
+
+    assert_eq!(
+        event,
+        "[setup] Building Swift Studio app: still running (elapsed: 23s)"
     );
 }
 
@@ -2954,6 +3060,7 @@ fn worker_runtime_writes_lease_recovery_and_routing_artifacts() {
             .contains("wrote local worker runtime artifacts")
     );
     assert!(output.stdout.contains("recovered_expired: 1"));
+    assert!(output.stdout.contains("file_writes: 2"));
 
     let worker_dir = first_child_dir(&root.join(OPEN_SKSDIR).join("workers"));
     for artifact in [
@@ -2961,6 +3068,7 @@ fn worker_runtime_writes_lease_recovery_and_routing_artifacts() {
         "worker-heartbeats.jsonl",
         "worker-bus.json",
         "worker-routing.json",
+        "worker-file-edits.json",
         "worker-final-state.json",
     ] {
         assert!(
@@ -2987,6 +3095,25 @@ fn worker_runtime_writes_lease_recovery_and_routing_artifacts() {
     assert!(bus.contains("\"concurrent_request_routing\": true"));
     assert!(bus.contains("\"live_remote_provider_bus\": false"));
 
+    let file_edits =
+        fs::read_to_string(worker_dir.join("worker-file-edits.json")).expect("file edits");
+    assert!(file_edits.contains("\"schema\": \"opensks.worker-file-edits.v1\""));
+    assert!(file_edits.contains("\"actual_file_write_count\": 2"));
+    assert!(file_edits.contains("\"parallel_worker_file_edit_windows_verified\": true"));
+    assert!(file_edits.contains("\"nonblocking_worker_result_handoff_verified\": true"));
+    assert!(file_edits.contains("\"main_handoff_before_all_workers_completed\":true"));
+    assert!(file_edits.contains("\"all_write_hashes_verified\": true"));
+    assert!(
+        worker_dir
+            .join("files/1-implementation-worker-worker-implementation-1.md")
+            .exists()
+    );
+    assert!(
+        worker_dir
+            .join("files/2-qa-reviewer-worker-reviewer-1.md")
+            .exists()
+    );
+
     let final_state =
         fs::read_to_string(worker_dir.join("worker-final-state.json")).expect("final");
     assert!(final_state.contains("\"schema\": \"opensks.worker-final-state.v1\""));
@@ -2995,6 +3122,10 @@ fn worker_runtime_writes_lease_recovery_and_routing_artifacts() {
     assert!(final_state.contains("\"expired_lease_count\": 1"));
     assert!(final_state.contains("\"recovered_expired_lease_count\": 1"));
     assert!(final_state.contains("\"daemon_visible_worker_bus\": true"));
+    assert!(final_state.contains("\"actual_file_write_count\": 2"));
+    assert!(final_state.contains("\"parallel_worker_file_edit_windows_verified\": true"));
+    assert!(final_state.contains("\"nonblocking_worker_result_handoff_verified\": true"));
+    assert!(final_state.contains("\"all_file_write_hashes_verified\": true"));
 
     run_cli(["app"], &root).expect("app command");
     let gui_data =
@@ -3002,6 +3133,10 @@ fn worker_runtime_writes_lease_recovery_and_routing_artifacts() {
     assert!(gui_data.contains("\"worker_runtime\""));
     assert!(gui_data.contains("\"available\":true"));
     assert!(gui_data.contains("\"active_leases\":2"));
+    assert!(gui_data.contains("\"file_writes\":2"));
+    assert!(gui_data.contains("\"parallel_file_edit_windows\":true"));
+    assert!(gui_data.contains("\"nonblocking_worker_result_handoff\":true"));
+    assert!(gui_data.contains("\"all_file_write_hashes_verified\":true"));
     assert!(gui_data.contains("\"recovered_leases\":1"));
 }
 
@@ -3242,6 +3377,58 @@ fn beta006_requires_independently_verified_native_collaboration_provenance() {
 }
 
 #[test]
+fn beta006_records_codex_app_subagent_event_log_as_partial_unverified() {
+    let root = temp_workspace("beta006-codex-app-subagent-event-log-partial");
+    let mission_id = "M-20990101-000008-beta006";
+    let mission_dir = root.join(".sneakoscope").join("missions").join(mission_id);
+    fs::create_dir_all(&mission_dir).expect("create mission dir");
+    fs::write(
+        mission_dir.join("subagent-evidence.jsonl"),
+        concat!(
+            "{\"ts\":\"2099-01-01T00:00:00Z\",\"stage\":\"spawn_agent\",\"tool\":\"spawn_agent\",\"payload_keys\":[\"tool_response\"]}\n",
+            "{\"ts\":\"2099-01-01T00:00:01Z\",\"stage\":\"spawn_agent\",\"tool\":\"spawn_agent\",\"payload_keys\":[\"tool_response\"]}\n",
+            "{\"ts\":\"2099-01-01T00:00:02Z\",\"stage\":\"result\",\"tool\":\"multi_agent_v1close_agent\",\"payload_keys\":[\"tool_response\"]}\n",
+            "{\"ts\":\"2099-01-01T00:00:03Z\",\"stage\":\"result\",\"tool\":\"multi_agent_v1close_agent\",\"payload_keys\":[\"tool_response\"]}\n",
+        ),
+    )
+    .expect("write subagent evidence log");
+
+    run_cli(["bench"], &root).expect("bench with codex app subagent event log");
+    run_cli(["acceptance", "audit"], &root).expect("acceptance with partial codex app log");
+    assert_beta006_status(&root, "partial");
+
+    let execution = fs::read_to_string(
+        root.join(OPEN_SKSDIR)
+            .join("bench")
+            .join("native-collaboration-execution.json"),
+    )
+    .expect("native collaboration execution");
+    assert!(execution.contains("\"status\": \"codex_app_subagent_events_recorded_unverified\""));
+    assert!(execution.contains("\"native_multi_session_llm_collaboration\": true"));
+    assert!(execution.contains("\"native_agent_provenance_verified\": false"));
+    assert!(execution.contains("\"provenance_proof_kind\": \"codex_app_subagent_event_log\""));
+    assert!(execution.contains("\"source_mission_id\": \"M-20990101-000008-beta006\""));
+
+    let events = fs::read_to_string(
+        root.join(OPEN_SKSDIR)
+            .join("bench")
+            .join("native-collaboration-events.jsonl"),
+    )
+    .expect("native collaboration events");
+    assert!(events.contains("\"event\":\"native_provenance_unverified\""));
+    assert!(events.contains("codex_app_subagent_event_log"));
+
+    let diagnostics = fs::read_to_string(
+        root.join(OPEN_SKSDIR)
+            .join("bench")
+            .join("native-proof-diagnostics.json"),
+    )
+    .expect("native proof diagnostics");
+    assert!(diagnostics.contains("\"status\": \"partial_unverified\""));
+    assert!(diagnostics.contains("codex-app-subagent-evidence.event-log-partial"));
+}
+
+#[test]
 fn beta006_passes_with_non_fake_native_cli_session_proof() {
     let root = temp_workspace("beta006-native-proof-pass");
     let mission_id = "M-20990101-000002-beta006";
@@ -3283,6 +3470,8 @@ fn beta006_passes_with_hash_bound_codex_app_multi_agent_session_proof() {
     assert!(execution.contains("\"provenance_proof_kind\": \"codex_app_multi_agent_v1\""));
     assert!(execution.contains("\"codex_app_agent_session_proof_ref\": \".sneakoscope/missions/"));
     assert!(execution.contains("codex-app-agent-session-proof.json"));
+    assert!(execution.contains("\"codex_app_subagent_event_log_ref\": \".sneakoscope/missions/"));
+    assert!(execution.contains("subagent-evidence.jsonl"));
 
     let diagnostics = fs::read_to_string(
         root.join(OPEN_SKSDIR)
@@ -3293,6 +3482,27 @@ fn beta006_passes_with_hash_bound_codex_app_multi_agent_session_proof() {
     assert!(diagnostics.contains("\"status\": \"verified\""));
     assert!(diagnostics.contains("\"provenance_proof_kind\": \"codex_app_multi_agent_v1\""));
     assert!(diagnostics.contains("codex-app-agent-session-proof.count-fields"));
+}
+
+#[test]
+fn beta006_rejects_codex_app_multi_agent_proof_when_subagent_log_tampered() {
+    let root = temp_workspace("beta006-codex-app-multi-agent-proof-tampered-log");
+    let mission_id = "M-20990101-000008-beta006";
+    write_native_collaboration_fixture(&root, mission_id);
+    write_codex_app_agent_session_proof_fixture(&root, mission_id, None);
+
+    run_cli(["bench"], &root).expect("bench with codex app multi-agent proof");
+    fs::write(
+        root.join(".sneakoscope")
+            .join("missions")
+            .join(mission_id)
+            .join("subagent-evidence.jsonl"),
+        "{\"stage\":\"spawn_agent\",\"agent_id\":\"tampered\",\"agent_type\":\"worker\"}\n",
+    )
+    .expect("tamper subagent event log");
+    run_cli(["acceptance", "audit"], &root)
+        .expect("acceptance rejects tampered codex app subagent log");
+    assert_beta006_status(&root, "partial");
 }
 
 #[test]
@@ -4063,6 +4273,56 @@ fn provider_help_has_no_artifact_side_effects() {
 }
 
 #[test]
+fn provider_registry_list_materializes_codex_lb_env_without_serializing_secret() {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let root = temp_workspace("provider-registry-codex-lb-env");
+    let env_secret = "codex-env-secret-should-not-serialize";
+    unsafe {
+        env::set_var(opensks_provider::CODEX_LB_API_KEY_ENV_VAR, env_secret);
+        env::remove_var(opensks_provider::CODEX_LB_BASE_URL_ENV_VAR);
+    }
+
+    let listed = run_cli(
+        [
+            "provider",
+            "registry-list",
+            "--workspace",
+            root.to_str().expect("workspace path"),
+        ],
+        &root,
+    )
+    .expect("registry-list should import codex-lb env ref");
+
+    unsafe {
+        env::remove_var(opensks_provider::CODEX_LB_API_KEY_ENV_VAR);
+        env::remove_var(opensks_provider::CODEX_LB_BASE_URL_ENV_VAR);
+    }
+
+    let state: serde_json::Value = serde_json::from_str(&listed.stdout).expect("registry json");
+    assert_eq!(
+        state["providers"][0]["id"],
+        opensks_provider::CODEX_LB_PROVIDER_ID
+    );
+    assert_eq!(state["providers"][0]["kind"], "codex_lb");
+    assert_eq!(state["providers"][0]["auth"]["store"], "external_broker");
+    assert_eq!(state["providers"][0]["auth"]["service"], "env");
+    assert_eq!(
+        state["providers"][0]["auth"]["account"],
+        opensks_provider::CODEX_LB_API_KEY_ENV_VAR
+    );
+    assert!(state["models"].as_array().expect("models").len() >= 5);
+    assert!(
+        state["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .any(|model| model["id"]
+                == format!("{}/gpt-5.5", opensks_provider::CODEX_LB_PROVIDER_ID))
+    );
+    assert!(!listed.stdout.contains(env_secret));
+}
+
+#[test]
 #[cfg(unix)]
 fn provider_env_source_overrides_keychain_without_serializing_secrets() {
     let _guard = ENV_LOCK.lock().expect("env lock");
@@ -4795,6 +5055,19 @@ fn app_use_policy_broker_blocks_sensitive_native_actions() {
 
     let actions = fs::read_to_string(session_dir.join("app-actions.jsonl")).expect("actions");
     assert!(actions.contains("denied_sensitive_app_action"));
+}
+
+#[test]
+fn app_use_inspect_target_names_do_not_trigger_open_action_substrings() {
+    let decision = plan_app_action("inspect OpenSKS accessibility tree");
+    assert_eq!(decision.requested_action, "inspect_app_state");
+    assert_eq!(decision.decision, "allowed_inspection_only");
+    assert!(decision.inspection_allowed);
+    assert!(!decision.app_action_allowed);
+
+    let open_action = plan_app_action("open OpenSKS");
+    assert_eq!(open_action.requested_action, "open");
+    assert_eq!(open_action.decision, "approval_required_for_app_action");
 }
 
 #[test]

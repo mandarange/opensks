@@ -1,9 +1,10 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use opensks_artifacts::redact_secrets;
 use opensks_contracts::{
-    CompiledPlan, EXECUTION_EVENT_ENVELOPE_SCHEMA, EventKind, PipelineGraph, SchedulerSnapshot,
-    SchedulerWorkItem, Sensitivity, WorkState,
+    CompiledPlan, EXECUTION_EVENT_ENVELOPE_SCHEMA, EventKind, PipelineGraph, PlannerShardPolicy,
+    SchedulerSnapshot, SchedulerWorkItem, Sensitivity, WorkState, WorkTemplate,
 };
 use opensks_event_store::{EventStore, EventStoreError};
 use opensks_graph::compile_graph;
@@ -86,29 +87,87 @@ pub fn plan_graph_for_scheduler(
         return Err(EngineError::GraphCompileBlocked);
     }
     validate_compiled_planner_shard_policy(graph, &compiled_plan)?;
+    let template_expansion_ids = scheduler_template_expansion_ids(&compiled_plan);
     let mut work_items = Vec::new();
     for template in &compiled_plan.work_templates {
+        let item_ids = template_expansion_ids
+            .get(&template.id)
+            .cloned()
+            .unwrap_or_else(|| vec![template.id.clone()]);
         let dependencies = template
             .dependencies
             .iter()
-            .map(|node_id| format!("work-template-{node_id}"))
-            .collect();
-        let mut item = make_work_item(run_id, &template.id, dependencies);
-        item.node_id = template.node_id.clone();
-        item.kind = template.kind.clone();
-        item.capability_requirements = template.capability_requirements.clone();
-        item.requirement_ids = template.requirement_ids.clone();
-        item.shard_policy_id = template.shard_policy_id.clone();
-        item.shard_policy_selection_policy = template.shard_policy_selection_policy.clone();
-        item.shard_policy_required_source_count = template.shard_policy_required_source_count;
-        item.shard_policy_required_verifier_count = template.shard_policy_required_verifier_count;
-        item.state = WorkState::Ready;
-        work_items.push(item);
+            .flat_map(|node_id| {
+                let item_id = format!("work-template-{node_id}");
+                template_expansion_ids
+                    .get(&item_id)
+                    .cloned()
+                    .unwrap_or_else(|| vec![item_id])
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let shard_count = item_ids.len();
+        for (index, item_id) in item_ids.into_iter().enumerate() {
+            let mut item = make_work_item(run_id, &item_id, dependencies.clone());
+            item.node_id = template.node_id.clone();
+            item.kind = template.kind.clone();
+            item.capability_requirements = template.capability_requirements.clone();
+            item.requirement_ids = template.requirement_ids.clone();
+            if shard_count > 1 {
+                item.requirement_ids
+                    .push(format!("objective-shard:{}/{}", index + 1, shard_count));
+                item.requirement_ids
+                    .push(format!("objective-node:{}", template.node_id));
+                item.evidence_refs
+                    .push("engine:objective-plan-shard-expanded".to_string());
+            }
+            item.shard_policy_id = template.shard_policy_id.clone();
+            item.shard_policy_selection_policy = template.shard_policy_selection_policy.clone();
+            item.shard_policy_required_source_count = template.shard_policy_required_source_count;
+            item.shard_policy_required_verifier_count =
+                template.shard_policy_required_verifier_count;
+            item.state = WorkState::Ready;
+            work_items.push(item);
+        }
     }
     Ok(EngineRunPlan {
         compiled_plan,
         work_items,
     })
+}
+
+fn scheduler_template_expansion_ids(compiled_plan: &CompiledPlan) -> BTreeMap<String, Vec<String>> {
+    compiled_plan
+        .work_templates
+        .iter()
+        .map(|template| {
+            let shard_count =
+                scheduler_template_shard_count(template, compiled_plan.shard_policy.as_ref());
+            let item_ids = if shard_count <= 1 {
+                vec![template.id.clone()]
+            } else {
+                (1..=shard_count)
+                    .map(|index| format!("{}-shard-{index}", template.id))
+                    .collect()
+            };
+            (template.id.clone(), item_ids)
+        })
+        .collect()
+}
+
+fn scheduler_template_shard_count(
+    template: &WorkTemplate,
+    shard_policy: Option<&PlannerShardPolicy>,
+) -> usize {
+    let Some(policy) = shard_policy else {
+        return 1;
+    };
+    match template.node_id.as_str() {
+        "workers" => (policy.implementation_shard_count as usize).max(1),
+        "verifier" => (policy.verifier_shard_count as usize).max(1),
+        _ => 1,
+    }
 }
 
 fn validate_compiled_planner_shard_policy(
@@ -547,6 +606,78 @@ mod tests {
                 .all(|template| {
                     template.shard_policy_id.as_deref() == Some(shard_policy.id.as_str())
                 })
+        );
+    }
+
+    #[test]
+    fn engine_expands_objective_worker_and_verifier_pools_into_shards() {
+        let mut request = opensks_contracts::ObjectivePlanRequest::new(
+            "Create two independent implementation shards and verify both",
+        );
+        request.max_parallelism = 2;
+        request.role_count = 2;
+        let planned = opensks_graph::plan_graph_from_objective(&request);
+        let run_plan =
+            plan_graph_for_scheduler("run-objective-shards", &planned.graph).expect("run plan");
+        let item_ids = run_plan
+            .work_items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(item_ids.contains("work-template-workers-shard-1"));
+        assert!(item_ids.contains("work-template-workers-shard-2"));
+        assert!(item_ids.contains("work-template-verifier-shard-1"));
+        assert!(item_ids.contains("work-template-verifier-shard-2"));
+        assert!(!item_ids.contains("work-template-workers"));
+        assert!(!item_ids.contains("work-template-verifier"));
+
+        let worker_one = run_plan
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-template-workers-shard-1")
+            .expect("worker shard");
+        assert_eq!(worker_one.node_id, "workers");
+        assert_eq!(
+            worker_one.dependencies,
+            vec!["work-template-role_router".to_string()]
+        );
+        assert!(
+            worker_one
+                .requirement_ids
+                .contains(&"objective-shard:1/2".to_string())
+        );
+        assert!(
+            worker_one
+                .evidence_refs
+                .contains(&"engine:objective-plan-shard-expanded".to_string())
+        );
+
+        let verifier_one = run_plan
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-template-verifier-shard-1")
+            .expect("verifier shard");
+        assert_eq!(verifier_one.node_id, "verifier");
+        assert_eq!(
+            verifier_one.dependencies,
+            vec![
+                "work-template-workers-shard-1".to_string(),
+                "work-template-workers-shard-2".to_string()
+            ]
+        );
+
+        let apply = run_plan
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-template-apply")
+            .expect("apply item");
+        assert_eq!(
+            apply.dependencies,
+            vec![
+                "work-template-verifier-shard-1".to_string(),
+                "work-template-verifier-shard-2".to_string()
+            ]
         );
     }
 

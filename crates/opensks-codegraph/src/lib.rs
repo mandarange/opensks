@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -35,6 +35,154 @@ impl CodeGraph {
     pub fn update_file(&mut self, workspace: &Path, path: &Path) -> Result<(), CodeGraphError> {
         self.update_file_records(workspace, path)?;
         self.refresh_relationship_edges(workspace)?;
+        Ok(())
+    }
+
+    /// Update file-local records without recomputing whole-workspace
+    /// relationship edges.
+    ///
+    /// This is intended for latency-sensitive foreground context construction,
+    /// where changed-file symbols are useful but a full calls/references refresh
+    /// would block chat startup. Persisted index update paths should continue to
+    /// use [`CodeGraph::update_file`] so their relationship graph stays fresh.
+    pub fn update_file_records_only(
+        &mut self,
+        workspace: &Path,
+        path: &Path,
+    ) -> Result<(), CodeGraphError> {
+        let relative = relative_path(workspace, path);
+        let file_id = format!("file:{relative}");
+        let preserved_file_edges = self
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.kind != CodeGraphEdgeKind::Contains
+                    && (edge.from_id == file_id || edge.to_id == file_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        self.update_file_records(workspace, path)?;
+
+        let mut seen = self
+            .edges
+            .iter()
+            .map(edge_key)
+            .collect::<std::collections::BTreeSet<_>>();
+        for edge in preserved_file_edges {
+            if self.records.contains_key(&edge.from_id)
+                && self.records.contains_key(&edge.to_id)
+                && seen.insert(edge_key(&edge))
+            {
+                self.edges.push(edge);
+            }
+        }
+        Ok(())
+    }
+
+    /// Update file-local records and refresh only the relationship edges that
+    /// can be derived from the changed file itself.
+    ///
+    /// This keeps foreground context packs useful without the full workspace
+    /// file-by-symbol scan performed by [`CodeGraph::refresh_relationship_edges`].
+    pub fn update_file_for_context(
+        &mut self,
+        workspace: &Path,
+        path: &Path,
+    ) -> Result<(), CodeGraphError> {
+        self.update_file_records(workspace, path)?;
+        self.refresh_file_relationship_edges(workspace, path)
+    }
+
+    fn refresh_file_relationship_edges(
+        &mut self,
+        workspace: &Path,
+        path: &Path,
+    ) -> Result<(), CodeGraphError> {
+        let relative = relative_path(workspace, path);
+        let file_id = format!("file:{relative}");
+        let content = fs::read_to_string(path)?;
+        let content_tokens = identifier_token_set(&content);
+        let records = self.records.values().cloned().collect::<Vec<_>>();
+        let symbol_records = records
+            .iter()
+            .filter(|record| matches!(record.kind, CodeGraphNodeKind::Symbol))
+            .cloned()
+            .collect::<Vec<_>>();
+        let import_records = records
+            .iter()
+            .filter(|record| record.kind == CodeGraphNodeKind::Import && record.path == relative)
+            .cloned()
+            .collect::<Vec<_>>();
+        let test_records = records
+            .iter()
+            .filter(|record| record.kind == CodeGraphNodeKind::Test && record.path == relative)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut seen = self
+            .edges
+            .iter()
+            .map(edge_key)
+            .collect::<std::collections::BTreeSet<_>>();
+        for import in &import_records {
+            for symbol in &symbol_records {
+                if import.id == symbol.id {
+                    continue;
+                }
+                if import_mentions_symbol(&import.name, &symbol.name) {
+                    self.push_edge_once(
+                        &mut seen,
+                        import.id.clone(),
+                        symbol.id.clone(),
+                        CodeGraphEdgeKind::Imports,
+                    );
+                }
+            }
+        }
+
+        for symbol in &symbol_records {
+            if symbol.path == relative {
+                continue;
+            }
+            if calls_symbol(&content, &symbol.name) {
+                self.push_edge_once(
+                    &mut seen,
+                    file_id.clone(),
+                    symbol.id.clone(),
+                    CodeGraphEdgeKind::Calls,
+                );
+            } else if content_tokens.contains(&symbol.name) {
+                self.push_edge_once(
+                    &mut seen,
+                    file_id.clone(),
+                    symbol.id.clone(),
+                    CodeGraphEdgeKind::References,
+                );
+            }
+        }
+
+        for test in &test_records {
+            for symbol in &symbol_records {
+                if test.id == symbol.id {
+                    continue;
+                }
+                if test.path == symbol.path && test_covers_symbol(&test.name, &symbol.name) {
+                    self.push_edge_once(
+                        &mut seen,
+                        test.id.clone(),
+                        symbol.id.clone(),
+                        CodeGraphEdgeKind::Tests,
+                    );
+                }
+            }
+        }
+        self.edges.sort_by(|left, right| {
+            edge_key(left)
+                .cmp(&edge_key(right))
+                .then_with(|| left.from_id.cmp(&right.from_id))
+                .then_with(|| left.to_id.cmp(&right.to_id))
+        });
         Ok(())
     }
 
@@ -512,6 +660,10 @@ fn identifier_tokens(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn identifier_token_set(value: &str) -> BTreeSet<String> {
+    identifier_tokens(value).into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,5 +871,96 @@ mod tests {
             "incremental update must not rescan or rebuild unrelated files"
         );
         assert_eq!(graph.query("util_beta").len(), 1);
+    }
+
+    #[test]
+    fn records_only_update_skips_relationship_refresh_for_foreground_context() {
+        let root = temp_workspace("records-only-update");
+        let caller_path = root.join("src/caller.rs");
+        let helper_path = root.join("src/helper.rs");
+        fs::write(&caller_path, "pub fn caller_alpha() { helper_beta(); }\n").expect("caller");
+        fs::write(
+            &helper_path,
+            "pub fn helper_beta() {}\npub fn helper_gamma() {}\n",
+        )
+        .expect("helper");
+
+        let mut graph = CodeGraph::index_workspace(&root).expect("index");
+        let beta = graph
+            .query("helper_beta")
+            .into_iter()
+            .find(|record| record.kind == CodeGraphNodeKind::Symbol)
+            .expect("beta symbol");
+        let gamma = graph
+            .query("helper_gamma")
+            .into_iter()
+            .find(|record| record.kind == CodeGraphNodeKind::Symbol)
+            .expect("gamma symbol");
+        assert!(graph.to_index().edges.iter().any(|edge| {
+            edge.from_id == "file:src/caller.rs"
+                && edge.to_id == beta.id
+                && edge.kind == CodeGraphEdgeKind::Calls
+        }));
+        assert!(!graph.to_index().edges.iter().any(|edge| {
+            edge.from_id == "file:src/caller.rs"
+                && edge.to_id == gamma.id
+                && edge.kind == CodeGraphEdgeKind::Calls
+        }));
+
+        fs::write(&caller_path, "pub fn caller_delta() { helper_gamma(); }\n").expect("rewrite");
+        graph
+            .update_file_records_only(&root, &caller_path)
+            .expect("records only update");
+
+        assert!(graph.query("caller_alpha").is_empty());
+        assert_eq!(graph.query("caller_delta").len(), 1);
+        assert!(
+            graph.to_index().edges.iter().any(|edge| {
+                edge.from_id == "file:src/caller.rs"
+                    && edge.to_id == beta.id
+                    && edge.kind == CodeGraphEdgeKind::Calls
+            }),
+            "foreground context updates keep prior file-level adjacency from the persisted index"
+        );
+        assert!(
+            !graph.to_index().edges.iter().any(|edge| {
+                edge.from_id == "file:src/caller.rs"
+                    && edge.to_id == gamma.id
+                    && edge.kind == CodeGraphEdgeKind::Calls
+            }),
+            "foreground context updates must not rebuild relationship edges"
+        );
+    }
+
+    #[test]
+    fn context_update_refreshes_relationships_for_changed_file_only() {
+        let root = temp_workspace("context-update-file-only");
+        let caller_path = root.join("src/caller.rs");
+        let helper_path = root.join("src/helper.rs");
+        let other_path = root.join("src/other.rs");
+        fs::write(&caller_path, "pub fn caller_alpha() {}\n").expect("caller");
+        fs::write(&helper_path, "pub fn helper_delta() {}\n").expect("helper");
+        fs::write(&other_path, "pub fn other_alpha() {}\n").expect("other");
+
+        let mut graph = CodeGraph::index_workspace(&root).expect("index");
+        let helper = graph
+            .query("helper_delta")
+            .into_iter()
+            .find(|record| record.kind == CodeGraphNodeKind::Symbol)
+            .expect("helper symbol");
+
+        fs::write(&caller_path, "pub fn caller_beta() { helper_delta(); }\n")
+            .expect("rewrite caller");
+        graph
+            .update_file_for_context(&root, &caller_path)
+            .expect("context update");
+
+        assert_eq!(graph.query("caller_beta").len(), 1);
+        assert!(graph.to_index().edges.iter().any(|edge| {
+            edge.from_id == "file:src/caller.rs"
+                && edge.to_id == helper.id
+                && edge.kind == CodeGraphEdgeKind::Calls
+        }));
+        assert_eq!(graph.query("other_alpha").len(), 1);
     }
 }

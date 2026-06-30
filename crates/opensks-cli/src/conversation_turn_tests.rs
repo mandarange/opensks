@@ -135,3 +135,153 @@ fn turn_start_persists_user_and_assistant_messages() {
 
     fs::remove_dir_all(root).ok();
 }
+
+#[test]
+fn cli_turn_start_codex_lb_pinned_model_seeds_provider_registry() {
+    let root = temp_workspace("opensks-cli-turn-codex-lb-sync");
+    let mut thread_settings =
+        opensks_contracts::ConversationThreadSettings::default_for("conversation-1", 1_000);
+    thread_settings.model_selection = opensks_contracts::ModelSelection {
+        mode: opensks_contracts::ModelSelectionMode::Pinned,
+        model_id: Some(format!(
+            "{}/gpt-5.4-nano",
+            opensks_provider::CODEX_LB_PROVIDER_ID
+        )),
+        fallback_model_ids: Vec::new(),
+    };
+    let settings = turn_settings_from_thread(&thread_settings);
+
+    sync_cli_external_provider_registry_for_settings_from_config(
+        &root,
+        &settings,
+        1_100,
+        true,
+        Some("https://codex.example.test/backend-api/codex".to_string()),
+    )
+    .expect("sync codex-lb provider");
+
+    let repo = opensks_provider::ProviderRepository::open_workspace(&root).expect("provider repo");
+    let decision = opensks_provider::resolve_routing_decision_from_repository(
+        &repo,
+        "route-cli-sync",
+        &settings,
+    )
+    .expect("routing decision");
+    assert!(decision.status.has_resolved_model());
+    assert_eq!(
+        decision.selected_model_id.as_deref(),
+        Some("provider-codex-lb-env/gpt-5.4-nano")
+    );
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn cli_turn_start_codex_lb_auto_mode_seeds_empty_provider_registry() {
+    let root = temp_workspace("opensks-cli-turn-codex-lb-auto-sync");
+    let thread_settings =
+        opensks_contracts::ConversationThreadSettings::default_for("conversation-1", 1_000);
+    let settings = turn_settings_from_thread(&thread_settings);
+
+    sync_cli_external_provider_registry_for_settings_from_config(
+        &root,
+        &settings,
+        1_100,
+        true,
+        Some("https://codex.example.test/backend-api/codex".to_string()),
+    )
+    .expect("sync codex-lb provider");
+
+    let repo = opensks_provider::ProviderRepository::open_workspace(&root).expect("provider repo");
+    let decision = opensks_provider::resolve_routing_decision_from_repository(
+        &repo,
+        "route-cli-auto-sync",
+        &settings,
+    )
+    .expect("routing decision");
+    assert!(decision.status.has_resolved_model());
+    assert!(
+        decision
+            .selected_model_id
+            .as_deref()
+            .is_some_and(|model_id| model_id.starts_with("provider-codex-lb-env/")),
+        "auto mode should resolve a codex-lb env model: {:?}",
+        decision.selected_model_id
+    );
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn cli_auto_model_selection_prepares_codex_lb_dispatch_target() {
+    let root = temp_workspace("opensks-cli-turn-codex-lb-auto-dispatch");
+    let thread_settings =
+        opensks_contracts::ConversationThreadSettings::default_for("conversation-1", 1_000);
+    let settings = turn_settings_from_thread(&thread_settings);
+
+    sync_cli_external_provider_registry_for_settings_from_config(
+        &root,
+        &settings,
+        1_100,
+        true,
+        Some("https://codex.example.test/backend-api/codex".to_string()),
+    )
+    .expect("sync codex-lb provider");
+    unsafe {
+        std::env::set_var("CODEX_LB_API_KEY", "test-codex-lb-key");
+    }
+
+    let target = prepare_cli_provider_dispatch(&root, &settings)
+        .expect("prepare dispatch")
+        .expect("auto mode dispatch target");
+
+    unsafe {
+        std::env::remove_var("CODEX_LB_API_KEY");
+    }
+    assert_eq!(target.connection.id, opensks_provider::CODEX_LB_PROVIDER_ID);
+    assert!(
+        target
+            .routing_decision
+            .selected_model_id
+            .as_deref()
+            .is_some_and(|model_id| model_id.starts_with("provider-codex-lb-env/")),
+        "auto dispatch should resolve a codex-lb model: {:?}",
+        target.routing_decision.selected_model_id
+    );
+    assert!(target.routing_decision.status.has_resolved_model());
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn cli_turn_start_provider_sync_ignores_non_codex_model() {
+    let root = temp_workspace("opensks-cli-turn-codex-lb-ignore");
+    let mut thread_settings =
+        opensks_contracts::ConversationThreadSettings::default_for("conversation-1", 1_000);
+    thread_settings.model_selection = opensks_contracts::ModelSelection {
+        mode: opensks_contracts::ModelSelectionMode::Pinned,
+        model_id: Some("provider-other/code-model".to_string()),
+        fallback_model_ids: Vec::new(),
+    };
+    let settings = turn_settings_from_thread(&thread_settings);
+
+    sync_cli_external_provider_registry_for_settings_from_config(
+        &root,
+        &settings,
+        1_100,
+        true,
+        Some("https://codex.example.test/backend-api/codex".to_string()),
+    )
+    .expect("sync should no-op for non-codex model");
+
+    let repo = opensks_provider::ProviderRepository::open_workspace(&root).expect("provider repo");
+    assert!(
+        repo.list_connections()
+            .expect("connections")
+            .into_iter()
+            .all(|connection| connection.id != opensks_provider::CODEX_LB_PROVIDER_ID),
+        "non-codex pinned model must not seed codex-lb"
+    );
+
+    fs::remove_dir_all(root).ok();
+}

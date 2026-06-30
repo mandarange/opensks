@@ -12,7 +12,7 @@ final class AppCoordinator: ObservableObject {
     /// Conversation sidebar + thread store (PR-025). It starts with a live
     /// service rooted at the process working directory; once the real workspace
     /// path + bundled CLI are resolved (RootView.onAppear reads `AppState`), the
-    /// service is rebound via `bindConversations(cli:workspace:)`.
+    /// service is rebound via `bindConversations(cli:workspace:engine:)`.
     let conversations: ConversationStore
 
     /// Provider registry/control center state. Credentials are stored through
@@ -114,9 +114,9 @@ final class AppCoordinator: ObservableObject {
 
     /// Rebind the conversation store's live service to the resolved workspace and
     /// bundled CLI (same values `AppState` uses), then reload.
-    func bindConversations(cli: URL, workspace: URL) {
+    func bindConversations(cli: URL, workspace: URL, engine: EngineProcess = EngineProcess()) {
         conversations.updateService(
-            LiveConversationService(cli: cli, workspace: workspace)
+            LiveConversationService(cli: cli, workspace: workspace, engine: engine)
         )
         Task { await conversations.load() }
     }

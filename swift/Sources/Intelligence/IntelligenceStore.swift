@@ -116,9 +116,13 @@ final class IntelligenceStore: ObservableObject {
     /// Load ONE page of the code graph at `offset` for the current query. The whole
     /// graph is never loaded — only this `[offset, offset+limit)` window is held.
     func loadCodeGraphPage(offset: Int) async {
+        guard shouldRunCodeGraphQuery else {
+            clearCodeGraphResults()
+            return
+        }
         do {
             let page = try await service.codeGraphQuery(
-                query: codeGraphQuery,
+                query: normalizedCodeGraphQuery,
                 limit: codeGraphLimit,
                 offset: max(0, offset)
             )
@@ -197,6 +201,22 @@ final class IntelligenceStore: ObservableObject {
             assign(.stale(reason: nil))
             errorMessage = error.localizedDescription
         }
+    }
+
+    private var normalizedCodeGraphQuery: String {
+        codeGraphQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var shouldRunCodeGraphQuery: Bool {
+        !normalizedCodeGraphQuery.isEmpty
+    }
+
+    private func clearCodeGraphResults() {
+        codeGraphRecords = []
+        codeGraphTotal = 0
+        codeGraphOffset = 0
+        codeGraphStamp = nil
+        codeGraphBadge = .stale(reason: nil)
     }
 
     // MARK: - Deep links

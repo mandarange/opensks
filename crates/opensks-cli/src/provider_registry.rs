@@ -317,6 +317,20 @@ pub(crate) fn resolve_provider_secret(
         opensks_contracts::SecretStoreKind::MacosKeychain => {
             resolve_macos_keychain_secret(&connection.auth, keychain_command)
         }
+        opensks_contracts::SecretStoreKind::ExternalBroker
+            if connection.auth.service == "env"
+                && connection.auth.account == "CODEX_LB_API_KEY" =>
+        {
+            std::env::var(&connection.auth.account)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    CliError::Invalid(format!(
+                        "provider external broker env `{}` is not configured",
+                        connection.auth.account
+                    ))
+                })
+        }
         other => Err(CliError::Invalid(format!(
             "provider secret store `{other:?}` is not supported by registry-probe"
         ))),
@@ -388,6 +402,9 @@ mod tests {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn registry_commands_roundtrip_secretless_state() {
@@ -558,6 +575,47 @@ mod tests {
                 .is_empty()
         );
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn codex_lb_external_broker_resolves_env_without_keychain() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let secret = "codex-lb-env-resolver-secret";
+        unsafe {
+            std::env::set_var("CODEX_LB_API_KEY", secret);
+        }
+        let connection = opensks_contracts::ProviderConnection {
+            schema: opensks_contracts::PROVIDER_CONNECTION_SCHEMA.to_string(),
+            id: "provider-codex-lb".to_string(),
+            kind: opensks_contracts::ProviderKind::CodexLb,
+            display_name: "codex-lb".to_string(),
+            enabled: true,
+            endpoint: opensks_contracts::ProviderEndpoint {
+                base_url: "https://codex.hyper-lab.xyz/backend-api/codex".to_string(),
+                allow_insecure_http: false,
+            },
+            auth: opensks_contracts::SecretRef {
+                schema: opensks_contracts::SECRET_REF_SCHEMA.to_string(),
+                store: opensks_contracts::SecretStoreKind::ExternalBroker,
+                service: "env".to_string(),
+                account: "CODEX_LB_API_KEY".to_string(),
+                version: 1,
+            },
+            organization_ref: None,
+            project_ref: None,
+            health: opensks_contracts::ProviderHealthSnapshot::unknown(),
+            concurrency: opensks_contracts::ProviderConcurrencyPolicy::default(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            revision: 1,
+        };
+
+        let resolved = resolve_provider_secret(&connection, None).expect("codex-lb env ref");
+
+        unsafe {
+            std::env::remove_var("CODEX_LB_API_KEY");
+        }
+        assert_eq!(resolved, secret);
     }
 
     #[test]

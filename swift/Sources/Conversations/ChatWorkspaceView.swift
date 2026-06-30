@@ -8,6 +8,7 @@
 // when either changes; it then hands the thread an immutable `ChatGitContext`.
 
 import SwiftUI
+import AppKit
 
 /// The real project git context surfaced in the chat top bar. Carries only what the
 /// bar shows, computed from the live `GitStatus`/`GitBranches` — never fabricated.
@@ -31,6 +32,8 @@ struct ChatGitContext: Equatable {
 }
 
 struct ChatWorkspaceView: View {
+    @EnvironmentObject private var state: AppState
+
     @ObservedObject var conversations: ConversationStore
     @ObservedObject var git: GitStudioStore
     @ObservedObject var providers: ProviderStore
@@ -43,11 +46,18 @@ struct ChatWorkspaceView: View {
             providers: providers,
             pipelines: pipelines,
             onOpenGraph: onOpenGraph,
-            gitContext: gitContext
+            gitContext: gitContext,
+            workspaceURL: state.workspace,
+            openProject: { url in
+                NSWorkspace.shared.open(url)
+            }
         )
         .sheet(isPresented: $providers.showingAddProvider) {
             ProviderConnectionWizard(store: providers)
                 .frame(width: 560, height: 620)
+        }
+        .task {
+            await providers.refresh()
         }
     }
 

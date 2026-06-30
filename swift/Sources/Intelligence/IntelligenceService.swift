@@ -86,9 +86,20 @@ struct LiveIntelligenceService: IntelligenceService {
     }
 
     func codeGraphQuery(query: String, limit: Int, offset: Int) async throws -> IntelCodeGraphPage {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else {
+            return IntelCodeGraphPage(
+                schema: "opensks.intel-codegraph.v1",
+                total: 0,
+                limit: limit,
+                offset: 0,
+                records: [],
+                freshness: try await freshness()
+            )
+        }
         let result = try await run(args: [
             "intel", "codegraph-query", "--workspace", workspace.path,
-            "--query", query, "--limit", String(limit), "--offset", String(offset)
+            "--query", trimmedQuery, "--limit", String(limit), "--offset", String(offset)
         ])
         return try Self.decode(result, as: IntelCodeGraphPage.self)
     }
@@ -185,6 +196,8 @@ final class MockIntelligenceService: IntelligenceService, @unchecked Sendable {
     private(set) var freshnessCheckCalls: [IntelFreshnessStamp] = []
     /// Each (limit, offset) the store requested — proves PAGING.
     private(set) var codeGraphPageRequests: [(limit: Int, offset: Int)] = []
+    /// Each normalized query text the store submitted.
+    private(set) var codeGraphQueries: [String] = []
     private(set) var glossaryCallCount = 0
     private(set) var architectureCallCount = 0
 
@@ -285,6 +298,7 @@ final class MockIntelligenceService: IntelligenceService, @unchecked Sendable {
 
     private func codeGraphLocked(query: String, limit: Int, offset: Int) -> IntelCodeGraphPage {
         lock.lock(); defer { lock.unlock() }
+        codeGraphQueries.append(query)
         codeGraphPageRequests.append((limit: limit, offset: offset))
         let total = codeGraphCorpus.count
         let lower = max(0, min(offset, total))

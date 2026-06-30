@@ -12,6 +12,8 @@ struct ConversationComposer: View {
     @ObservedObject var store: ConversationStore
     @ObservedObject var providers: ProviderStore
     let conversationID: String
+    var workspaceURL: URL?
+    var openProject: (URL) -> Void = { _ in }
 
     /// Draft text bound through the store so it survives selection changes and
     /// is cleared on a successful send.
@@ -54,22 +56,7 @@ struct ConversationComposer: View {
                     contextBar
                 }
                 HStack(alignment: .bottom, spacing: 10) {
-                    TextField("Message the engine…", text: draftBinding, axis: .vertical)
-                        .textFieldStyle(.plain)
-                        .font(Theme.ui(13))
-                        .foregroundStyle(Theme.text)
-                        .lineLimit(1...6)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous)
-                                .fill(Theme.input)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous)
-                                .strokeBorder(Theme.stroke, lineWidth: 1)
-                        )
-                        .accessibilityIdentifier("conversation.composer.field")
+                    composerTextField
 
                     Button(action: send) {
                         Label("Send", systemImage: "paperplane.fill")
@@ -92,6 +79,46 @@ struct ConversationComposer: View {
         .task(id: modelSelectionNormalizationKey) {
             await normalizeTextModelSelectionIfNeeded()
         }
+    }
+
+    @ViewBuilder
+    private var composerTextField: some View {
+        let field = TextField("Message the engine…", text: draftBinding, axis: .vertical)
+            .textFieldStyle(.plain)
+            .font(Theme.ui(13))
+            .foregroundStyle(Theme.text)
+            .lineLimit(1...6)
+            .submitLabel(.send)
+
+        if #available(macOS 14.0, *) {
+            styledComposerTextField(
+                field.onKeyPress(keys: [.return]) { press in
+                    if press.modifiers.contains(.shift) {
+                        appendDraftNewline()
+                    } else {
+                        send()
+                    }
+                    return .handled
+                }
+            )
+        } else {
+            styledComposerTextField(field.onSubmit(send))
+        }
+    }
+
+    private func styledComposerTextField<Content: View>(_ content: Content) -> some View {
+        content
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous)
+                    .fill(Theme.input)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous)
+                    .strokeBorder(Theme.stroke, lineWidth: 1)
+            )
+            .accessibilityIdentifier("conversation.composer.field")
     }
 
     private var settingsBar: some View {
@@ -134,7 +161,8 @@ struct ConversationComposer: View {
             reasoningMenu
             pipelineMenu
             parallelismMenu
-            toolPolicyMenu
+            approvalPolicyMenu
+            projectOpenButton
             Spacer(minLength: 0)
         }
         .disabled(
@@ -142,6 +170,20 @@ struct ConversationComposer: View {
                 || store.isSending(conversationID: conversationID)
         )
         .accessibilityIdentifier("conversation.composer.settings")
+    }
+
+    private var projectOpenButton: some View {
+        Button {
+            guard let workspaceURL else { return }
+            openProject(workspaceURL)
+        } label: {
+            settingChip(icon: "folder", text: "Project")
+        }
+        .buttonStyle(.plain)
+        .disabled(workspaceURL == nil)
+        .help(workspaceURL.map { "Open project folder: \($0.path)" } ?? "Project folder unavailable.")
+        .accessibilityLabel("Open project folder")
+        .accessibilityIdentifier("conversation.composer.project.open")
     }
 
     private var contextBar: some View {
@@ -292,11 +334,11 @@ struct ConversationComposer: View {
 
     private var parallelismMenu: some View {
         Menu {
-            ForEach([1, 2, 4, 8, 16], id: \.self) { count in
+            ForEach(ConversationParallelismOptions.allowed, id: \.self) { count in
                 Button {
-                    updateSettings { $0.maxParallelism = UInt32(count) }
+                    updateSettings { $0.maxParallelism = count }
                 } label: {
-                    Label("\(count)", systemImage: settings.maxParallelism == UInt32(count) ? "checkmark" : "square.stack.3d.up")
+                    Label("\(count)", systemImage: settings.maxParallelism == count ? "checkmark" : "square.stack.3d.up")
                 }
             }
         } label: {
@@ -307,21 +349,31 @@ struct ConversationComposer: View {
         .accessibilityIdentifier("conversation.composer.settings.parallelism")
     }
 
-    private var toolPolicyMenu: some View {
+    private var approvalPolicyMenu: some View {
         Menu {
-            ForEach(["project-default", "read-only"], id: \.self) { policy in
+            ForEach(ConversationApprovalPolicy.menuPolicyIds, id: \.self) { policy in
                 Button {
-                    updateSettings { $0.toolPolicyId = policy }
+                    updateSettings { $0.approvalPolicyId = policy }
                 } label: {
-                    Label(toolPolicyLabel(policy), systemImage: settings.toolPolicyId == policy ? "checkmark" : "shield")
+                    Label(
+                        ConversationApprovalPolicy.displayLabel(for: policy),
+                        systemImage: settings.approvalPolicyId == policy
+                            ? "checkmark"
+                            : ConversationApprovalPolicy.iconName(for: policy)
+                    )
                 }
             }
         } label: {
-            settingChip(icon: "shield", text: toolPolicyLabel(settings.toolPolicyId))
+            settingChip(
+                icon: ConversationApprovalPolicy.iconName(for: settings.approvalPolicyId),
+                text: ConversationApprovalPolicy.displayLabel(for: settings.approvalPolicyId)
+            )
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .accessibilityIdentifier("conversation.composer.settings.tools")
+        .help(ConversationApprovalPolicy.helpText(for: settings.approvalPolicyId))
+        .accessibilityLabel("Approval policy \(ConversationApprovalPolicy.displayLabel(for: settings.approvalPolicyId))")
+        .accessibilityIdentifier("conversation.composer.settings.approval")
     }
 
     private func settingChip(icon: String, text: String) -> some View {
@@ -393,14 +445,6 @@ struct ConversationComposer: View {
         }
     }
 
-    private func toolPolicyLabel(_ id: String) -> String {
-        switch id {
-        case "project-default": return "Default"
-        case "read-only": return "Read-only"
-        default: return id
-        }
-    }
-
     private func updateSettings(_ mutate: @escaping (inout ConversationThreadSettings) -> Void) {
         Task { await store.updateThreadSettings(for: conversationID, mutate: mutate) }
     }
@@ -417,6 +461,10 @@ struct ConversationComposer: View {
     private func send() {
         let text = store.draft(for: conversationID)
         Task { await store.send(conversationID: conversationID, text: text) }
+    }
+
+    private func appendDraftNewline() {
+        store.setDraft(store.draft(for: conversationID) + "\n", for: conversationID)
     }
 }
 

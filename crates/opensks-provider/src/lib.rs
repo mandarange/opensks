@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    env, fs,
     path::Path,
     time::{Duration, Instant},
 };
@@ -22,6 +22,11 @@ pub const ROUTING_DECISION_SCHEMA: &str = opensks_contracts::ROUTING_DECISION_SC
 pub const PROVIDER_DESCRIPTOR_SCHEMA: &str = opensks_contracts::PROVIDER_DESCRIPTOR_SCHEMA;
 pub const PROVIDER_DB_RELATIVE_PATH: &str = ".opensks/runtime/providers.sqlite3";
 const PROVIDER_DB_MIGRATION_VERSION: i32 = 1;
+pub const CODEX_LB_PROVIDER_ID: &str = "provider-codex-lb-env";
+pub const CODEX_LB_API_KEY_ENV_VAR: &str = "CODEX_LB_API_KEY";
+pub const CODEX_LB_BASE_URL_ENV_VAR: &str = "CODEX_LB_BASE_URL";
+const DEFAULT_CODEX_LB_BASE_URL: &str = "https://codex.hyper-lab.xyz/backend-api/codex";
+const CODEX_LB_CATALOG_REVISION: &str = "codex-lb-env-seed-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderHttpStatus {
@@ -460,6 +465,163 @@ pub enum ProviderError {
 }
 
 type Result<T> = std::result::Result<T, ProviderError>;
+
+pub fn sync_codex_lb_env_provider_to_registry(workspace: &Path, now_ms: u64) -> Result<()> {
+    let credential_present = env::var(CODEX_LB_API_KEY_ENV_VAR)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .is_some();
+    let endpoint = env::var(CODEX_LB_BASE_URL_ENV_VAR)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    sync_codex_lb_external_broker_provider_to_registry(
+        workspace,
+        now_ms,
+        credential_present,
+        endpoint,
+    )
+}
+
+pub fn sync_codex_lb_external_broker_provider_to_registry(
+    workspace: &Path,
+    now_ms: u64,
+    credential_present: bool,
+    endpoint: Option<String>,
+) -> Result<()> {
+    if !credential_present {
+        return Ok(());
+    }
+
+    let repo = ProviderRepository::open_workspace(workspace)?;
+    if repo
+        .list_connections()?
+        .iter()
+        .any(|connection| connection.kind == opensks_contracts::ProviderKind::CodexLb)
+    {
+        return Ok(());
+    }
+
+    let endpoint = endpoint.unwrap_or_else(|| DEFAULT_CODEX_LB_BASE_URL.to_string());
+    let connection = ProviderConnection {
+        schema: PROVIDER_CONNECTION_SCHEMA.to_string(),
+        id: CODEX_LB_PROVIDER_ID.to_string(),
+        kind: opensks_contracts::ProviderKind::CodexLb,
+        display_name: "codex-lb".to_string(),
+        enabled: true,
+        endpoint: opensks_contracts::ProviderEndpoint {
+            base_url: endpoint,
+            allow_insecure_http: false,
+        },
+        auth: opensks_contracts::SecretRef {
+            schema: SECRET_REF_SCHEMA.to_string(),
+            store: opensks_contracts::SecretStoreKind::ExternalBroker,
+            service: "env".to_string(),
+            account: CODEX_LB_API_KEY_ENV_VAR.to_string(),
+            version: 1,
+        },
+        organization_ref: None,
+        project_ref: None,
+        health: ProviderHealthSnapshot::unknown(),
+        concurrency: opensks_contracts::ProviderConcurrencyPolicy {
+            max_concurrent_requests: 16,
+            requests_per_minute: None,
+            tokens_per_minute: None,
+        },
+        created_at_ms: now_ms,
+        updated_at_ms: now_ms,
+        revision: 1,
+    };
+    repo.upsert_connection(&connection, None, now_ms)?;
+    repo.sync_models(
+        CODEX_LB_PROVIDER_ID,
+        &codex_lb_seed_model_records(CODEX_LB_PROVIDER_ID),
+        now_ms,
+    )?;
+    Ok(())
+}
+
+fn codex_lb_seed_model_records(provider_id: &str) -> Vec<ModelCatalogEntry> {
+    vec![
+        codex_lb_seed_code_model(provider_id, "auto-code", "Default code model", 128_000),
+        codex_lb_seed_code_model(provider_id, "gpt-5.5", "GPT-5.5", 400_000),
+        codex_lb_seed_code_model(provider_id, "gpt-5.4-mini", "GPT-5.4 mini", 400_000),
+        codex_lb_seed_code_model(provider_id, "gpt-5.4-nano", "GPT-5.4 nano", 400_000),
+        ModelCatalogEntry {
+            schema: MODEL_CATALOG_ENTRY_SCHEMA.to_string(),
+            id: format!("{provider_id}/auto-image"),
+            provider_id: provider_id.to_string(),
+            remote_model_id: "auto-image".to_string(),
+            display_name: "Auto image model".to_string(),
+            enabled: true,
+            capabilities: ModelCapabilities::image(),
+            limits: ModelLimits::default(),
+            pricing: None,
+            health: HealthState::Unknown,
+            role_scores: codex_lb_role_scores(&[ModelRole::Vision, ModelRole::Image]),
+            catalog_revision: CODEX_LB_CATALOG_REVISION.to_string(),
+        },
+    ]
+}
+
+fn codex_lb_seed_code_model(
+    provider_id: &str,
+    remote_model_id: &str,
+    display_name: &str,
+    context_window: u64,
+) -> ModelCatalogEntry {
+    ModelCatalogEntry {
+        schema: MODEL_CATALOG_ENTRY_SCHEMA.to_string(),
+        id: format!("{provider_id}/{remote_model_id}"),
+        provider_id: provider_id.to_string(),
+        remote_model_id: remote_model_id.to_string(),
+        display_name: display_name.to_string(),
+        enabled: true,
+        capabilities: ModelCapabilities {
+            text: true,
+            code: true,
+            vision_input: false,
+            image_output: false,
+            image_edit: false,
+            tool_use: true,
+            structured_output: true,
+            long_context: true,
+            streaming: true,
+        },
+        limits: ModelLimits {
+            max_input_tokens: Some(context_window),
+            max_output_tokens: Some(16_000),
+            requests_per_minute: None,
+            tokens_per_minute: None,
+            max_concurrency: Some(16),
+        },
+        pricing: None,
+        health: HealthState::Unknown,
+        role_scores: codex_lb_role_scores(&[
+            ModelRole::General,
+            ModelRole::Planning,
+            ModelRole::Code,
+            ModelRole::Verification,
+            ModelRole::Arbiter,
+        ]),
+        catalog_revision: CODEX_LB_CATALOG_REVISION.to_string(),
+    }
+}
+
+fn codex_lb_role_scores(roles: &[ModelRole]) -> BTreeMap<ModelRole, RoleScore> {
+    roles
+        .iter()
+        .cloned()
+        .map(|role| {
+            (
+                role,
+                RoleScore {
+                    score: 0.80,
+                    evidence_refs: vec!["codex-lb-env-seed".to_string()],
+                },
+            )
+        })
+        .collect()
+}
 
 #[derive(Debug)]
 pub struct ProviderRepository {
@@ -1437,7 +1599,7 @@ fn model_profile_from_catalog_entry(
     };
     if matches!(
         provider.health.state,
-        HealthState::Unknown | HealthState::Unavailable | HealthState::OpenCircuit
+        HealthState::Unavailable | HealthState::OpenCircuit
     ) {
         profile.health = HealthState::OpenCircuit;
     }
@@ -2034,6 +2196,64 @@ mod tests {
         assert_eq!(receipt.reason_code, "single_enabled_compatible_model");
         assert_eq!(receipt.registry_revision, decision.model_snapshot_hash);
         assert!(receipt.requested_capabilities.code);
+    }
+
+    #[test]
+    fn repository_routing_allows_unprobed_codex_lb_seed_models() {
+        let repo = ProviderRepository::open_in_memory().expect("repo");
+        let mut connection = sample_connection(1);
+        connection.kind = ProviderKind::CodexLb;
+        connection.display_name = "codex-lb".to_string();
+        connection.endpoint.base_url = "https://codex.hyper-lab.xyz/backend-api/codex".to_string();
+        connection.auth = SecretRef {
+            schema: SECRET_REF_SCHEMA.to_string(),
+            store: SecretStoreKind::ExternalBroker,
+            service: "env".to_string(),
+            account: "CODEX_LB_API_KEY".to_string(),
+            version: 1,
+        };
+        connection.health = ProviderHealthSnapshot::unknown();
+        repo.upsert_connection(&connection, None, 1)
+            .expect("upsert connection");
+        let mut model = sample_catalog_entry(true);
+        model.id = "provider-1/gpt-5.5".to_string();
+        model.provider_id = "provider-1".to_string();
+        model.remote_model_id = "gpt-5.5".to_string();
+        model.display_name = "GPT-5.5".to_string();
+        model.health = HealthState::Unknown;
+        repo.sync_models("provider-1", &[model], 2)
+            .expect("sync models");
+
+        let decision = resolve_routing_decision_from_repository(
+            &repo,
+            "route-codex-lb-unprobed",
+            &ConversationTurnSettings {
+                model: opensks_contracts::ModelSelection {
+                    mode: opensks_contracts::ModelSelectionMode::Auto,
+                    model_id: None,
+                    fallback_model_ids: Vec::new(),
+                },
+                reasoning_effort: opensks_contracts::ReasoningEffort::Standard,
+                execution_mode: opensks_contracts::ExecutionMode::Worktree,
+                pipeline_id: "auto".to_string(),
+                graph_revision: None,
+                max_parallelism: 16,
+                verifier_count: 1,
+                tool_policy_id: "project-default".to_string(),
+                approval_policy_id: "safe-interactive".to_string(),
+                token_budget: None,
+                cost_budget_usd: None,
+                timeout_ms: None,
+                image_model_id: None,
+            },
+        )
+        .expect("route");
+
+        assert_eq!(decision.status, RoutingStatus::Resolved);
+        assert_eq!(
+            decision.selected_model_id.as_deref(),
+            Some("provider-1/gpt-5.5")
+        );
     }
 
     #[test]

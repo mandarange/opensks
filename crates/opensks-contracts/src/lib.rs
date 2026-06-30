@@ -2130,7 +2130,7 @@ impl ObjectivePlanRequest {
 }
 
 fn default_objective_plan_max_parallelism() -> u32 {
-    8
+    16
 }
 
 fn default_objective_plan_role_count() -> u32 {
@@ -4219,7 +4219,7 @@ mod tests {
         assert!(json.contains("\"include_image_lane\":true"));
         let decoded: ObjectivePlanRequest =
             serde_json::from_str(&json).expect("decode objective plan request");
-        assert_eq!(decoded.max_parallelism, 8);
+        assert_eq!(decoded.max_parallelism, 16);
         assert_eq!(decoded.role_count, 4);
         assert!(decoded.require_git_worktree);
         assert!(decoded.require_integration_approval);
@@ -4231,9 +4231,9 @@ mod tests {
             graph_hash: "fnv1a64:2222222222222222".to_string(),
             plan_hash: "fnv1a64:3333333333333333".to_string(),
             source: "objective_planner".to_string(),
-            max_parallelism: 8,
+            max_parallelism: 16,
             role_count: 4,
-            work_template_count: 8,
+            work_template_count: 16,
             repair_action_count: 0,
             shard_policy_id: Some("planner-shard-policy-22222222".to_string()),
             shard_policy: Some(PlannerShardPolicy {
@@ -4241,7 +4241,7 @@ mod tests {
                 id: "planner-shard-policy-22222222".to_string(),
                 source: "objective_planner".to_string(),
                 role_count: 4,
-                max_parallelism: 8,
+                max_parallelism: 16,
                 implementation_shard_count: 4,
                 verifier_shard_count: 4,
                 candidate_selection_policy: "planner_required_shards_before_approval_apply"

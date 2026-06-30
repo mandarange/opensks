@@ -2,7 +2,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -17,6 +16,7 @@ mod graph_command;
 mod provider_registry;
 mod retention;
 mod terminal_command;
+mod worker_runtime;
 use conversation_args::{
     parse_conversation_filter, parse_conversation_options, parse_conversation_role,
     parse_timeline_kind, require_conversation_field,
@@ -24,8 +24,7 @@ use conversation_args::{
 pub use provider_registry::{is_registry_subcommand, run_provider_registry_command};
 pub use retention::{gc_usage, release_usage, run_gc_command, run_release_command};
 pub use terminal_command::{run_terminal_command, terminal_usage};
-
-const DEFAULT_WORKER_LEASE_TTL_SECONDS: u64 = 30;
+pub use worker_runtime::{run_worker_command, worker_usage};
 
 #[derive(Debug, Clone)]
 pub struct CliOutput {
@@ -46,30 +45,6 @@ pub enum CliError {
 struct DaemonCommandOptions {
     stdio: bool,
     workspace: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-struct WorkerLeaseRecord {
-    lease_id: String,
-    worker_id: String,
-    lane: String,
-    state: String,
-    leased_at_seconds: u64,
-    last_heartbeat_seconds: u64,
-    expires_at_seconds: u64,
-    recovery_action: String,
-}
-
-#[derive(Debug, Clone)]
-struct WorkerRouteRecord {
-    request_id: String,
-    lane: String,
-    assigned_worker: String,
-    lease_id: String,
-    route_status: String,
-    queued_at_ms: u128,
-    dispatched_at_ms: u128,
-    completed_at_ms: u128,
 }
 
 #[derive(Debug, Clone)]
@@ -1584,65 +1559,6 @@ fn run_git_push_status(args: &[String], cwd: &Path) -> Result<CliOutput, CliErro
     file_output(&body)
 }
 
-pub fn run_worker_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
-    let subcommand = args
-        .first()
-        .ok_or_else(|| CliError::Usage(worker_usage().to_string()))?;
-    if subcommand != "runtime" {
-        return Err(CliError::Usage(format!(
-            "unknown worker subcommand `{subcommand}`\n\n{}",
-            worker_usage()
-        )));
-    }
-    let goal = require_freeform_cli(&args[1..], worker_usage())?;
-    let stamp = ClockStamp::now()?;
-    let run_id = format!("worker-runtime-{}-{}", stamp.compact_id(), process::id());
-    let dir = cwd.join(".opensks").join("workers").join(&run_id);
-    fs::create_dir_all(&dir)?;
-
-    let leases = build_worker_lease_records(&stamp);
-    let routes = run_local_worker_request_routes(&leases);
-    write_text_atomic(
-        &dir.join("worker-leases.json"),
-        &render_worker_leases(&stamp, &run_id, &goal, &leases),
-    )?;
-    write_text_atomic(
-        &dir.join("worker-heartbeats.jsonl"),
-        &render_worker_heartbeats(&stamp, &run_id, &leases),
-    )?;
-    write_text_atomic(
-        &dir.join("worker-bus.json"),
-        &render_worker_bus(&stamp, &run_id, &routes),
-    )?;
-    write_text_atomic(
-        &dir.join("worker-routing.json"),
-        &render_worker_routing(&stamp, &run_id, &routes),
-    )?;
-    write_text_atomic(
-        &dir.join("worker-final-state.json"),
-        &render_worker_final_state(&stamp, &run_id, &leases, &routes),
-    )?;
-
-    let recovered = leases
-        .iter()
-        .filter(|lease| lease.state == "recovered_expired")
-        .count();
-    Ok(CliOutput {
-        stdout: format!(
-            "wrote local worker runtime artifacts\nrun: {}\nleases: {}\nrecovered_expired: {}\nrouted_requests: {}\nartifacts: {}\n",
-            run_id,
-            leases.len(),
-            recovered,
-            routes.len(),
-            dir.display()
-        ),
-    })
-}
-
-pub fn worker_usage() -> &'static str {
-    "usage: opensks worker runtime \"<goal>\"\n"
-}
-
 pub fn run_scheduler_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliError> {
     let subcommand = args
         .first()
@@ -2573,9 +2489,7 @@ pub fn run_conversation_command(args: &[String], cwd: &Path) -> Result<CliOutput
                             ))
                         })?
                 }
-                None => {
-                    opensks_contracts::ConversationThreadSettings::default_for(conversation, now_ms)
-                }
+                None => opensks_contracts::ConversationThreadSettings::default_for(conversation, 0),
             };
             conversation_output(&serde_json::to_value(&settings).map_err(|error| {
                 CliError::Invalid(format!("serialize thread settings: {error}"))
@@ -2719,13 +2633,14 @@ fn prepare_cli_provider_dispatch(
     workspace: &Path,
     settings: &opensks_contracts::ConversationTurnSettings,
 ) -> Result<Option<CliProviderDispatchTarget>, CliError> {
-    if settings
-        .model
-        .model_id
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or_default()
-        .is_empty()
+    if settings.model.mode != opensks_contracts::ModelSelectionMode::Auto
+        && settings
+            .model
+            .model_id
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
     {
         return Ok(None);
     }
@@ -2751,6 +2666,69 @@ fn prepare_cli_provider_dispatch(
         bearer_token,
         routing_decision: decision,
     }))
+}
+
+fn sync_cli_external_provider_registry_for_settings(
+    workspace: &Path,
+    settings: &opensks_contracts::ConversationTurnSettings,
+    now_ms: u64,
+) -> Result<(), CliError> {
+    if !cli_settings_should_seed_codex_lb(workspace, settings)? {
+        return Ok(());
+    }
+    opensks_provider::sync_codex_lb_env_provider_to_registry(workspace, now_ms)
+        .map_err(|error| CliError::Invalid(format!("sync codex-lb provider registry: {error}")))
+}
+
+#[cfg(test)]
+fn sync_cli_external_provider_registry_for_settings_from_config(
+    workspace: &Path,
+    settings: &opensks_contracts::ConversationTurnSettings,
+    now_ms: u64,
+    credential_present: bool,
+    endpoint: Option<String>,
+) -> Result<(), CliError> {
+    if !cli_settings_should_seed_codex_lb(workspace, settings)? {
+        return Ok(());
+    }
+    opensks_provider::sync_codex_lb_external_broker_provider_to_registry(
+        workspace,
+        now_ms,
+        credential_present,
+        endpoint,
+    )
+    .map_err(|error| CliError::Invalid(format!("sync codex-lb provider registry: {error}")))
+}
+
+fn cli_settings_should_seed_codex_lb(
+    workspace: &Path,
+    settings: &opensks_contracts::ConversationTurnSettings,
+) -> Result<bool, CliError> {
+    if let Some(model_id) = settings.model.model_id.as_deref()
+        && !model_id.trim().is_empty()
+    {
+        return Ok(cli_model_id_requests_codex_lb(model_id));
+    }
+    if !matches!(
+        settings.model.mode,
+        opensks_contracts::ModelSelectionMode::Auto
+    ) {
+        return Ok(false);
+    }
+    let repo = opensks_provider::ProviderRepository::open_workspace(workspace)
+        .map_err(|error| CliError::Invalid(error.to_string()))?;
+    Ok(repo
+        .list_connections()
+        .map_err(|error| CliError::Invalid(error.to_string()))?
+        .is_empty())
+}
+
+fn cli_model_id_requests_codex_lb(model_id: &str) -> bool {
+    let model_id = model_id.trim();
+    model_id == opensks_provider::CODEX_LB_PROVIDER_ID
+        || model_id
+            .strip_prefix(opensks_provider::CODEX_LB_PROVIDER_ID)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn cli_provider_dispatch_parts_for_model(
@@ -2940,6 +2918,7 @@ fn run_conversation_turn_start(
         .map_err(|error| CliError::Invalid(error.to_string()))?;
     let thread_settings = effective_thread_settings(repo, conversation_id, now_ms)?;
     let effective_settings = turn_settings_from_thread(&thread_settings);
+    sync_cli_external_provider_registry_for_settings(workspace, &effective_settings, now_ms)?;
     let effective_settings_json = serde_json::to_string(&effective_settings)
         .map_err(|error| CliError::Invalid(format!("serialize turn settings: {error}")))?;
     let settings_digest = sha256_v1(&effective_settings_json);
@@ -2960,6 +2939,9 @@ fn run_conversation_turn_start(
             text,
             now_ms,
         )
+        .map_err(|error| CliError::Invalid(error.to_string()))?;
+    let _ = repo
+        .auto_name_conversation_if_placeholder(conversation_id, text, now_ms)
         .map_err(|error| CliError::Invalid(error.to_string()))?;
 
     let assistant_message_id = repo
@@ -4526,82 +4508,6 @@ fn render_stage_overlap_spans_json(spans: &[StageOverlapSpan]) -> String {
     format!("[{rows}]")
 }
 
-fn build_worker_lease_records(stamp: &ClockStamp) -> Vec<WorkerLeaseRecord> {
-    let now = stamp.secs;
-    vec![
-        WorkerLeaseRecord {
-            lease_id: "lease-implementation-active".to_string(),
-            worker_id: "worker-implementation-1".to_string(),
-            lane: "implementation_worker".to_string(),
-            state: "active".to_string(),
-            leased_at_seconds: now.saturating_sub(5),
-            last_heartbeat_seconds: now,
-            expires_at_seconds: now + DEFAULT_WORKER_LEASE_TTL_SECONDS,
-            recovery_action: "none".to_string(),
-        },
-        WorkerLeaseRecord {
-            lease_id: "lease-review-active".to_string(),
-            worker_id: "worker-reviewer-1".to_string(),
-            lane: "qa_reviewer".to_string(),
-            state: "active".to_string(),
-            leased_at_seconds: now.saturating_sub(4),
-            last_heartbeat_seconds: now,
-            expires_at_seconds: now + DEFAULT_WORKER_LEASE_TTL_SECONDS,
-            recovery_action: "none".to_string(),
-        },
-        WorkerLeaseRecord {
-            lease_id: "lease-stale-recovered".to_string(),
-            worker_id: "worker-implementation-stale".to_string(),
-            lane: "implementation_worker".to_string(),
-            state: "recovered_expired".to_string(),
-            leased_at_seconds: now.saturating_sub(DEFAULT_WORKER_LEASE_TTL_SECONDS + 45),
-            last_heartbeat_seconds: now.saturating_sub(DEFAULT_WORKER_LEASE_TTL_SECONDS + 15),
-            expires_at_seconds: now.saturating_sub(15),
-            recovery_action: "expired_lease_reassigned_to_worker-implementation-1".to_string(),
-        },
-    ]
-}
-
-fn run_local_worker_request_routes(leases: &[WorkerLeaseRecord]) -> Vec<WorkerRouteRecord> {
-    let active = leases
-        .iter()
-        .filter(|lease| lease.state == "active")
-        .collect::<Vec<_>>();
-    let origin = Instant::now();
-    let dispatch_barrier = Arc::new(Barrier::new(active.len().max(1)));
-    let handles = active
-        .iter()
-        .enumerate()
-        .map(|(index, lease)| {
-            let lane = lease.lane.clone();
-            let worker_id = lease.worker_id.clone();
-            let lease_id = lease.lease_id.clone();
-            let dispatch_barrier = Arc::clone(&dispatch_barrier);
-            std::thread::spawn(move || {
-                let queued_at_ms = origin.elapsed().as_millis();
-                let dispatched_at_ms = origin.elapsed().as_millis();
-                dispatch_barrier.wait();
-                std::thread::sleep(std::time::Duration::from_millis(5 + index as u64));
-                WorkerRouteRecord {
-                    request_id: format!("request-{}", index + 1),
-                    lane,
-                    assigned_worker: worker_id,
-                    lease_id,
-                    route_status: "completed".to_string(),
-                    queued_at_ms,
-                    dispatched_at_ms,
-                    completed_at_ms: origin.elapsed().as_millis(),
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-
-    handles
-        .into_iter()
-        .filter_map(|handle| handle.join().ok())
-        .collect()
-}
-
 fn slugify(value: &str) -> String {
     let mut slug = String::new();
     for ch in value.chars() {
@@ -4681,234 +4587,6 @@ fn truncate_for_json(value: &str, max_chars: usize) -> String {
         out.push(ch);
     }
     out
-}
-
-fn render_worker_leases(
-    stamp: &ClockStamp,
-    run_id: &str,
-    goal: &str,
-    leases: &[WorkerLeaseRecord],
-) -> String {
-    let active_count = leases
-        .iter()
-        .filter(|lease| lease.state == "active")
-        .count();
-    let recovered_count = leases
-        .iter()
-        .filter(|lease| lease.state == "recovered_expired")
-        .count();
-    format!(
-        concat!(
-            "{{\n",
-            "  \"schema\": \"opensks.worker-leases.v1\",\n",
-            "  \"run_id\": {},\n",
-            "  \"generated_at\": {},\n",
-            "  \"goal\": {},\n",
-            "  \"lease_ttl_seconds\": {},\n",
-            "  \"durable_lease_store\": \"local_json_artifact\",\n",
-            "  \"heartbeat_source\": \"worker-heartbeats.jsonl\",\n",
-            "  \"recovery_policy\": \"expire_missing_heartbeat_then_reassign_lane\",\n",
-            "  \"active_lease_count\": {},\n",
-            "  \"recovered_expired_lease_count\": {},\n",
-            "  \"live_provider_workers\": false,\n",
-            "  \"leases\": {}\n",
-            "}}\n"
-        ),
-        json_string(run_id),
-        stamp.json(),
-        json_string(goal),
-        DEFAULT_WORKER_LEASE_TTL_SECONDS,
-        active_count,
-        recovered_count,
-        render_worker_lease_items_json(leases)
-    )
-}
-
-fn render_worker_heartbeats(
-    stamp: &ClockStamp,
-    run_id: &str,
-    leases: &[WorkerLeaseRecord],
-) -> String {
-    let mut lines = Vec::new();
-    for lease in leases {
-        lines.push(format!(
-            concat!(
-                "{{\"schema\":\"opensks.worker-heartbeat.v1\",\"run_id\":{},",
-                "\"generated_at\":{},\"lease_id\":{},\"worker_id\":{},\"lane\":{},",
-                "\"last_heartbeat_seconds\":{},\"expires_at_seconds\":{},",
-                "\"lease_state\":{},\"recovery_action\":{}}}"
-            ),
-            json_string(run_id),
-            stamp.json(),
-            json_string(&lease.lease_id),
-            json_string(&lease.worker_id),
-            json_string(&lease.lane),
-            lease.last_heartbeat_seconds,
-            lease.expires_at_seconds,
-            json_string(&lease.state),
-            json_string(&lease.recovery_action)
-        ));
-    }
-    lines.join("\n") + "\n"
-}
-
-fn render_worker_bus(stamp: &ClockStamp, run_id: &str, routes: &[WorkerRouteRecord]) -> String {
-    let concurrent_routing = worker_routes_overlap(routes);
-    format!(
-        concat!(
-            "{{\n",
-            "  \"schema\": \"opensks.worker-bus.v1\",\n",
-            "  \"run_id\": {},\n",
-            "  \"generated_at\": {},\n",
-            "  \"daemon_visible\": true,\n",
-            "  \"request_source\": \"local_worker_runtime\",\n",
-            "  \"concurrent_request_routing\": {},\n",
-            "  \"routed_request_count\": {},\n",
-            "  \"live_remote_provider_bus\": false,\n",
-            "  \"routes_ref\": \"worker-routing.json\"\n",
-            "}}\n"
-        ),
-        json_string(run_id),
-        stamp.json(),
-        concurrent_routing,
-        routes.len()
-    )
-}
-
-fn render_worker_routing(stamp: &ClockStamp, run_id: &str, routes: &[WorkerRouteRecord]) -> String {
-    format!(
-        concat!(
-            "{{\n",
-            "  \"schema\": \"opensks.worker-routing.v1\",\n",
-            "  \"run_id\": {},\n",
-            "  \"generated_at\": {},\n",
-            "  \"daemon_visible\": true,\n",
-            "  \"concurrent_request_routing\": {},\n",
-            "  \"routes\": {}\n",
-            "}}\n"
-        ),
-        json_string(run_id),
-        stamp.json(),
-        worker_routes_overlap(routes),
-        render_worker_route_items_json(routes)
-    )
-}
-
-fn render_worker_final_state(
-    stamp: &ClockStamp,
-    run_id: &str,
-    leases: &[WorkerLeaseRecord],
-    routes: &[WorkerRouteRecord],
-) -> String {
-    let active_count = leases
-        .iter()
-        .filter(|lease| lease.state == "active")
-        .count();
-    let expired_count = leases
-        .iter()
-        .filter(|lease| lease.expires_at_seconds <= stamp.secs)
-        .count();
-    let recovered_count = leases
-        .iter()
-        .filter(|lease| lease.state == "recovered_expired")
-        .count();
-    let routing_passed = routes
-        .iter()
-        .all(|route| route.route_status == "completed" && !route.assigned_worker.is_empty());
-    let status = if active_count > 0 && recovered_count > 0 && routing_passed {
-        "passed"
-    } else {
-        "partial"
-    };
-    format!(
-        concat!(
-            "{{\n",
-            "  \"schema\": \"opensks.worker-final-state.v1\",\n",
-            "  \"run_id\": {},\n",
-            "  \"generated_at\": {},\n",
-            "  \"status\": {},\n",
-            "  \"active_lease_count\": {},\n",
-            "  \"expired_lease_count\": {},\n",
-            "  \"recovered_expired_lease_count\": {},\n",
-            "  \"heartbeat_artifact\": \"worker-heartbeats.jsonl\",\n",
-            "  \"lease_artifact\": \"worker-leases.json\",\n",
-            "  \"bus_artifact\": \"worker-bus.json\",\n",
-            "  \"routing_artifact\": \"worker-routing.json\",\n",
-            "  \"daemon_visible_worker_bus\": true,\n",
-            "  \"concurrent_request_routing\": {},\n",
-            "  \"routed_request_count\": {},\n",
-            "  \"live_provider_workers\": false,\n",
-            "  \"live_remote_provider_bus\": false\n",
-            "}}\n"
-        ),
-        json_string(run_id),
-        stamp.json(),
-        json_string(status),
-        active_count,
-        expired_count,
-        recovered_count,
-        worker_routes_overlap(routes),
-        routes.len()
-    )
-}
-
-fn render_worker_lease_items_json(leases: &[WorkerLeaseRecord]) -> String {
-    let rows = leases
-        .iter()
-        .map(|lease| {
-            format!(
-                concat!(
-                    "{{\"lease_id\":{},\"worker_id\":{},\"lane\":{},\"state\":{},",
-                    "\"leased_at_seconds\":{},\"last_heartbeat_seconds\":{},",
-                    "\"expires_at_seconds\":{},\"recovery_action\":{}}}"
-                ),
-                json_string(&lease.lease_id),
-                json_string(&lease.worker_id),
-                json_string(&lease.lane),
-                json_string(&lease.state),
-                lease.leased_at_seconds,
-                lease.last_heartbeat_seconds,
-                lease.expires_at_seconds,
-                json_string(&lease.recovery_action)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{rows}]")
-}
-
-fn render_worker_route_items_json(routes: &[WorkerRouteRecord]) -> String {
-    let rows = routes
-        .iter()
-        .map(|route| {
-            format!(
-                concat!(
-                    "{{\"request_id\":{},\"lane\":{},\"assigned_worker\":{},",
-                    "\"lease_id\":{},\"route_status\":{},\"queued_at_ms\":{},",
-                    "\"dispatched_at_ms\":{},\"completed_at_ms\":{}}}"
-                ),
-                json_string(&route.request_id),
-                json_string(&route.lane),
-                json_string(&route.assigned_worker),
-                json_string(&route.lease_id),
-                json_string(&route.route_status),
-                route.queued_at_ms,
-                route.dispatched_at_ms,
-                route.completed_at_ms
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{rows}]")
-}
-
-fn worker_routes_overlap(routes: &[WorkerRouteRecord]) -> bool {
-    routes.iter().enumerate().any(|(index, left)| {
-        routes.iter().skip(index + 1).any(|right| {
-            left.dispatched_at_ms <= right.completed_at_ms
-                && right.dispatched_at_ms <= left.completed_at_ms
-        })
-    })
 }
 
 fn render_worktree_isolation(
@@ -5663,6 +5341,7 @@ mod tests {
         assert!(output.stdout.contains("leases: 3"));
         assert!(output.stdout.contains("recovered_expired: 1"));
         assert!(output.stdout.contains("routed_requests: 2"));
+        assert!(output.stdout.contains("file_writes: 2"));
 
         let worker_dir = first_child_dir(&root.join(".opensks").join("workers"));
         for artifact in [
@@ -5670,6 +5349,7 @@ mod tests {
             "worker-heartbeats.jsonl",
             "worker-bus.json",
             "worker-routing.json",
+            "worker-file-edits.json",
             "worker-final-state.json",
         ] {
             assert!(
@@ -5705,6 +5385,39 @@ mod tests {
         assert_eq!(routing["concurrent_request_routing"], true);
         assert_eq!(routing["routes"].as_array().expect("routes").len(), 2);
 
+        let file_edits = read_json(&worker_dir.join("worker-file-edits.json"));
+        assert_eq!(file_edits["schema"], "opensks.worker-file-edits.v1");
+        assert_eq!(file_edits["daemon_visible"], true);
+        assert_eq!(file_edits["actual_file_write_count"], 2);
+        assert_eq!(
+            file_edits["parallel_worker_file_edit_windows_verified"],
+            true
+        );
+        assert_eq!(
+            file_edits["nonblocking_worker_result_handoff_verified"],
+            true
+        );
+        assert_eq!(file_edits["all_write_hashes_verified"], true);
+        assert_eq!(file_edits["live_provider_file_edits"], false);
+        let edit_items = file_edits["edits"].as_array().expect("edits");
+        assert_eq!(edit_items.len(), 2);
+        assert!(
+            edit_items.iter().any(|item| {
+                item["main_handoff_before_all_workers_completed"]
+                    .as_bool()
+                    .unwrap_or(false)
+            }),
+            "expected at least one worker result to reach main before all workers completed"
+        );
+        for item in edit_items {
+            let relative = item["relative_path"].as_str().expect("relative path");
+            assert!(
+                worker_dir.join(relative).exists(),
+                "expected worker file edit {relative}"
+            );
+            assert_eq!(item["hash_verified"], true);
+        }
+
         let final_state = read_json(&worker_dir.join("worker-final-state.json"));
         assert_eq!(final_state["schema"], "opensks.worker-final-state.v1");
         assert_eq!(final_state["status"], "passed");
@@ -5713,8 +5426,61 @@ mod tests {
         assert_eq!(final_state["recovered_expired_lease_count"], 1);
         assert_eq!(final_state["daemon_visible_worker_bus"], true);
         assert_eq!(final_state["concurrent_request_routing"], true);
+        assert_eq!(final_state["actual_file_write_count"], 2);
+        assert_eq!(
+            final_state["parallel_worker_file_edit_windows_verified"],
+            true
+        );
+        assert_eq!(
+            final_state["nonblocking_worker_result_handoff_verified"],
+            true
+        );
+        assert_eq!(final_state["all_file_write_hashes_verified"], true);
         assert_eq!(final_state["live_provider_workers"], false);
         assert_eq!(final_state["live_remote_provider_bus"], false);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn worker_runtime_scratch_apply_writes_parallel_source_files() {
+        let root = temp_workspace("opensks-cli-worker-runtime-scratch-apply");
+        let output = run_worker_command(
+            &[
+                "runtime".to_string(),
+                "--scratch-apply".to_string(),
+                "create".to_string(),
+                "parallel".to_string(),
+                "scratch".to_string(),
+                "source".to_string(),
+                "files".to_string(),
+            ],
+            &root,
+        )
+        .expect("worker runtime scratch apply");
+        assert!(output.stdout.contains("scratch_apply_files: 2"));
+
+        let worker_dir = first_child_dir(&root.join(".opensks").join("workers"));
+        let scratch = read_json(&worker_dir.join("scratch-apply.json"));
+        assert_eq!(scratch["schema"], "opensks.worker-scratch-apply.v1");
+        assert_eq!(scratch["scratch_project_ref"], "scratch-project");
+        assert_eq!(scratch["actual_source_file_write_count"], 2);
+        assert_eq!(scratch["parallel_source_file_write_windows_verified"], true);
+        assert_eq!(scratch["all_write_hashes_verified"], true);
+        assert_eq!(scratch["user_workspace_source_tree_modified"], false);
+
+        let records = scratch["records"].as_array().expect("scratch records");
+        assert_eq!(records.len(), 2);
+        for record in records {
+            let relative = record["relative_path"].as_str().expect("relative path");
+            let source = fs::read_to_string(worker_dir.join(relative)).expect("scratch source");
+            assert!(source.contains("_proof() -> &'static str"));
+            assert!(source.contains("goal=create parallel scratch source files"));
+            assert_eq!(record["hash_verified"], true);
+        }
+
+        let final_state = read_json(&worker_dir.join("worker-final-state.json"));
+        assert_eq!(final_state["scratch_apply_file_count"], 2);
+        assert_eq!(final_state["scratch_apply_verified"], true);
         fs::remove_dir_all(root).ok();
     }
 
@@ -6716,6 +6482,7 @@ mod tests {
         assert_eq!(default["schema"], "opensks.thread-settings.v1");
         assert_eq!(default["model_selection"]["mode"], "auto");
         assert_eq!(default["execution_mode"], "worktree");
+        assert_eq!(default["updated_at_ms"], 0);
 
         let payload = serde_json::json!({
             "schema": "opensks.thread-settings.v1",
