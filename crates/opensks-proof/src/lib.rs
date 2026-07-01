@@ -16,10 +16,13 @@ pub fn build_completion_proof(
         .filter(|required| !covered_requirement_ids.contains(required))
         .cloned()
         .collect();
-    let all_claims_verified = claims
-        .iter()
-        .all(|claim| claim.status == TrustStatus::Verified);
-    let final_seal_allowed = uncovered_requirement_ids.is_empty() && all_claims_verified;
+    let all_claims_verified = !claims.is_empty()
+        && claims
+            .iter()
+            .all(|claim| claim.status == TrustStatus::Verified);
+    let has_required_requirements = !required_requirement_ids.is_empty();
+    let final_seal_allowed =
+        has_required_requirements && uncovered_requirement_ids.is_empty() && all_claims_verified;
     CompletionProof {
         schema: COMPLETION_PROOF_SCHEMA.to_string(),
         id: id.into(),
@@ -78,5 +81,12 @@ mod tests {
         assert_eq!(proof.status, TrustStatus::NotVerified);
         assert!(!proof.coverage.final_seal_allowed);
         assert_eq!(proof.coverage.uncovered_requirement_ids, vec!["REQ-2"]);
+    }
+
+    #[test]
+    fn empty_inputs_do_not_yield_vacuous_final_seal() {
+        let proof = build_completion_proof("proof2", "run2", "now", vec![], vec![], vec![], vec![]);
+        assert_eq!(proof.status, TrustStatus::NotVerified);
+        assert!(!proof.coverage.final_seal_allowed);
     }
 }

@@ -5,11 +5,12 @@ use opensks_contracts::{
 };
 
 pub fn plan_gc(paths: &[String], active_run_id: &str) -> RetentionPlan {
+    let run_id_valid = !active_run_id.trim().is_empty();
     let mut delete_paths = Vec::new();
     let mut keep_paths = Vec::new();
     let mut blocked_paths = Vec::new();
     for path in paths {
-        if path.contains(active_run_id) {
+        if run_id_valid && path.split('/').any(|segment| segment == active_run_id) {
             blocked_paths.push(path.clone());
         } else if path.contains("/runtime/") || path.contains("/tmp/") || path.contains("/logs/") {
             delete_paths.push(path.clone());
@@ -17,12 +18,13 @@ pub fn plan_gc(paths: &[String], active_run_id: &str) -> RetentionPlan {
             keep_paths.push(path.clone());
         }
     }
+    let active_run_protected = !blocked_paths.is_empty();
     RetentionPlan {
         schema: RETENTION_PLAN_SCHEMA.to_string(),
         delete_paths,
         keep_paths,
         blocked_paths,
-        active_run_protected: true,
+        active_run_protected,
     }
 }
 

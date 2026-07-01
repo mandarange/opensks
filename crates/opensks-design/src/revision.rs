@@ -140,6 +140,9 @@ pub enum RevisionError {
     },
     /// The persisted record could not be parsed.
     Corrupt { id: String },
+    /// A revision id was claimed by a concurrent proposer before this one could
+    /// persist; the caller should retry with a fresh id.
+    IdCollision { id: String },
     /// A filesystem error.
     Io { reason: String },
 }
@@ -157,6 +160,7 @@ impl std::fmt::Display for RevisionError {
                 from.as_str()
             ),
             Self::Corrupt { id } => write!(f, "design_revision_corrupt: {id}"),
+            Self::IdCollision { id } => write!(f, "design_revision_id_collision: {id}"),
             Self::Io { reason } => write!(f, "design_revision_io: {reason}"),
         }
     }
@@ -175,17 +179,22 @@ impl From<io::Error> for RevisionError {
 /// Propose a new revision for `package_id`. Generates a stable revision id and a
 /// linked proof ref, persists the record in the `Proposed` state, and returns it.
 pub fn propose_revision(workspace: &Path, package_id: &str) -> Result<Revision, RevisionError> {
-    let revision_id = next_revision_id(workspace, package_id)?;
-    let proof_ref = proof_ref_for(&revision_id, package_id);
-    let revision = Revision {
-        revision_id,
-        package_id: package_id.to_string(),
-        state: RevisionState::Proposed,
-        proof_ref,
-        previous_state: None,
-    };
-    persist(workspace, &revision)?;
-    Ok(revision)
+    loop {
+        let revision_id = next_revision_id(workspace, package_id)?;
+        let proof_ref = proof_ref_for(&revision_id, package_id);
+        let revision = Revision {
+            revision_id,
+            package_id: package_id.to_string(),
+            state: RevisionState::Proposed,
+            proof_ref,
+            previous_state: None,
+        };
+        match persist(workspace, &revision, true) {
+            Ok(()) => return Ok(revision),
+            Err(RevisionError::IdCollision { .. }) => continue,
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Accept a proposed revision. Only a `Proposed` revision may be accepted.
@@ -253,7 +262,7 @@ fn transition(
     })?;
     revision.previous_state = Some(from);
     revision.state = to;
-    persist(workspace, &revision)?;
+    persist(workspace, &revision, false)?;
     Ok(revision)
 }
 
@@ -271,8 +280,12 @@ fn revision_path(workspace: &Path, revision_id: &str) -> PathBuf {
 }
 
 /// Persist a revision record atomically (temp + rename), so a crash can never
-/// leave a torn record.
-fn persist(workspace: &Path, revision: &Revision) -> Result<(), RevisionError> {
+/// leave a torn record. When `create_new` is set, the final file is only
+/// created if it does not already exist (surfacing a concurrent id collision
+/// as `RevisionError::IdCollision` instead of silently overwriting); otherwise
+/// the final file is overwritten in place, which is safe for transitions that
+/// update a record already loaded by id.
+fn persist(workspace: &Path, revision: &Revision, create_new: bool) -> Result<(), RevisionError> {
     let dir = revisions_dir(workspace);
     fs::create_dir_all(&dir)?;
     let final_path = dir.join(format!("{}.json", revision.revision_id));
@@ -282,8 +295,27 @@ fn persist(workspace: &Path, revision: &Revision) -> Result<(), RevisionError> {
         std::process::id()
     ));
     fs::write(&tmp_path, revision.to_record_json())?;
-    fs::rename(&tmp_path, &final_path)?;
-    Ok(())
+    if create_new {
+        match fs::hard_link(&tmp_path, &final_path) {
+            Ok(()) => {
+                let _ = fs::remove_file(&tmp_path);
+                Ok(())
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_file(&tmp_path);
+                Err(RevisionError::IdCollision {
+                    id: revision.revision_id.clone(),
+                })
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&tmp_path);
+                Err(error.into())
+            }
+        }
+    } else {
+        fs::rename(&tmp_path, &final_path)?;
+        Ok(())
+    }
 }
 
 /// Compute the next monotonic revision id for a package: `rev-<package>-<n>`,

@@ -904,26 +904,38 @@ impl<'a> ToolGateway<'a> {
             tool: tool.to_string(),
             message: self.sanitize_output(&format!("command_spawn_error:{error}")),
         })?;
+        // Drain stdout/stderr concurrently on dedicated threads while polling for
+        // exit. Without this, a child that writes more than the OS pipe buffer
+        // (~64KB) before exiting will block on write() because nothing is
+        // reading the pipe, causing try_wait() to spin until timeout even though
+        // the command would otherwise have completed quickly.
+        let mut child_stdout = child.stdout.take();
+        let mut child_stderr = child.stderr.take();
+        let stdout_reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+            let mut buf = Vec::new();
+            if let Some(stdout) = child_stdout.as_mut() {
+                std::io::Read::read_to_end(stdout, &mut buf)?;
+            }
+            Ok(buf)
+        });
+        let stderr_reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+            let mut buf = Vec::new();
+            if let Some(stderr) = child_stderr.as_mut() {
+                std::io::Read::read_to_end(stderr, &mut buf)?;
+            }
+            Ok(buf)
+        });
         let mut timed_out = false;
-        let output = loop {
+        let status = loop {
             match child.try_wait() {
-                Ok(Some(_)) => {
-                    break child
-                        .wait_with_output()
-                        .map_err(|error| ToolResult::Failed {
-                            tool: tool.to_string(),
-                            message: self.sanitize_output(&format!("command_wait_error:{error}")),
-                        })?;
-                }
+                Ok(Some(status)) => break status,
                 Ok(None) if started.elapsed() >= timeout => {
                     timed_out = true;
                     let _ = child.kill();
-                    break child
-                        .wait_with_output()
-                        .map_err(|error| ToolResult::Failed {
-                            tool: tool.to_string(),
-                            message: self.sanitize_output(&format!("command_wait_error:{error}")),
-                        })?;
+                    break child.wait().map_err(|error| ToolResult::Failed {
+                        tool: tool.to_string(),
+                        message: self.sanitize_output(&format!("command_wait_error:{error}")),
+                    })?;
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(10)),
                 Err(error) => {
@@ -934,8 +946,28 @@ impl<'a> ToolGateway<'a> {
                 }
             }
         };
-        let stdout_redacted = self.sanitize_output(&String::from_utf8_lossy(&output.stdout));
-        let stderr_redacted = self.sanitize_output(&String::from_utf8_lossy(&output.stderr));
+        let stdout_bytes = stdout_reader
+            .join()
+            .map_err(|_| ToolResult::Failed {
+                tool: tool.to_string(),
+                message: "command_stdout_reader_panicked".to_string(),
+            })?
+            .map_err(|error| ToolResult::Failed {
+                tool: tool.to_string(),
+                message: self.sanitize_output(&format!("command_stdout_read_error:{error}")),
+            })?;
+        let stderr_bytes = stderr_reader
+            .join()
+            .map_err(|_| ToolResult::Failed {
+                tool: tool.to_string(),
+                message: "command_stderr_reader_panicked".to_string(),
+            })?
+            .map_err(|error| ToolResult::Failed {
+                tool: tool.to_string(),
+                message: self.sanitize_output(&format!("command_stderr_read_error:{error}")),
+            })?;
+        let stdout_redacted = self.sanitize_output(&String::from_utf8_lossy(&stdout_bytes));
+        let stderr_redacted = self.sanitize_output(&String::from_utf8_lossy(&stderr_bytes));
         Ok(ToolGatewayReceipt::Read(ToolResult::ToolOutput {
             tool: tool.to_string(),
             content: self.sanitize_output(&json_tool_output(&serde_json::json!({
@@ -943,7 +975,7 @@ impl<'a> ToolGateway<'a> {
                 "tool": tool,
                 "command_redacted": redacted_command(&argv),
                 "argv_redacted": redacted_argv(&argv),
-                "exit_code": output.status.code(),
+                "exit_code": status.code(),
                 "timed_out": timed_out,
                 "duration_ms": started.elapsed().as_millis() as u64,
                 "stdout_redacted": stdout_redacted,
@@ -1679,12 +1711,35 @@ fn run_agentic_loop_inner(
                         })
                         .collect();
                     let lease = patch_path_lease(request, &proposal_id);
-                    let apply = apply_file_writes_with_path_lease(
+                    let apply = match apply_file_writes_with_path_lease(
                         workspace,
                         &proposal_id,
                         &writes,
                         &lease,
-                    )?;
+                    ) {
+                        Ok(apply) => apply,
+                        Err(error) => {
+                            let message = error.to_string();
+                            emit(
+                                sink,
+                                request,
+                                &mut sequence,
+                                AgentEventKind::Error,
+                                serde_json::json!({
+                                    "code": "agentic_patch_apply_failed",
+                                    "reason_code": "agentic_patch_apply_failed",
+                                    "message": message,
+                                    "retryable": false,
+                                }),
+                            );
+                            return Ok(AgentRunOutcome {
+                                assistant_text: message,
+                                patches,
+                                apply_results: applies,
+                                final_state: RunProjectionState::Failed,
+                            });
+                        }
+                    };
                     emit(
                         sink,
                         request,
@@ -2236,15 +2291,81 @@ fn is_sensitive_label(label: &str) -> bool {
         || lower.contains("authorization")
 }
 
+/// Returns true if `token` looks like a credential value by shape alone,
+/// independent of any nearby label keyword: known provider prefixes,
+/// PEM private-key headers, or long high-entropy alphanumeric runs typical
+/// of API tokens/JWTs/hashes.
+fn looks_like_secret_value(token: &str) -> bool {
+    const KNOWN_PREFIXES: &[&str] = &[
+        "AKIA", "ASIA", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_",
+        "sk-", "xox", "AIza", "glpat-",
+    ];
+    let trimmed = token.trim_matches(|c: char| {
+        !c.is_ascii_alphanumeric() && c != '_' && c != '-' && c != '.'
+    });
+    if trimmed.len() < 16 {
+        return false;
+    }
+    if KNOWN_PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix)) {
+        return true;
+    }
+    // A key=value / key: value pair with no surrounding whitespace (e.g.
+    // `access_id=AKIA...`) is still one whitespace-delimited token; check the
+    // part after the last `=` or `:` for a known-prefix credential shape too,
+    // not just the start of the whole token.
+    if let Some(after_delimiter) = trimmed.rsplit(['=', ':']).next()
+        && after_delimiter.len() != trimmed.len()
+        && after_delimiter.len() >= 16
+        && KNOWN_PREFIXES
+            .iter()
+            .any(|prefix| after_delimiter.starts_with(prefix))
+    {
+        return true;
+    }
+    if trimmed.starts_with("-----BEGIN") && trimmed.contains("PRIVATE KEY") {
+        return true;
+    }
+    // JWT shape: three dot-separated base64url segments, each long enough to
+    // be a real base64url-encoded header/payload/signature (real JWT
+    // segments run well into double digits). This minimum length keeps short
+    // dotted, hyphenated identifiers like schema ids (e.g.
+    // `opensks.command-tool-result.v1`) from being misdetected as JWTs.
+    const JWT_MIN_SEGMENT_LEN: usize = 10;
+    if trimmed.matches('.').count() == 2
+        && trimmed.split('.').all(|part| {
+            part.len() >= JWT_MIN_SEGMENT_LEN
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+    {
+        return true;
+    }
+    // High-entropy long run: mixed-case alphanumeric (or base64/hex) of
+    // sufficient length with no whitespace, unlikely to be prose.
+    let is_token_charset = trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-'));
+    if is_token_charset && trimmed.len() >= 32 {
+        let has_digit = trimmed.chars().any(|c| c.is_ascii_digit());
+        let has_upper = trimmed.chars().any(|c| c.is_ascii_uppercase());
+        let has_lower = trimmed.chars().any(|c| c.is_ascii_lowercase());
+        if (has_digit as u8 + has_upper as u8 + has_lower as u8) >= 2 {
+            return true;
+        }
+    }
+    false
+}
+
 fn redact_sensitive_text(raw: &str) -> String {
     let mut redacted = raw
         .lines()
         .map(|line| {
             let lower = line.to_ascii_lowercase();
             if is_sensitive_label(&lower) {
-                "[REDACTED]"
+                "[REDACTED]".to_string()
             } else {
-                line
+                redact_secret_shaped_tokens(line)
             }
         })
         .collect::<Vec<_>>()
@@ -2253,6 +2374,28 @@ fn redact_sensitive_text(raw: &str) -> String {
         redacted.push('\n');
     }
     redacted
+}
+
+/// Replace individual whitespace-delimited tokens that look like secret
+/// values (by shape, not by label) with "[REDACTED]", leaving the rest of
+/// the line intact.
+fn redact_secret_shaped_tokens(line: &str) -> String {
+    if !line.split_whitespace().any(looks_like_secret_value) {
+        return line.to_string();
+    }
+    line.split_inclusive(char::is_whitespace)
+        .map(|piece| {
+            let (word, trailing_ws) = {
+                let trimmed = piece.trim_end_matches(char::is_whitespace);
+                (trimmed, &piece[trimmed.len()..])
+            };
+            if looks_like_secret_value(word) {
+                format!("[REDACTED]{trailing_ws}")
+            } else {
+                piece.to_string()
+            }
+        })
+        .collect()
 }
 
 fn truncate_utf8(raw: &str, max_bytes: usize) -> String {
@@ -2307,6 +2450,7 @@ fn step_proposal(
         .iter()
         .map(|(path, before, after, operation)| FilePatch {
             path: path.clone(),
+            orig_path: None,
             before_hash: content_hash(before),
             after_hash: content_hash(after),
             unified_diff: minimal_unified_diff(path, before, after),
@@ -3176,6 +3320,28 @@ mod tests {
         assert!(redacted.contains("[REDACTED]"));
         assert!(!redacted.contains("abc123"));
         assert!(!redacted.contains("secret-value"));
+    }
+
+    #[test]
+    fn redact_sensitive_text_masks_unlabeled_secret_shaped_values() {
+        let aws_key = redact_sensitive_text("access_id=AKIAABCDEFGHIJKLMNOP plain text around it");
+        assert!(aws_key.contains("[REDACTED]"));
+        assert!(!aws_key.contains("AKIAABCDEFGHIJKLMNOP"));
+
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+        let jwt_redacted = redact_sensitive_text(jwt);
+        assert!(jwt_redacted.contains("[REDACTED]"));
+        assert!(!jwt_redacted.contains(jwt));
+
+        let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA1c7+9z5Pad7OejecsQ0bu3aumqCr9wLa==\n-----END RSA PRIVATE KEY-----";
+        let pem_redacted = redact_sensitive_text(pem);
+        assert!(pem_redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_sensitive_text_leaves_normal_prose_untouched() {
+        let text = "fn main() { println!(\"hello world\"); } // this is a normal comment line";
+        assert_eq!(redact_sensitive_text(text), text);
     }
 
     #[test]

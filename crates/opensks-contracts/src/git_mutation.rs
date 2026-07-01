@@ -122,13 +122,15 @@ impl GitSwitch {
 }
 
 /// Why a path was refused for staging/commit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GitStageRejectReason {
     /// The path name looks like a secret (e.g. `id_rsa`, `.env`, `*.pem`).
     SecretRestricted,
     /// The path falls under a local data-plane rule and must never be tracked.
     DataPlane,
+    /// `git add` failed for this path (e.g. it does not exist in the worktree).
+    CommandFailed(String),
 }
 
 impl GitStageRejectReason {
@@ -136,6 +138,7 @@ impl GitStageRejectReason {
         match self {
             Self::SecretRestricted => "secret_restricted",
             Self::DataPlane => "data_plane",
+            Self::CommandFailed(_) => "command_failed",
         }
     }
 }

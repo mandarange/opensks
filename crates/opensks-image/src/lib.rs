@@ -30,6 +30,12 @@ pub enum ImageError {
     InvalidDimensions,
     #[error("image content hash mismatch: expected {expected}, actual {actual}")]
     ContentHashMismatch { expected: String, actual: String },
+    #[error("image asset id `{id}` already exists with different content: expected {expected}, actual {actual}")]
+    AssetIdConflict {
+        id: String,
+        expected: String,
+        actual: String,
+    },
     #[error("image provider generation failed: {0}")]
     Provider(String),
     #[error("image generation requires a non-empty prompt")]
@@ -239,6 +245,25 @@ impl ImageRuntime {
         asset: ImageAsset,
         receipt: ImageProvenanceReceipt,
     ) -> Result<ImageAsset, ImageError> {
+        if let Some(existing) = self
+            .ledger
+            .assets
+            .iter()
+            .find(|existing| existing.id == asset.id)
+        {
+            if existing.content_hash == asset.content_hash {
+                // Idempotent retry: same id, same content. Do not duplicate ledger
+                // entries; still record the new provenance receipt (retry is auditable)
+                // and return the existing asset unchanged.
+                self.ledger.provenance_receipts.push(receipt);
+                return Ok(existing.clone());
+            }
+            return Err(ImageError::AssetIdConflict {
+                id: asset.id.clone(),
+                expected: existing.content_hash.clone(),
+                actual: asset.content_hash.clone(),
+            });
+        }
         let id = asset.id.clone();
         self.ledger.provenance_receipts.push(receipt);
         self.ledger.gc_candidate_ids.push(id);
@@ -366,6 +391,11 @@ impl ImageRuntime {
         before_id: &str,
         mut after: ImageAsset,
     ) -> Result<ImageAsset, ImageError> {
+        self.ledger
+            .assets
+            .iter()
+            .find(|asset| asset.id == before_id)
+            .ok_or(ImageError::AssetNotFound)?;
         validate_anchors(after.width, after.height, &after.anchors)?;
         after.before_asset_id = Some(before_id.to_string());
         self.ledger.assets.push(after.clone());
@@ -782,7 +812,7 @@ mod tests {
                 opensks_provider::fake_image_model("disabled-image", false),
                 opensks_provider::fake_image_model("enabled-image", true),
             ],
-            PermissionPolicy::default(),
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
         );
         let mut runtime = ImageRuntime::new();
         let asset = runtime
@@ -826,7 +856,7 @@ mod tests {
     fn generated_image_file_is_written_and_hash_verified() {
         let registry = ModelRegistry::new(
             vec![opensks_provider::fake_image_model("enabled-image", true)],
-            PermissionPolicy::default(),
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
         );
         let root = temp_workspace("opensks-image-file");
         let mut runtime = ImageRuntime::new();
@@ -868,7 +898,7 @@ mod tests {
             source: "provider-registry".to_string(),
             reference: "provider:provider-1:model:gpt-image-1.5".to_string(),
         };
-        let registry = ModelRegistry::new(vec![model], PermissionPolicy::default());
+        let registry = ModelRegistry::new(vec![model], PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() });
         let root = temp_workspace("opensks-provider-image-file");
         let client = ScriptedImageClient {
             seen: RefCell::new(Vec::new()),
@@ -940,7 +970,7 @@ mod tests {
                 opensks_provider::fake_image_model("image-generator", true),
                 opensks_provider::fake_vision_model("vision-inspector", true),
             ],
-            PermissionPolicy::default(),
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
         );
         let mut runtime = ImageRuntime::new();
         let asset = runtime
@@ -1004,7 +1034,7 @@ mod tests {
     fn disabled_image_model_is_never_called() {
         let registry = ModelRegistry::new(
             vec![opensks_provider::fake_image_model("disabled-image", false)],
-            PermissionPolicy::default(),
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
         );
         let mut runtime = ImageRuntime::new();
         let error = runtime
@@ -1017,7 +1047,7 @@ mod tests {
     fn unsafe_asset_id_is_rejected_before_path_write() {
         let registry = ModelRegistry::new(
             vec![opensks_provider::fake_image_model("enabled-image", true)],
-            PermissionPolicy::default(),
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
         );
         let mut runtime = ImageRuntime::new();
         let error = runtime
@@ -1030,7 +1060,7 @@ mod tests {
     fn anchor_bounds_and_before_after_relation_are_checked() {
         let registry = ModelRegistry::new(
             vec![opensks_provider::fake_image_model("enabled-image", true)],
-            PermissionPolicy::default(),
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
         );
         let mut runtime = ImageRuntime::new();
         let before = runtime
@@ -1068,13 +1098,31 @@ mod tests {
     }
 
     #[test]
+    fn relate_before_after_rejects_unknown_before_id() {
+        let registry = ModelRegistry::new(
+            vec![opensks_provider::fake_image_model("enabled-image", true)],
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
+        );
+        let mut runtime = ImageRuntime::new();
+        let before = runtime
+            .generate_asset(&registry, "before", 100, 100, Vec::new(), None)
+            .expect("before");
+        let mut after = before.clone();
+        after.id = "after".to_string();
+        assert!(matches!(
+            runtime.relate_before_after("does-not-exist", after),
+            Err(ImageError::AssetNotFound)
+        ));
+    }
+
+    #[test]
     fn image_inspection_uses_vision_capability_route() {
         let registry = ModelRegistry::new(
             vec![
                 opensks_provider::fake_image_model("image-generator", true),
                 opensks_provider::fake_vision_model("vision-inspector", true),
             ],
-            PermissionPolicy::default(),
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
         );
         let mut runtime = ImageRuntime::new();
         let asset = runtime
@@ -1094,14 +1142,14 @@ mod tests {
     fn image_inspection_blocks_when_no_vision_model_is_enabled() {
         let image_registry = ModelRegistry::new(
             vec![opensks_provider::fake_image_model("image-generator", true)],
-            PermissionPolicy::default(),
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
         );
         let no_vision_registry = ModelRegistry::new(
             vec![opensks_provider::fake_vision_model(
                 "disabled-vision",
                 false,
             )],
-            PermissionPolicy::default(),
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
         );
         let mut runtime = ImageRuntime::new();
         let asset = runtime

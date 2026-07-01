@@ -152,12 +152,18 @@ pub fn freshness_check(
 /// large graph is not rebuilt), else builds it once. `total` is the true match
 /// count; `records` is the `[offset, offset + limit)` slice. The current
 /// freshness stamp is attached.
+/// Upper bound on `limit` enforced by `codegraph_query` regardless of what a
+/// caller (e.g. the CLI's `--limit`) requests, so a pathological request can
+/// never force full-result materialization and serialization.
+const CODEGRAPH_QUERY_MAX_LIMIT: usize = 500;
+
 pub fn codegraph_query(
     workspace: &Path,
     query: &str,
     limit: usize,
     offset: usize,
 ) -> Result<CodegraphQuery, IntelError> {
+    let limit = limit.min(CODEGRAPH_QUERY_MAX_LIMIT);
     let query = query.trim();
     if query.is_empty() {
         return Ok(CodegraphQuery {
@@ -249,6 +255,12 @@ pub fn architecture(workspace: &Path) -> Result<Architecture, IntelError> {
 
 // --- hashing internals ------------------------------------------------------
 
+/// Per-file cap on bytes read into memory while computing `worktree_hash`.
+/// `freshness()` runs on chat startup, so a single oversized tracked/modified
+/// file (a committed binary, log, or dataset) must not force an unbounded
+/// synchronous read; files above this size are hashed by length only.
+const WORKTREE_HASH_MAX_FILE_BYTES: u64 = 25 * 1024 * 1024; // 25MB
+
 /// The codegraph index hash: load a persisted index if present, else use the
 /// empty graph fingerprint.
 ///
@@ -285,9 +297,18 @@ fn worktree_hash(workspace: &Path, in_repo: bool) -> Result<String, IntelError> 
         for relative in paths {
             let absolute = workspace.join(&relative);
             // A deleted-but-tracked path contributes a stable "deleted" marker so
-            // a deletion still flips the digest deterministically.
-            let content = match fs::read(&absolute) {
-                Ok(bytes) => fnv1a64(&bytes),
+            // a deletion still flips the digest deterministically. Files above
+            // WORKTREE_HASH_MAX_FILE_BYTES are hashed by length only (not
+            // content) so a single huge tracked/modified file cannot force an
+            // unbounded synchronous read on this chat-startup path.
+            let content = match fs::metadata(&absolute) {
+                Ok(meta) if meta.len() > WORKTREE_HASH_MAX_FILE_BYTES => {
+                    format!("oversized:{}", meta.len())
+                }
+                Ok(_) => match fs::read(&absolute) {
+                    Ok(bytes) => fnv1a64(&bytes),
+                    Err(_) => "deleted".to_string(),
+                },
                 Err(_) => "deleted".to_string(),
             };
             entries.push((relative, content));
@@ -298,8 +319,14 @@ fn worktree_hash(workspace: &Path, in_repo: bool) -> Result<String, IntelError> 
         files.sort();
         for absolute in files {
             let relative = relative_path(workspace, &absolute);
-            let content = match fs::read(&absolute) {
-                Ok(bytes) => fnv1a64(&bytes),
+            let content = match fs::metadata(&absolute) {
+                Ok(meta) if meta.len() > WORKTREE_HASH_MAX_FILE_BYTES => {
+                    format!("oversized:{}", meta.len())
+                }
+                Ok(_) => match fs::read(&absolute) {
+                    Ok(bytes) => fnv1a64(&bytes),
+                    Err(_) => "unreadable".to_string(),
+                },
                 Err(_) => "unreadable".to_string(),
             };
             entries.push((relative, content));
@@ -351,7 +378,16 @@ fn collect_walk(dir: &Path, files: &mut Vec<PathBuf>) {
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if path.is_dir() {
+        // Use symlink_metadata (not is_dir()/is_file(), which follow symlinks)
+        // and skip symlinks entirely so a symlink cycle (e.g. a self-referential
+        // directory symlink) can never cause unbounded recursion.
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
             if matches!(
                 name.as_ref(),
                 ".git"
@@ -367,7 +403,7 @@ fn collect_walk(dir: &Path, files: &mut Vec<PathBuf>) {
                 continue;
             }
             collect_walk(&path, files);
-        } else if path.is_file() {
+        } else if metadata.is_file() {
             files.push(path);
         }
     }
@@ -386,18 +422,56 @@ fn head_commit(workspace: &Path) -> Option<String> {
     git(workspace, &["rev-parse", "HEAD"]).map(|output| output.trim().to_string())
 }
 
+/// Upper bound on how long a single `git` subprocess may run before it is
+/// killed. `freshness()` runs on chat startup and must never hang: a stuck
+/// `git` (index.lock contention, a blocking hook, a stalled network-mounted
+/// `.git`) is treated as "no signal" rather than an indefinite block.
+const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often to poll the child process for completion while waiting.
+const GIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// Run a read-only git command; `None` on any failure (missing git, nonzero
-/// exit, non-repo). Callers treat `None` as "no signal", never as an error.
+/// exit, non-repo, or timeout). Callers treat `None` as "no signal", never as
+/// an error.
 fn git(workspace: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
+    let mut child = Command::new("git")
         .args(args)
         .current_dir(workspace)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    if !output.status.success() {
+
+    // Drain stdout on a background thread so a chatty command (e.g. `git
+    // ls-files -z` on a large repo) can never fill the OS pipe buffer and
+    // deadlock against our poll loop below.
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().ok()? {
+            break status;
+        }
+        if start.elapsed() >= GIT_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(GIT_POLL_INTERVAL);
+    };
+
+    let bytes = reader.join().ok()?;
+    if !status.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&output.stdout).to_string())
+    Some(String::from_utf8_lossy(&bytes).to_string())
 }
 
 fn kind_label(kind: &opensks_contracts::CodeGraphNodeKind) -> String {
@@ -670,6 +744,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn worktree_hash_caps_oversized_tracked_file_reads() {
+        let dir = init_repo("oversized");
+        // Create a tracked file whose length exceeds WORKTREE_HASH_MAX_FILE_BYTES
+        // as a sparse file (via set_len) so the test does not need to actually
+        // allocate/write tens of megabytes of content.
+        let big_path = dir.join("src/big.bin");
+        {
+            let file = fs::File::create(&big_path).expect("create big file");
+            file.set_len(WORKTREE_HASH_MAX_FILE_BYTES + 1)
+                .expect("grow big file");
+        }
+        run_git(&dir, &["add", "src/big.bin"]);
+        run_git(&dir, &["commit", "-m", "add oversized file"]);
+
+        let hash_before = worktree_hash(&dir, true).expect("hash before");
+
+        // Modifying the oversized file's length (not just touching mtime) must
+        // still flip the digest deterministically, without requiring a full
+        // read of the oversized content.
+        {
+            let file = fs::File::create(&big_path).expect("recreate big file");
+            file.set_len(WORKTREE_HASH_MAX_FILE_BYTES + 2)
+                .expect("regrow big file");
+        }
+        let hash_after = worktree_hash(&dir, true).expect("hash after");
+        assert_ne!(
+            hash_before, hash_after,
+            "a size change to an oversized tracked file must flip the digest"
+        );
     }
 
     #[test]

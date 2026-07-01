@@ -8,6 +8,10 @@ use opensks_contracts::{
 };
 use thiserror::Error;
 
+/// Files larger than this are skipped for symbol/relationship indexing to
+/// avoid unbounded memory/CPU use on huge generated or vendored files.
+const MAX_INDEXABLE_FILE_BYTES: u64 = 8 * 1024 * 1024; // 8 MiB
+
 #[derive(Debug, Error)]
 pub enum CodeGraphError {
     #[error("io error: {0}")]
@@ -99,6 +103,9 @@ impl CodeGraph {
         workspace: &Path,
         path: &Path,
     ) -> Result<(), CodeGraphError> {
+        if !is_indexable_size(path) {
+            return Ok(());
+        }
         let relative = relative_path(workspace, path);
         let file_id = format!("file:{relative}");
         let content = fs::read_to_string(path)?;
@@ -189,9 +196,30 @@ impl CodeGraph {
     fn update_file_records(&mut self, workspace: &Path, path: &Path) -> Result<(), CodeGraphError> {
         let relative = relative_path(workspace, path);
         self.delete_path(&relative);
+        let file_id = format!("file:{relative}");
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        if !is_indexable_size(path) {
+            self.records.insert(
+                file_id.clone(),
+                CodeGraphRecord {
+                    schema: CODEGRAPH_RECORD_SCHEMA.to_string(),
+                    id: file_id,
+                    kind: CodeGraphNodeKind::File,
+                    path: relative,
+                    name: file_name,
+                    line: 0,
+                    content_hash: "skipped:oversized".to_string(),
+                    evidence_refs: vec!["opensks-codegraph:size-skipped".to_string()],
+                },
+            );
+            return Ok(());
+        }
         let content = fs::read_to_string(path)?;
         let hash = stable_hash(content.as_bytes());
-        let file_id = format!("file:{relative}");
         self.records.insert(
             file_id.clone(),
             CodeGraphRecord {
@@ -199,11 +227,7 @@ impl CodeGraph {
                 id: file_id.clone(),
                 kind: CodeGraphNodeKind::File,
                 path: relative.clone(),
-                name: path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("unknown")
-                    .to_string(),
+                name: file_name,
                 line: 0,
                 content_hash: hash.clone(),
                 evidence_refs: vec!["opensks-codegraph:file-scan".to_string()],
@@ -268,6 +292,9 @@ impl CodeGraph {
 
         for file in &file_records {
             let path = workspace.join(&file.path);
+            if !is_indexable_size(&path) {
+                continue;
+            }
             let Ok(content) = fs::read_to_string(&path) else {
                 continue;
             };
@@ -335,9 +362,7 @@ impl CodeGraph {
     }
 
     pub fn delete_path(&mut self, relative: &str) {
-        let prefix = format!("{relative}:");
-        self.records
-            .retain(|_, record| record.path != relative && !record.id.contains(&prefix));
+        self.records.retain(|_, record| record.path != relative);
         self.edges.retain(|edge| {
             self.records.contains_key(&edge.from_id) && self.records.contains_key(&edge.to_id)
         });
@@ -514,6 +539,7 @@ fn is_supported_source(path: &Path) -> bool {
 
 fn parse_records(relative: &str, content: &str, hash: &str) -> Vec<CodeGraphRecord> {
     let mut records = Vec::new();
+    let mut pending_test_attr = false;
     for (index, line) in content.lines().enumerate() {
         let line_no = index as u32 + 1;
         let trimmed = line.trim();
@@ -527,13 +553,17 @@ fn parse_records(relative: &str, content: &str, hash: &str) -> Vec<CodeGraphReco
             ));
         }
         if let Some(name) = parse_symbol(trimmed) {
-            let kind = if name.to_ascii_lowercase().contains("test") || trimmed.contains("#[test]")
-            {
+            let kind = if name.to_ascii_lowercase().contains("test") || pending_test_attr {
                 CodeGraphNodeKind::Test
             } else {
                 CodeGraphNodeKind::Symbol
             };
             records.push(record(relative, kind, name, line_no, hash));
+            pending_test_attr = false;
+        } else if trimmed == "#[test]" {
+            pending_test_attr = true;
+        } else if !trimmed.is_empty() {
+            pending_test_attr = false;
         }
     }
     records
@@ -592,6 +622,12 @@ fn record(
         content_hash: hash.to_string(),
         evidence_refs: vec!["opensks-codegraph:line-parser".to_string()],
     }
+}
+
+fn is_indexable_size(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|meta| meta.len() <= MAX_INDEXABLE_FILE_BYTES)
+        .unwrap_or(false)
 }
 
 fn relative_path(workspace: &Path, path: &Path) -> String {

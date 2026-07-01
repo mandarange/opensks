@@ -18,13 +18,14 @@ use std::path::{Path, PathBuf};
 use crate::activation::read_active;
 use crate::compile_swift_tokens_checked;
 use crate::contracts::DesignTokenSet;
-use crate::registry::{DesignRegistry, content_hash};
+use crate::registry::{DesignRegistry, content_hash, is_valid_package_id};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DraftError {
     NotFound(String),
     Io(String),
     Parse(String),
+    InvalidPackageId(String),
 }
 
 impl std::fmt::Display for DraftError {
@@ -33,6 +34,7 @@ impl std::fmt::Display for DraftError {
             DraftError::NotFound(m) => write!(f, "design token set not found: {m}"),
             DraftError::Io(m) => write!(f, "design draft io error: {m}"),
             DraftError::Parse(m) => write!(f, "design token set parse error: {m}"),
+            DraftError::InvalidPackageId(m) => write!(f, "invalid design package id: {m}"),
         }
     }
 }
@@ -50,6 +52,9 @@ fn tokens_path(workspace: &Path, package_id: &str) -> PathBuf {
 }
 
 fn load_set(workspace: &Path, package_id: &str) -> Result<DesignTokenSet, DraftError> {
+    if !is_valid_package_id(package_id) {
+        return Err(DraftError::InvalidPackageId(package_id.to_string()));
+    }
     let path = tokens_path(workspace, package_id);
     let raw = fs::read_to_string(&path)
         .map_err(|e| DraftError::NotFound(format!("{}: {e}", path.display())))?;
@@ -62,13 +67,15 @@ pub struct SaveTokensOutcome {
     pub package_id: String,
     pub updated: usize,
     pub unknown_paths: Vec<String>,
+    pub rejected: Vec<(String, String)>,
     pub total: usize,
     pub content_hash: String,
 }
 
 /// Persist edited token values (by path) into the package's `tokens.json`,
 /// atomically. Existing tokens are updated in place (value kind preserved);
-/// unknown paths are returned, never created.
+/// unknown paths are returned, never created; values that don't parse into
+/// the existing token's kind are rejected (path + reason), never persisted.
 pub fn save_token_values(
     workspace: &Path,
     package_id: &str,
@@ -77,12 +84,16 @@ pub fn save_token_values(
     let mut set = load_set(workspace, package_id)?;
     let mut updated = 0usize;
     let mut unknown = Vec::new();
+    let mut rejected = Vec::new();
     for (path, value) in updates {
         match set.tokens.iter_mut().find(|t| &t.path == path) {
-            Some(token) => {
-                token.value = coerce_value(&token.value, value);
-                updated += 1;
-            }
+            Some(token) => match coerce_value(&token.value, value) {
+                Ok(coerced) => {
+                    token.value = coerced;
+                    updated += 1;
+                }
+                Err(reason) => rejected.push((path.clone(), reason)),
+            },
             None => unknown.push(path.clone()),
         }
     }
@@ -93,30 +104,36 @@ pub fn save_token_values(
         package_id: package_id.to_string(),
         updated,
         unknown_paths: unknown,
+        rejected,
         total: set.tokens.len(),
         content_hash: content_hash(serialized.as_bytes()),
     })
 }
 
 /// Coerce an edited string into the JSON kind the existing value used, so a
-/// dimension token (number) stays a number and a color (string) stays a string.
-fn coerce_value(existing: &serde_json::Value, raw: &str) -> serde_json::Value {
+/// dimension token (number) stays a number and a color (string) stays a
+/// string. Returns `Err` (with a human-readable reason) if the raw input
+/// cannot be parsed into the existing value's kind — callers must not fall
+/// back to silently changing the token's kind.
+fn coerce_value(existing: &serde_json::Value, raw: &str) -> Result<serde_json::Value, String> {
     if existing.is_number() {
         if let Ok(i) = raw.parse::<i64>() {
-            return serde_json::Value::from(i);
+            return Ok(serde_json::Value::from(i));
         }
         if let Ok(f) = raw.parse::<f64>() {
             if let Some(n) = serde_json::Number::from_f64(f) {
-                return serde_json::Value::Number(n);
+                return Ok(serde_json::Value::Number(n));
             }
         }
+        return Err(format!("{raw:?} is not a valid number"));
     }
     if existing.is_boolean() {
         if let Ok(b) = raw.parse::<bool>() {
-            return serde_json::Value::Bool(b);
+            return Ok(serde_json::Value::Bool(b));
         }
+        return Err(format!("{raw:?} is not a valid boolean"));
     }
-    serde_json::Value::String(raw.to_string())
+    Ok(serde_json::Value::String(raw.to_string()))
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), DraftError> {
@@ -255,6 +272,35 @@ mod tests {
     }
 
     #[test]
+    fn save_rejects_non_numeric_value_for_a_numeric_token() {
+        let ws = temp_ws("save-reject");
+        let outcome = save_token_values(
+            &ws,
+            "test-pkg",
+            &[("size.hit_target.primary".to_string(), "48pxx".to_string())],
+        )
+        .unwrap();
+        assert_eq!(outcome.updated, 0);
+        assert_eq!(
+            outcome.rejected,
+            vec![(
+                "size.hit_target.primary".to_string(),
+                "\"48pxx\" is not a valid number".to_string()
+            )]
+        );
+
+        // The token's prior value is unchanged on disk — no silent kind change.
+        let reloaded = load_set(&ws, "test-pkg").unwrap();
+        let hit = reloaded
+            .tokens
+            .iter()
+            .find(|t| t.path == "size.hit_target.primary")
+            .unwrap();
+        assert_eq!(hit.value, serde_json::json!(44));
+        fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
     fn compile_validates_the_token_set() {
         let ws = temp_ws("compile");
         let outcome = compile_package(&ws, "test-pkg").unwrap();
@@ -284,6 +330,14 @@ mod tests {
         let ws = temp_ws("missing");
         let err = save_token_values(&ws, "no-such-pkg", &[]).unwrap_err();
         assert!(matches!(err, DraftError::NotFound(_)));
+        fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn path_traversal_package_id_is_rejected() {
+        let ws = temp_ws("traversal");
+        let err = save_token_values(&ws, "../../../etc", &[]).unwrap_err();
+        assert!(matches!(err, DraftError::InvalidPackageId(_)));
         fs::remove_dir_all(&ws).ok();
     }
 }

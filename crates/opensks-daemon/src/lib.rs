@@ -5573,6 +5573,38 @@ fn integration_candidate_apply_lines(
     Ok(vec![serde_json::to_string(&receipt)?])
 }
 
+/// Advisory, process-local exclusive lock over a single run_id's integration
+/// candidate directory. Prevents concurrent/duplicate `apply_integration_candidate`
+/// calls (e.g. a client retry after a perceived timeout) from racing on the same
+/// candidate.json/verification.json/integration.json receipts and the underlying
+/// git-apply. The lock file is removed on drop so it never outlives the call.
+struct ApplyRunLock {
+    path: PathBuf,
+}
+
+impl ApplyRunLock {
+    fn acquire(candidate_dir: &Path) -> Result<Self, String> {
+        let path = candidate_dir.join("apply.lock");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::AlreadyExists => {
+                    "integration apply already in progress for this run_id".to_string()
+                }
+                _ => error.to_string(),
+            })?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for ApplyRunLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 fn apply_integration_candidate(
     workspace: &Path,
     run_id: &str,
@@ -5634,6 +5666,37 @@ fn apply_integration_candidate(
     let repair_ref = artifact_ref(&repair_relative);
     let cleanup_ref = artifact_ref(&cleanup_relative);
     let expected_approval_id = format!("approval-integration-{run_id}");
+
+    let _apply_lock = match ApplyRunLock::acquire(&candidate_dir) {
+        Ok(lock) => lock,
+        Err(_) => {
+            // Someone else is already applying this run_id's candidate; return a
+            // dedicated 'in progress' failure receipt rather than re-running git apply.
+            let receipt = integration_apply_receipt(IntegrationApplyReceiptInput {
+                run_id,
+                candidate_id: "",
+                state: "failed",
+                reason_code: "integration_apply_in_progress",
+                target_paths: Vec::new(),
+                approval_id: Some(expected_approval_id),
+                approval_policy_id: None,
+                turn_settings: None,
+                candidate_ref: &candidate_ref,
+                patch_ref: &patch_ref,
+                verification_ref: None,
+                integration_ref: &integration_ref,
+                final_diff_ref: &final_diff_ref,
+                seal_ref: None,
+                repair_ref: None,
+                cleanup_ref: None,
+                main_workspace_modified: false,
+                verifier_passed: false,
+                approval_required: true,
+                generated_at_ms: now_ms,
+            });
+            return Ok(receipt);
+        }
+    };
 
     let candidate_raw = match std::fs::read_to_string(candidate_dir.join("candidate.json")) {
         Ok(raw) => raw,
@@ -7368,6 +7431,7 @@ fn integration_apply_error_reason(error: &opensks_git::GitError) -> &'static str
         opensks_git::GitError::EmptyOutbox => "integration_outbox_empty",
         opensks_git::GitError::Io(_) => "integration_io_error",
         opensks_git::GitError::Json(_) => "integration_json_error",
+        opensks_git::GitError::TooManyTargetPaths { .. } => "candidate_target_rejected",
     }
 }
 
@@ -7478,7 +7542,8 @@ impl opensks_adapter::ImageToolExecutor for ProviderImageToolExecutor {
         let asset_id = request.asset_id.clone().unwrap_or_else(|| {
             generated_image_asset_id(&request.prompt, request.width, request.height)
         });
-        let mut runtime = opensks_image::ImageRuntime::new();
+        let ledger = read_image_ledger(workspace).map_err(|error| error.to_string())?;
+        let mut runtime = opensks_image::ImageRuntime::from_ledger(ledger);
         let asset = runtime
             .generate_provider_asset_file_for_model(
                 &self.registry,
@@ -8085,6 +8150,21 @@ impl<C: opensks_adapter::ChatCompleter> opensks_adapter::ChatCompleter
     }
 }
 
+/// Returns true if an event with `id` has already been durably persisted for
+/// `run_id`. Used to make the fixed, run_id-derived ids in
+/// DaemonAgentEventSink::emit_run_started/emit_run_completed/emit_run_failed
+/// idempotent under a retried invocation for the same run_id, instead of
+/// racing on the events table's `id TEXT PRIMARY KEY` and surfacing a raw
+/// constraint error that aborts the whole turn.
+fn event_id_already_recorded(
+    store: &opensks_event_store::EventStore,
+    run_id: &str,
+    id: &str,
+) -> Result<bool, String> {
+    let events = store.replay(run_id).map_err(|error| error.to_string())?;
+    Ok(events.iter().any(|event| event.id == id))
+}
+
 struct DaemonAgentEventSink {
     store: std::sync::Mutex<opensks_event_store::EventStore>,
     failures: std::sync::Mutex<Vec<String>>,
@@ -8104,9 +8184,10 @@ impl DaemonAgentEventSink {
         &self,
         request: &opensks_adapter::AgentRunRequest,
     ) -> Result<(), DaemonError> {
+        let id = format!("agent-{}-run-started", request.run_id);
         let event = opensks_contracts::ExecutionEventEnvelope {
             schema: opensks_contracts::EXECUTION_EVENT_ENVELOPE_SCHEMA.to_string(),
-            id: format!("agent-{}-run-started", request.run_id),
+            id: id.clone(),
             run_id: request.run_id.clone(),
             sequence: 0,
             occurred_at: event_time_from_ms(request.now_ms),
@@ -8129,6 +8210,14 @@ impl DaemonAgentEventSink {
             .store
             .lock()
             .map_err(|_| DaemonError::Io(std::io::Error::other("event journal lock poisoned")))?;
+        if event_id_already_recorded(&store, &request.run_id, &id)
+            .map_err(|error| DaemonError::Io(std::io::Error::other(error.to_string())))?
+        {
+            // A retried invocation for the same run_id (e.g. a client retry on an
+            // ambiguous timeout) must be a no-op rather than raising a raw
+            // id-collision constraint error and aborting the turn.
+            return Ok(());
+        }
         store
             .append_event(event)
             .map_err(|error| DaemonError::Io(std::io::Error::other(error.to_string())))?;
@@ -8142,9 +8231,10 @@ impl DaemonAgentEventSink {
         candidate: Option<&IntegrationCandidateReceipt>,
         now_ms: u64,
     ) -> Result<(), DaemonError> {
+        let id = format!("agent-{}-run-completed", request.run_id);
         let event = opensks_contracts::ExecutionEventEnvelope {
             schema: opensks_contracts::EXECUTION_EVENT_ENVELOPE_SCHEMA.to_string(),
-            id: format!("agent-{}-run-completed", request.run_id),
+            id: id.clone(),
             run_id: request.run_id.clone(),
             sequence: 0,
             occurred_at: event_time_from_ms(now_ms),
@@ -8175,6 +8265,14 @@ impl DaemonAgentEventSink {
             .store
             .lock()
             .map_err(|_| DaemonError::Io(std::io::Error::other("event journal lock poisoned")))?;
+        if event_id_already_recorded(&store, &request.run_id, &id)
+            .map_err(|error| DaemonError::Io(std::io::Error::other(error.to_string())))?
+        {
+            // A retried invocation for the same run_id (e.g. a client retry on an
+            // ambiguous timeout) must be a no-op rather than raising a raw
+            // id-collision constraint error and aborting the turn.
+            return Ok(());
+        }
         store
             .append_event(event)
             .map_err(|error| DaemonError::Io(std::io::Error::other(error.to_string())))?;
@@ -8193,9 +8291,10 @@ impl DaemonAgentEventSink {
         } else {
             redacted_failure_text(message)
         };
+        let id = format!("agent-{}-run-failed", request.run_id);
         let event = opensks_contracts::ExecutionEventEnvelope {
             schema: opensks_contracts::EXECUTION_EVENT_ENVELOPE_SCHEMA.to_string(),
-            id: format!("agent-{}-run-failed", request.run_id),
+            id: id.clone(),
             run_id: request.run_id.clone(),
             sequence: 0,
             occurred_at: event_time_from_ms(now_ms),
@@ -8224,6 +8323,14 @@ impl DaemonAgentEventSink {
             .store
             .lock()
             .map_err(|_| DaemonError::Io(std::io::Error::other("event journal lock poisoned")))?;
+        if event_id_already_recorded(&store, &request.run_id, &id)
+            .map_err(|error| DaemonError::Io(std::io::Error::other(error.to_string())))?
+        {
+            // A retried invocation for the same run_id (e.g. a client retry on an
+            // ambiguous timeout) must be a no-op rather than raising a raw
+            // id-collision constraint error and aborting the turn.
+            return Ok(());
+        }
         store
             .append_event(event)
             .map_err(|error| DaemonError::Io(std::io::Error::other(error.to_string())))?;
@@ -8263,8 +8370,20 @@ impl opensks_adapter::AgentEventSink for DaemonAgentEventSink {
         let execution_event = execution_event_from_agent_event(event);
         match self.store.lock() {
             Ok(mut store) => {
-                if let Err(error) = store.append_event(execution_event) {
-                    self.record_failure(error);
+                // Same rationale as emit_run_started/emit_run_completed/emit_run_failed:
+                // a retried invocation for this run_id replays the agentic loop from
+                // sequence 0, so these fixed, run_id+actor+sequence-derived ids must be
+                // idempotent rather than racing on the events table's id TEXT PRIMARY
+                // KEY and surfacing a raw constraint error that aborts the whole turn.
+                match event_id_already_recorded(&store, &execution_event.run_id, &execution_event.id)
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if let Err(error) = store.append_event(execution_event) {
+                            self.record_failure(error);
+                        }
+                    }
+                    Err(error) => self.record_failure(error),
                 }
             }
             Err(_) => self.record_failure("event journal lock poisoned"),
@@ -8920,6 +9039,13 @@ fn load_workspace_graph(workspace: &Path, requested: &str) -> Result<PipelineGra
         .map_err(|_| "graph file is not readable")?;
     if !graph_path.starts_with(&workspace) {
         return Err("graph_path escapes the workspace");
+    }
+    const MAX_WORKSPACE_GRAPH_BYTES: u64 = 16 * 1024 * 1024;
+    let metadata = graph_path
+        .metadata()
+        .map_err(|_| "graph file is not readable")?;
+    if metadata.len() > MAX_WORKSPACE_GRAPH_BYTES {
+        return Err("graph file exceeds maximum allowed size");
     }
     let bytes = std::fs::read(&graph_path).map_err(|_| "graph file is not readable")?;
     serde_json::from_slice(&bytes).map_err(|_| "graph file is not a PipelineGraph")
@@ -11806,7 +11932,7 @@ mod tests {
         );
         assert_eq!(
             context_pack_json["conversation_summary"]["reason_code"],
-            "redacted_conversation_summary"
+            "conversation_summary_included"
         );
         assert!(
             context_pack_json["body"]

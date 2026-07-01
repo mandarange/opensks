@@ -59,6 +59,8 @@ pub enum ConversationError {
         client_updated_at_ms: u64,
         canonical_updated_at_ms: u64,
     },
+    #[error("message text exceeds maximum length: {len} > {limit}")]
+    MessageTooLarge { len: usize, limit: usize },
 }
 
 type Result<T> = std::result::Result<T, ConversationError>;
@@ -177,6 +179,11 @@ enum TimelineProjectionMode {
     Incremental,
     Rebuild,
 }
+
+/// Hard cap on a single message's raw text length before redaction/storage,
+/// to bound daemon memory growth and SQLite/FTS5 write size for a single
+/// turn (recovery directive §19.5 follow-up).
+pub const MAX_MESSAGE_TEXT_LEN: usize = 200_000; // bytes; tune to product limit
 
 /// Redact secret-looking tokens from text before it is stored in the searchable
 /// copy or an FTS index. Whitespace within a line is normalized; line breaks are
@@ -982,6 +989,12 @@ impl ConversationRepository {
         raw_content: Option<&MessageRawContentCiphertext>,
         now_ms: u64,
     ) -> Result<String> {
+        if content_raw.len() > MAX_MESSAGE_TEXT_LEN {
+            return Err(ConversationError::MessageTooLarge {
+                len: content_raw.len(),
+                limit: MAX_MESSAGE_TEXT_LEN,
+            });
+        }
         let content_redacted = redact_secrets(content_raw);
         let id = self.new_id()?;
         let sequence: i64 = self.conn.query_row(
@@ -2581,6 +2594,13 @@ impl ConversationRepository {
         raw_content: Option<&MessageRawContentCiphertext>,
         now_ms: u64,
     ) -> Result<ConversationTurnAccepted> {
+        if request.message.text.len() > MAX_MESSAGE_TEXT_LEN {
+            return Err(ConversationError::MessageTooLarge {
+                len: request.message.text.len(),
+                limit: MAX_MESSAGE_TEXT_LEN,
+            });
+        }
+
         if let Some(existing) =
             self.lookup_turn_idempotency(&request.idempotency_key, &request.conversation_id)?
         {

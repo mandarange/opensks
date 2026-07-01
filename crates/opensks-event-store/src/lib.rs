@@ -133,15 +133,32 @@ impl EventStore {
         &mut self,
         mut event: ExecutionEventEnvelope,
     ) -> Result<ExecutionEventEnvelope, EventStoreError> {
-        if event.sequence == 0 {
-            event.sequence = self.next_sequence(&event.run_id)?;
-        }
         if event.sensitivity != Sensitivity::Public {
-            event.payload = redact_value(event.payload);
+            let force_redact = event.sensitivity == Sensitivity::Secret;
+            event.payload = redact_value(event.payload, force_redact);
         }
 
         let payload_json = serde_json::to_string(&event.payload)?;
-        let tx = self.conn.transaction()?;
+        // BEGIN IMMEDIATE acquires the write lock up front so the
+        // next_sequence read below and the subsequent INSERT are atomic with
+        // respect to any other connection (even a separately-opened one)
+        // writing to this same sqlite file, preventing two concurrent
+        // appends for the same run_id from racing to compute the same
+        // sequence number.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if event.sequence == 0 {
+            let seq: Option<i64> = tx
+                .query_row(
+                    "SELECT MAX(sequence) FROM events WHERE run_id = ?1",
+                    params![event.run_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            event.sequence = seq.unwrap_or(0) as u64 + 1;
+        }
         tx.execute(
             "INSERT OR IGNORE INTO runs (run_id) VALUES (?1)",
             params![event.run_id],
@@ -178,7 +195,8 @@ impl EventStore {
         &self,
         run_id: &str,
         last_sequence: u64,
-        payload: serde_json::Value,
+        sensitivity: Sensitivity,
+        mut payload: serde_json::Value,
     ) -> Result<(), EventStoreError> {
         let committed = self
             .conn
@@ -190,6 +208,10 @@ impl EventStore {
             .optional()?;
         if committed.is_none() {
             return Err(EventStoreError::MissingCommittedEvent);
+        }
+        if sensitivity != Sensitivity::Public {
+            let force_redact = sensitivity == Sensitivity::Secret;
+            payload = redact_value(payload, force_redact);
         }
         let payload_json = serde_json::to_string(&payload)?;
         let snapshot_hash = stable_hash(&payload_json);
@@ -234,8 +256,9 @@ impl EventStore {
                 causation_id: row.get(5)?,
                 correlation_id: row.get(6)?,
                 kind: EventKind::parse_label(&kind_raw),
-                payload: serde_json::from_str(&payload_json)
-                    .unwrap_or_else(|_| serde_json::json!({"decode_error": true})),
+                payload: serde_json::from_str(&payload_json).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(e))
+                })?,
                 sensitivity: Sensitivity::parse_label(&sensitivity_raw),
                 evidence_refs: Vec::new(),
             })
@@ -245,31 +268,63 @@ impl EventStore {
         for row in rows {
             events.push(row?);
         }
+        let mut evidence_by_event = self.evidence_refs_for_events(
+            &events.iter().map(|event| event.id.clone()).collect::<Vec<_>>(),
+        )?;
         for event in &mut events {
-            event.evidence_refs = self.evidence_refs_for_event(&event.id)?;
+            event.evidence_refs = evidence_by_event.remove(&event.id).unwrap_or_default();
         }
         Ok(events)
     }
 
-    fn evidence_refs_for_event(&self, event_id: &str) -> Result<Vec<String>, EventStoreError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT evidence_ref FROM evidence WHERE event_id = ?1 ORDER BY id ASC")?;
-        let rows = stmt.query_map(params![event_id], |row| row.get(0))?;
-        let mut evidence_refs = Vec::new();
-        for row in rows {
-            evidence_refs.push(row?);
+    /// Batch-fetch evidence_refs for many event ids in a single query instead
+    /// of one `SELECT` per event (avoids an N+1 query pattern for runs with a
+    /// large event history).
+    fn evidence_refs_for_events(
+        &self,
+        event_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<String>>, EventStoreError> {
+        let mut evidence_by_event: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        if event_ids.is_empty() {
+            return Ok(evidence_by_event);
         }
-        Ok(evidence_refs)
+        let placeholders = event_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT event_id, evidence_ref FROM evidence WHERE event_id IN ({placeholders}) ORDER BY id ASC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(event_ids.iter()), |row| {
+            let event_id: String = row.get(0)?;
+            let evidence_ref: String = row.get(1)?;
+            Ok((event_id, evidence_ref))
+        })?;
+        for row in rows {
+            let (event_id, evidence_ref) = row?;
+            evidence_by_event.entry(event_id).or_default().push(evidence_ref);
+        }
+        Ok(evidence_by_event)
     }
 }
 
-fn redact_value(value: serde_json::Value) -> serde_json::Value {
+fn redact_value(value: serde_json::Value, force_redact: bool) -> serde_json::Value {
     match value {
-        serde_json::Value::String(value) => serde_json::Value::String(redact_secrets(&value)),
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.into_iter().map(redact_value).collect())
+        serde_json::Value::String(value) => {
+            if force_redact {
+                serde_json::Value::String("[redacted]".to_string())
+            } else {
+                serde_json::Value::String(redact_secrets(&value))
+            }
         }
+        serde_json::Value::Number(_) | serde_json::Value::Bool(_) if force_redact => {
+            serde_json::Value::String("[redacted]".to_string())
+        }
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(|value| redact_value(value, force_redact))
+                .collect(),
+        ),
         serde_json::Value::Object(map) => serde_json::Value::Object(
             map.into_iter()
                 .map(|(key, value)| {
@@ -280,7 +335,7 @@ fn redact_value(value: serde_json::Value) -> serde_json::Value {
                     {
                         serde_json::Value::String("[redacted]".to_string())
                     } else {
-                        redact_value(value)
+                        redact_value(value, force_redact)
                     };
                     (key, redacted)
                 })
@@ -384,10 +439,40 @@ mod tests {
     }
 
     #[test]
+    fn replay_propagates_corrupted_payload_json_instead_of_fabricating_a_payload() {
+        let mut store = EventStore::open_memory().expect("store");
+        store
+            .append_event(event("evt-1", "run-1", Sensitivity::Public))
+            .expect("append");
+        // Bypass append_event to simulate a corrupted/truncated payload_json
+        // row (disk corruption, partial write, etc).
+        store
+            .conn
+            .execute(
+                "UPDATE events SET payload_json = ?1 WHERE id = ?2",
+                params!["{not valid json", "evt-1"],
+            )
+            .expect("corrupt row");
+
+        let err = store.replay("run-1").expect_err("corrupted payload_json must error");
+        assert!(matches!(err, EventStoreError::Sqlite(_)));
+
+        let err = store
+            .replay_since("run-1", 0)
+            .expect_err("corrupted payload_json must error via replay_since");
+        assert!(matches!(err, EventStoreError::Sqlite(_)));
+    }
+
+    #[test]
     fn snapshot_is_blocked_until_event_is_committed() {
         let store = EventStore::open_memory().expect("store");
         let err = store
-            .write_snapshot("run-missing", 1, serde_json::json!({"state": "bad"}))
+            .write_snapshot(
+                "run-missing",
+                1,
+                Sensitivity::Public,
+                serde_json::json!({"state": "bad"}),
+            )
             .expect_err("snapshot before event");
         assert!(matches!(err, EventStoreError::MissingCommittedEvent));
     }
@@ -402,6 +487,7 @@ mod tests {
             .write_snapshot(
                 "run-1",
                 committed.sequence,
+                Sensitivity::Public,
                 serde_json::json!({"state": "snapshotted"}),
             )
             .expect("snapshot");
@@ -537,10 +623,33 @@ mod tests {
             );
         }
         // The sensitive-keyed fields are explicitly stubbed to `[redacted]`.
+        // Secret-sensitivity events force-redact every leaf value, so even
+        // the innocuously-named "harmless" field is scrubbed.
         assert_eq!(replayed[0].payload["api_token"], "[redacted]");
         assert_eq!(replayed[0].payload["client_secret"], "[redacted]");
         assert_eq!(replayed[0].payload["nested"]["password"], "[redacted]");
-        assert_eq!(replayed[0].payload["nested"]["harmless"], "ok");
+        assert_eq!(replayed[0].payload["nested"]["harmless"], "[redacted]");
+    }
+
+    #[test]
+    fn secret_sensitivity_redacts_non_string_leaves_and_non_sensitive_keys() {
+        // Number/Bool leaves, and String leaves under innocuously-named keys,
+        // must also be scrubbed for a Secret-sensitivity event — not just
+        // values under keys containing secret/token/password.
+        let mut store = EventStore::open_memory().expect("store");
+        let run_id = "run-secret-leaves";
+        let secret = "session=AbCdEf1234567890xyz";
+        store
+            .append_event(secret_event(
+                "evt-1",
+                run_id,
+                serde_json::json!({"api_key": 12345, "flag": true, "details": secret}),
+            ))
+            .expect("append");
+        let replayed = store.replay(run_id).expect("replay");
+        assert_eq!(replayed[0].payload["api_key"], "[redacted]");
+        assert_eq!(replayed[0].payload["flag"], "[redacted]");
+        assert_eq!(replayed[0].payload["details"], "[redacted]");
     }
 
     #[test]
@@ -559,7 +668,12 @@ mod tests {
             .expect("append");
         // Snapshot the (already-redacted) projected payload.
         store
-            .write_snapshot(run_id, committed.sequence, committed.payload.clone())
+            .write_snapshot(
+                run_id,
+                committed.sequence,
+                Sensitivity::Secret,
+                committed.payload.clone(),
+            )
             .expect("snapshot");
         let stored: String = store
             .conn
@@ -572,6 +686,40 @@ mod tests {
         assert!(
             !stored.contains(secret),
             "snapshot persistence leaked the secret: {stored}"
+        );
+    }
+
+    #[test]
+    fn write_snapshot_redacts_raw_unredacted_payload_when_not_public() {
+        // Unlike the proof above (which snapshots an already-redacted
+        // projected payload), this proves write_snapshot itself redacts a
+        // raw, never-redacted payload when the caller passes a non-public
+        // sensitivity.
+        let mut store = EventStore::open_memory().expect("store");
+        let run_id = "run-snap-raw";
+        let secret = SECRETS[0];
+        let committed = store
+            .append_event(event("evt-1", run_id, Sensitivity::Public))
+            .expect("append");
+        store
+            .write_snapshot(
+                run_id,
+                committed.sequence,
+                Sensitivity::Secret,
+                serde_json::json!({"api_token": secret}),
+            )
+            .expect("snapshot");
+        let stored: String = store
+            .conn
+            .query_row(
+                "SELECT payload_json FROM snapshots WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .expect("read snapshot");
+        assert!(
+            !stored.contains(secret),
+            "write_snapshot must redact a raw unredacted payload: {stored}"
         );
     }
 

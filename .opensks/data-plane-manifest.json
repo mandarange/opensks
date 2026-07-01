@@ -179,7 +179,7 @@
     {
       "path": ".opensks/secrets/",
       "plane": "secret_local",
-      "git_tracking": "ignore",
+      "git_tracking": "never_track",
       "retention": "never_publish",
       "contains_secrets": true,
       "allows_machine_absolute_paths": true,

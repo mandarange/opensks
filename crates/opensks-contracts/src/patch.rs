@@ -37,6 +37,10 @@ pub enum RiskLevel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FilePatch {
     pub path: String,
+    /// The path this file was renamed or copied from. Only meaningful for
+    /// [`FileOperation::Rename`]; `None` for create/modify/delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orig_path: Option<String>,
     pub before_hash: String,
     pub after_hash: String,
     pub unified_diff: String,
@@ -124,6 +128,7 @@ mod tests {
             base_tree_hash: "tree-hash".to_string(),
             files: vec![FilePatch {
                 path: "src/lib.rs".to_string(),
+                orig_path: None,
                 before_hash: "h1".to_string(),
                 after_hash: "h2".to_string(),
                 unified_diff: "@@ -1 +1 @@\n-a\n+b\n".to_string(),

@@ -20,6 +20,7 @@ pub(crate) struct ConversationCommandOptions {
     pub(crate) settings: Option<String>,
     pub(crate) supervisor_id: Option<String>,
     pub(crate) lease_ttl_ms: Option<u64>,
+    pub(crate) force: bool,
 }
 
 pub(crate) fn conversation_usage() -> &'static str {
@@ -28,7 +29,7 @@ pub(crate) fn conversation_usage() -> &'static str {
         "       opensks conversation create --workspace <path> --title \"<title>\"\n",
         "       opensks conversation rename --workspace <path> --conversation <id> --title \"<title>\"\n",
         "       opensks conversation pin|unpin|archive|unarchive --workspace <path> --conversation <id>\n",
-        "       opensks conversation delete --workspace <path> --conversation <id>\n",
+        "       opensks conversation delete --workspace <path> --conversation <id> --force\n",
         "       opensks conversation fork --workspace <path> --conversation <id> [--after-sequence S]\n",
         "       opensks conversation messages --workspace <path> --conversation <id> [--before-sequence S] [--limit N]\n",
         "       opensks conversation append --workspace <path> --conversation <id> --role user|assistant|system --text \"<text>\"\n",
@@ -119,6 +120,10 @@ pub(crate) fn parse_conversation_options(
                         .map_err(|_| CliError::Usage(conversation_usage().to_string()))?,
                 );
                 idx += 2;
+            }
+            "--force" => {
+                options.force = true;
+                idx += 1;
             }
             other => {
                 return Err(CliError::Usage(format!(

@@ -157,6 +157,8 @@ fn contains_secret(value: &serde_json::Value) -> bool {
                 || lower.contains("token")
                 || lower.contains("api_key")
                 || lower.contains("sk-")
+                || lower.starts_with("bearer ")
+                || looks_like_jwt(value)
         }
         serde_json::Value::Array(values) => values.iter().any(contains_secret),
         serde_json::Value::Object(map) => map.iter().any(|(key, value)| {
@@ -164,10 +166,28 @@ fn contains_secret(value: &serde_json::Value) -> bool {
             lower.contains("secret")
                 || lower.contains("token")
                 || lower.contains("api_key")
+                || lower.contains("authorization")
+                || lower.contains("bearer")
+                || lower.contains("jwt")
+                || lower.contains("credential")
+                || lower.contains("password")
+                || lower.contains("private_key")
                 || contains_secret(value)
         }),
         _ => false,
     }
+}
+
+fn looks_like_jwt(value: &str) -> bool {
+    let candidate = value.strip_prefix("Bearer ").unwrap_or(value);
+    let parts: Vec<&str> = candidate.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
 }
 
 trait HookPhaseOrder {
@@ -221,6 +241,23 @@ mod tests {
             "inv-secret",
             HookPhase::BeforeProviderCall,
             serde_json::json!({"api_key": "sk-test"}),
+        ));
+        assert_eq!(decisions[0].action, HookAction::Block);
+        assert_eq!(decisions[0].reason_code, "hook_secret_access_denied");
+    }
+
+    #[test]
+    fn jwt_bearer_payload_is_blocked_before_hook_reads_it() {
+        let engine = HookEngine::new(vec![hook_spec(
+            "secret-guard",
+            HookPhase::BeforeProviderCall,
+            0,
+            HookAction::Allow,
+        )]);
+        let decisions = engine.dispatch(&invocation(
+            "inv-jwt-secret",
+            HookPhase::BeforeProviderCall,
+            serde_json::json!({"authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"}),
         ));
         assert_eq!(decisions[0].action, HookAction::Block);
         assert_eq!(decisions[0].reason_code, "hook_secret_access_denied");

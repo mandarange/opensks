@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use opensks_contracts::TerminalEnvPolicy;
+use opensks_contracts::{TerminalEnvPolicy, TerminalRiskLevel};
 use portable_pty::{Child, CommandBuilder, MasterPty, native_pty_system};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -17,6 +17,7 @@ use crate::artifacts::TerminalArtifactWriter;
 use crate::block::{CommandBlockBuilder, now_ms};
 use crate::pty::{normalize_cols, normalize_rows, pty_size};
 use crate::redaction::digest_bytes;
+use crate::risk::TerminalRiskPolicy;
 
 pub const MAX_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 pub const READ_TIMEOUT_MS: u64 = 25;
@@ -82,6 +83,10 @@ pub enum TerminalRuntimeError {
     SessionNotRunning(String),
     #[error("invalid cwd `{path}`: {reason}")]
     InvalidCwd { path: PathBuf, reason: String },
+    #[error("invalid terminal session id: {0}")]
+    InvalidSessionId(String),
+    #[error("command requires approval: {reason_code}")]
+    RequiresApproval { reason_code: String },
     #[error("shell not found: {0}")]
     ShellNotFound(PathBuf),
     #[error("unsupported platform: {0}")]
@@ -97,6 +102,7 @@ pub enum TerminalRuntimeError {
 pub struct TerminalRuntime {
     workspace: PathBuf,
     sessions: Mutex<HashMap<String, TerminalSession>>,
+    risk_policy: TerminalRiskPolicy,
 }
 
 struct TerminalSession {
@@ -111,8 +117,10 @@ struct TerminalSession {
 
 impl TerminalRuntime {
     pub fn new(workspace: impl AsRef<Path>) -> Self {
+        let workspace = workspace.as_ref().to_path_buf();
         Self {
-            workspace: workspace.as_ref().to_path_buf(),
+            risk_policy: TerminalRiskPolicy::new(&workspace),
+            workspace,
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -131,6 +139,17 @@ impl TerminalRuntime {
 
         #[cfg(not(windows))]
         {
+            validate_session_id(&config.session_id)?;
+            if self
+                .sessions
+                .lock()
+                .expect("terminal session lock poisoned")
+                .contains_key(&config.session_id)
+            {
+                return Err(TerminalRuntimeError::SessionAlreadyExists(
+                    config.session_id.clone(),
+                ));
+            }
             validate_cwd(&config.cwd)?;
             let shell = resolve_shell(config.shell.as_deref())?;
             let cols = normalize_cols(config.cols);
@@ -208,6 +227,9 @@ impl TerminalRuntime {
                 .lock()
                 .expect("terminal session lock poisoned");
             if sessions.contains_key(&session_id) {
+                let mut session = session;
+                let _ = session.child.kill();
+                let _ = session.child.wait();
                 return Err(TerminalRuntimeError::SessionAlreadyExists(session_id));
             }
             sessions.insert(session_id.clone(), session);
@@ -221,6 +243,34 @@ impl TerminalRuntime {
             .lock()
             .expect("terminal session lock poisoned");
         let session = running_session_mut(&mut sessions, session_id)?;
+        if let Some(candidate) = text
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+        {
+            let decision = self.risk_policy.classify(candidate);
+            session.artifacts.append_event(&json!({
+                "type": "risk_decision",
+                "session_id": session_id,
+                "risk": format!("{:?}", decision.risk),
+                "decision": format!("{:?}", decision.decision),
+                "reason_code": decision.reason_code,
+                "requires_approval": decision.requires_approval,
+                "at_ms": now_ms(),
+            }))?;
+            if matches!(
+                decision.risk,
+                TerminalRiskLevel::Destructive
+                    | TerminalRiskLevel::Privileged
+                    | TerminalRiskLevel::SecretExposure
+                    | TerminalRiskLevel::NetworkMutation
+            ) {
+                return Err(TerminalRuntimeError::RequiresApproval {
+                    reason_code: decision.reason_code,
+                });
+            }
+        }
         session.writer.write_all(text.as_bytes())?;
         session.writer.flush()?;
         session.artifacts.append_event(&json!({
@@ -262,9 +312,19 @@ impl TerminalRuntime {
             session.snapshot.status = TerminalSessionStatus::Exited;
             session.snapshot.stopped_at_ms = Some(now_ms());
             session.snapshot.exit_code = Some(status.exit_code() as i32);
+            if let Some(block) = session.block_builder.flush(session.snapshot.exit_code) {
+                session.artifacts.append_block(&block)?;
+            }
             session
                 .artifacts
                 .write_session_snapshot(&session.snapshot)?;
+            session.artifacts.append_event(&json!({
+                "type": "session_reaped",
+                "session_id": session_id,
+                "exit_code": session.snapshot.exit_code,
+                "at_ms": session.snapshot.stopped_at_ms,
+            }))?;
+            sessions.remove(session_id);
         }
         Ok(chunks)
     }
@@ -301,8 +361,8 @@ impl TerminalRuntime {
             .sessions
             .lock()
             .expect("terminal session lock poisoned");
-        let mut session = sessions
-            .remove(session_id)
+        let session = sessions
+            .get_mut(session_id)
             .ok_or_else(|| TerminalRuntimeError::SessionNotFound(session_id.to_string()))?;
 
         session.snapshot.status = TerminalSessionStatus::Stopping;
@@ -342,8 +402,23 @@ impl TerminalRuntime {
             "exit_code": exit_code,
             "at_ms": session.snapshot.stopped_at_ms,
         }))?;
+
+        let session = sessions
+            .remove(session_id)
+            .expect("session present after teardown");
         Ok(session.snapshot)
     }
+}
+
+fn validate_session_id(session_id: &str) -> Result<(), TerminalRuntimeError> {
+    let valid = !session_id.is_empty()
+        && session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid {
+        return Err(TerminalRuntimeError::InvalidSessionId(session_id.to_string()));
+    }
+    Ok(())
 }
 
 fn validate_cwd(cwd: &Path) -> Result<(), TerminalRuntimeError> {

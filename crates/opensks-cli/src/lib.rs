@@ -91,6 +91,12 @@ impl ClockStamp {
         format!("{}{:09}", self.secs, self.nanos)
     }
 
+    fn unix_millis(&self) -> u64 {
+        self.secs
+            .saturating_mul(1_000)
+            .saturating_add(u64::from(self.nanos) / 1_000_000)
+    }
+
     fn json(&self) -> String {
         format!(
             "{{\"unix_seconds\":{},\"nanos\":{}}}",
@@ -193,6 +199,7 @@ pub fn run_history_command(args: &[String], cwd: &Path) -> Result<CliOutput, Cli
                 .write_snapshot(
                     "history-init",
                     committed.sequence,
+                    opensks_contracts::Sensitivity::Internal,
                     serde_json::json!({"state": "initialized"}),
                 )
                 .map_err(|error| CliError::Invalid(error.to_string()))?;
@@ -793,7 +800,10 @@ pub fn run_provider_route_command(args: &[String], cwd: &Path) -> Result<CliOutp
             opensks_provider::fake_text_model("fake-code", true),
             opensks_provider::fake_image_model("fake-image", true),
         ],
-        opensks_policy::PermissionPolicy::default(),
+        opensks_policy::PermissionPolicy {
+            allow_provider_call_without_approval: true,
+            ..opensks_policy::PermissionPolicy::default()
+        },
     );
     let decision = registry.route(&request);
     write_text_atomic(
@@ -839,7 +849,10 @@ pub fn run_image_command(args: &[String], cwd: &Path) -> Result<CliOutput, CliEr
             opensks_provider::fake_image_model("disabled-image", false),
             opensks_provider::fake_image_model("enabled-image", true),
         ],
-        opensks_policy::PermissionPolicy::default(),
+        opensks_policy::PermissionPolicy {
+            allow_provider_call_without_approval: true,
+            ..opensks_policy::PermissionPolicy::default()
+        },
     );
     let mut runtime = opensks_image::ImageRuntime::new();
     let asset = runtime
@@ -1611,6 +1624,13 @@ pub fn perf_usage() -> &'static str {
     )
 }
 
+/// Hard ceiling on `--events` so a caller-supplied value cannot drive the
+/// stress harness's hot loop into an effectively unbounded run.
+const MAX_STRESS_EVENTS: u64 = 100_000_000;
+/// Hard ceiling on `--children` so a caller-supplied value cannot drive the
+/// supervised bookkeeping pool into an effectively unbounded run.
+const MAX_STRESS_CHILDREN: u64 = 100_000;
+
 fn run_perf_stress_command(args: &[String]) -> Result<CliOutput, CliError> {
     let mut config = opensks_perf::StressConfig::default();
     let mut idx = 0;
@@ -1642,7 +1662,14 @@ fn run_perf_stress_command(args: &[String]) -> Result<CliOutput, CliError> {
         };
         match flag {
             "--events" => {
-                config.events = parse_u64(value()?)?;
+                let events = parse_u64(value()?)?;
+                if events > MAX_STRESS_EVENTS {
+                    return Err(CliError::Usage(format!(
+                        "flag `--events` must be <= {MAX_STRESS_EVENTS}\n\n{}",
+                        perf_usage()
+                    )));
+                }
+                config.events = events;
                 idx += 2;
             }
             "--cache-capacity" => {
@@ -1658,7 +1685,14 @@ fn run_perf_stress_command(args: &[String]) -> Result<CliOutput, CliError> {
                 idx += 2;
             }
             "--children" => {
-                config.supervised_children = parse_u64(value()?)?;
+                let children = parse_u64(value()?)?;
+                if children > MAX_STRESS_CHILDREN {
+                    return Err(CliError::Usage(format!(
+                        "flag `--children` must be <= {MAX_STRESS_CHILDREN}\n\n{}",
+                        perf_usage()
+                    )));
+                }
+                config.supervised_children = children;
                 idx += 2;
             }
             other => {
@@ -1840,16 +1874,27 @@ fn run_scheduler_recover_command(args: &[String], cwd: &Path) -> Result<CliOutpu
     );
     let mut store = opensks_event_store::EventStore::open_workspace(cwd)
         .map_err(|error| CliError::Invalid(format!("open event store: {error}")))?;
+    let acquired_at_ms = ClockStamp::now()?.unix_millis();
     for index in 0..count {
         scheduler
-            .lease_ready_item(&mut store, &format!("wi-{index:05}"), "cli-lease-worker")
+            .lease_ready_item(
+                &mut store,
+                &format!("wi-{index:05}"),
+                "cli-lease-worker",
+                acquired_at_ms,
+            )
             .map_err(|error| CliError::Invalid(format!("lease scheduler item: {error}")))?;
     }
     let heartbeat = scheduler
-        .heartbeat_lease(&mut store, "wi-00000", "cli-lease-worker", 20_000)
+        .heartbeat_lease(
+            &mut store,
+            "wi-00000",
+            "cli-lease-worker",
+            acquired_at_ms + 20_000,
+        )
         .map_err(|error| CliError::Invalid(format!("heartbeat scheduler lease: {error}")))?;
     let recovery = scheduler
-        .expire_stale_leases(&mut store, 45_000)
+        .expire_stale_leases(&mut store, acquired_at_ms + 45_000)
         .map_err(|error| CliError::Invalid(format!("recover scheduler leases: {error}")))?;
     let snapshot = scheduler.snapshot(
         "lease-recovery",
@@ -2014,6 +2059,10 @@ pub fn run_design_studio_command(args: &[String], cwd: &Path) -> Result<CliOutpu
                 "package_id": outcome.package_id,
                 "updated": outcome.updated,
                 "unknown_paths": outcome.unknown_paths,
+                "rejected": outcome.rejected.iter().map(|(path, reason)| serde_json::json!({
+                    "path": path,
+                    "reason": reason,
+                })).collect::<Vec<_>>(),
                 "total": outcome.total,
                 "content_hash": outcome.content_hash,
             });
@@ -2280,6 +2329,12 @@ pub fn run_conversation_command(args: &[String], cwd: &Path) -> Result<CliOutput
         "delete" => {
             let conversation =
                 require_conversation_field(options.conversation.as_deref(), "--conversation")?;
+            if !options.force {
+                return Err(CliError::Usage(format!(
+                    "refusing to delete conversation `{conversation}` without `--force` (this permanently deletes all messages and runs)\n\n{}",
+                    conversation_usage()
+                )));
+            }
             let counts = repo
                 .delete_conversation(conversation)
                 .map_err(|error| CliError::Invalid(error.to_string()))?;
@@ -2978,6 +3033,50 @@ fn run_conversation_turn_start(
     })
     .map_err(|error| CliError::Invalid(error.to_string()))?;
 
+    // Atomically reserve the idempotency key before any provider dispatch.
+    // `turn_idempotency` has `UNIQUE(conversation_id, idempotency_key)`, so
+    // this plain INSERT either wins the reservation or fails when a
+    // concurrent CLI invocation already committed the same
+    // (conversation_id, idempotency_key) first. Doing this here (before
+    // dispatch) instead of only after the run completes closes the race
+    // where two concurrent invocations for the same key both pass the
+    // earlier cache-miss lookup and each dispatch their own provider call.
+    // On a lost race, replay the winner's record instead of treating the
+    // constraint violation as a generic failure.
+    if let Some(key) = idempotency_key {
+        if let Err(reservation_error) = repo.record_turn_idempotency(
+            key,
+            conversation_id,
+            &opensks_conversation::TurnIdempotencyRecord {
+                turn_id: turn_id.clone(),
+                user_message_id: user_message_id.clone(),
+                assistant_message_id: assistant_message_id.clone(),
+                run_id: run_id.clone(),
+            },
+            now_ms,
+        ) {
+            let existing = repo
+                .lookup_turn_idempotency(key, conversation_id)
+                .map_err(|error| CliError::Invalid(error.to_string()))?;
+            let Some(existing) = existing else {
+                return Err(CliError::Invalid(reservation_error.to_string()));
+            };
+            let run_state = repo
+                .run_projection_state(&existing.run_id)
+                .map_err(|error| CliError::Invalid(error.to_string()))?
+                .unwrap_or_else(|| "unknown".to_string());
+            return conversation_output(&serde_json::json!({
+                "schema": "opensks.conversation-turn.v1",
+                "turn_id": existing.turn_id,
+                "user_message_id": existing.user_message_id,
+                "assistant_message_id": existing.assistant_message_id,
+                "run_id": existing.run_id,
+                "run_state": run_state,
+                "reused": true,
+            }));
+        }
+    }
+
     let request = opensks_adapter::AgentRunRequest {
         workspace: workspace.to_path_buf(),
         project_id: project_id.to_string(),
@@ -3159,20 +3258,8 @@ fn run_conversation_turn_start(
     )
     .map_err(|error| CliError::Invalid(error.to_string()))?;
 
-    if let Some(key) = idempotency_key {
-        repo.record_turn_idempotency(
-            key,
-            conversation_id,
-            &opensks_conversation::TurnIdempotencyRecord {
-                turn_id: turn_id.clone(),
-                user_message_id: user_message_id.clone(),
-                assistant_message_id: assistant_message_id.clone(),
-                run_id: run_id.clone(),
-            },
-            now_ms,
-        )
-        .map_err(|error| CliError::Invalid(error.to_string()))?;
-    }
+    // The idempotency key was already reserved atomically before dispatch
+    // (see above), so there is nothing left to record here.
 
     conversation_output(&serde_json::json!({
         "schema": "opensks.conversation-turn.v1",

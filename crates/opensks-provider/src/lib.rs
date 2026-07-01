@@ -27,6 +27,9 @@ pub const CODEX_LB_API_KEY_ENV_VAR: &str = "CODEX_LB_API_KEY";
 pub const CODEX_LB_BASE_URL_ENV_VAR: &str = "CODEX_LB_BASE_URL";
 const DEFAULT_CODEX_LB_BASE_URL: &str = "https://codex.hyper-lab.xyz/backend-api/codex";
 const CODEX_LB_CATALOG_REVISION: &str = "codex-lb-env-seed-v1";
+const PROVIDER_PROBE_MAX_BODY_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB cap on /models response body
+const MAX_PROVIDER_MODEL_CATALOG_ENTRIES: usize = 5_000;
+const PROBE_RECEIPT_RETENTION_PER_PROVIDER: i64 = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderHttpStatus {
@@ -143,9 +146,18 @@ pub fn probe_openai_compatible_provider(
         Ok(response) => {
             let status = response.status();
             if status.is_success() {
-                let body = response.text().unwrap_or_default();
-                match parse_openai_compatible_models(connection, &body) {
-                    Ok(models) => Ok(ProviderProbeOutcome {
+                let mut limited =
+                    std::io::Read::take(response, PROVIDER_PROBE_MAX_BODY_BYTES + 1);
+                let mut buf = Vec::new();
+                let read_result = std::io::Read::read_to_end(&mut limited, &mut buf);
+                let body = match read_result {
+                    Ok(_) if buf.len() as u64 > PROVIDER_PROBE_MAX_BODY_BYTES => None,
+                    Ok(_) => Some(String::from_utf8_lossy(&buf).into_owned()),
+                    Err(_) => None,
+                };
+                match body.as_deref().map(|body| parse_openai_compatible_models(connection, body))
+                {
+                    Some(Ok(models)) => Ok(ProviderProbeOutcome {
                         receipt: ProviderProbeReceipt {
                             schema: PROVIDER_PROBE_RECEIPT_SCHEMA.to_string(),
                             provider_id: connection.id.clone(),
@@ -165,7 +177,7 @@ pub fn probe_openai_compatible_provider(
                         },
                         models,
                     }),
-                    Err(_) => Ok(ProviderProbeOutcome {
+                    Some(Err(_)) => Ok(ProviderProbeOutcome {
                         receipt: ProviderProbeReceipt {
                             schema: PROVIDER_PROBE_RECEIPT_SCHEMA.to_string(),
                             provider_id: connection.id.clone(),
@@ -178,6 +190,22 @@ pub fn probe_openai_compatible_provider(
                             occurred_at_ms: now_ms,
                             reason_code: "model_catalog_parse_failed".to_string(),
                             diagnostic_ref: Some("invalid_models_json".to_string()),
+                        },
+                        models: Vec::new(),
+                    }),
+                    None => Ok(ProviderProbeOutcome {
+                        receipt: ProviderProbeReceipt {
+                            schema: PROVIDER_PROBE_RECEIPT_SCHEMA.to_string(),
+                            provider_id: connection.id.clone(),
+                            endpoint_host_redacted: host,
+                            http_category: ProviderProbeHttpCategory::Success,
+                            latency_bucket: latency_bucket(elapsed),
+                            auth_accepted: true,
+                            model_list_available: false,
+                            catalog_count: Some(0),
+                            occurred_at_ms: now_ms,
+                            reason_code: "model_catalog_response_too_large".to_string(),
+                            diagnostic_ref: Some("response_too_large".to_string()),
                         },
                         models: Vec::new(),
                     }),
@@ -289,6 +317,13 @@ pub fn parse_openai_compatible_models(
     body: &str,
 ) -> Result<Vec<ModelCatalogEntry>> {
     let parsed: OpenAiModelsResponse = serde_json::from_str(body)?;
+    if parsed.data.len() > MAX_PROVIDER_MODEL_CATALOG_ENTRIES {
+        return Err(ProviderError::InvalidProviderConfig(format!(
+            "provider model catalog too large: {} entries exceeds limit of {}",
+            parsed.data.len(),
+            MAX_PROVIDER_MODEL_CATALOG_ENTRIES
+        )));
+    }
     let catalog_revision = stable_hash(body.as_bytes());
     let mut models = Vec::new();
     for model in parsed.data {
@@ -654,6 +689,8 @@ impl ProviderRepository {
 
     fn migrate(&self) -> Result<()> {
         self.conn.pragma_update(None, "journal_mode", "WAL")?;
+        self.conn
+            .busy_timeout(std::time::Duration::from_millis(5000))?;
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS provider_connections (
@@ -710,8 +747,16 @@ impl ProviderRepository {
         now_ms: u64,
     ) -> Result<ProviderMutationReceipt> {
         validate_provider_connection(connection)?;
+        let json = serde_json::to_string(connection)?;
+        let tx = self.conn.unchecked_transaction()?;
         if let Some(expected) = expected_revision {
-            let actual = self.connection_revision(&connection.id)?;
+            let actual: Option<u64> = tx
+                .query_row(
+                    "SELECT revision FROM provider_connections WHERE id = ?1",
+                    params![connection.id],
+                    |row| row.get(0),
+                )
+                .optional()?;
             if actual != Some(expected) {
                 return Err(ProviderError::RevisionConflict {
                     provider_id: connection.id.clone(),
@@ -720,8 +765,7 @@ impl ProviderRepository {
                 });
             }
         }
-        let json = serde_json::to_string(connection)?;
-        self.conn.execute(
+        tx.execute(
             r#"
             INSERT INTO provider_connections (
                 id, kind, display_name, enabled, revision,
@@ -755,6 +799,7 @@ impl ProviderRepository {
                 connection.updated_at_ms,
             ],
         )?;
+        tx.commit()?;
         Ok(ProviderMutationReceipt {
             schema: PROVIDER_MUTATION_SCHEMA.to_string(),
             provider_id: connection.id.clone(),
@@ -815,18 +860,44 @@ impl ProviderRepository {
         connection.enabled = enabled;
         connection.revision = connection.revision.saturating_add(1);
         connection.updated_at_ms = now_ms;
-        let mut receipt = self.upsert_connection(&connection, Some(expected_revision), now_ms)?;
-        receipt.mutation = if enabled {
-            ProviderMutationKind::Enabled
-        } else {
-            ProviderMutationKind::Disabled
-        };
-        receipt.reason_code = if enabled {
-            "provider_enabled".to_string()
-        } else {
-            "provider_disabled".to_string()
-        };
-        Ok(receipt)
+        let json = serde_json::to_string(&connection)?;
+        let rows = self.conn.execute(
+            "UPDATE provider_connections SET enabled = ?1, revision = ?2, connection_json = ?3, updated_at_ms = ?4 WHERE id = ?5 AND revision = ?6",
+            params![
+                connection.enabled,
+                connection.revision,
+                json,
+                connection.updated_at_ms,
+                provider_id,
+                expected_revision,
+            ],
+        )?;
+        if rows == 0 {
+            let actual = self.connection_revision(provider_id)?.unwrap_or(0);
+            return Err(ProviderError::RevisionConflict {
+                provider_id: provider_id.to_string(),
+                expected: expected_revision,
+                actual,
+            });
+        }
+        Ok(ProviderMutationReceipt {
+            schema: PROVIDER_MUTATION_SCHEMA.to_string(),
+            provider_id: provider_id.to_string(),
+            mutation: if enabled {
+                ProviderMutationKind::Enabled
+            } else {
+                ProviderMutationKind::Disabled
+            },
+            revision: connection.revision,
+            secret_ref: Some(connection.auth.clone()),
+            secret_value_exposed: false,
+            occurred_at_ms: now_ms,
+            reason_code: if enabled {
+                "provider_enabled".to_string()
+            } else {
+                "provider_disabled".to_string()
+            },
+        })
     }
 
     pub fn delete_connection(
@@ -874,6 +945,7 @@ impl ProviderRepository {
         now_ms: u64,
     ) -> Result<ProviderMutationReceipt> {
         let connection = self.get_connection(provider_id)?;
+        let tx = self.conn.unchecked_transaction()?;
         for model in models {
             if model.provider_id != provider_id {
                 return Err(ProviderError::InvalidProviderConfig(format!(
@@ -886,7 +958,7 @@ impl ProviderRepository {
                 stored_model.enabled = existing.enabled;
             }
             let json = serde_json::to_string(&stored_model)?;
-            self.conn.execute(
+            tx.execute(
                 r#"
                 INSERT INTO model_catalog (
                     id, provider_id, enabled, catalog_revision, entry_json, updated_at_ms
@@ -908,6 +980,7 @@ impl ProviderRepository {
                 ],
             )?;
         }
+        tx.commit()?;
         Ok(ProviderMutationReceipt {
             schema: PROVIDER_MUTATION_SCHEMA.to_string(),
             provider_id: provider_id.to_string(),
@@ -982,6 +1055,19 @@ impl ProviderRepository {
         self.conn.execute(
             "INSERT INTO provider_probe_receipts (provider_id, occurred_at_ms, receipt_json) VALUES (?1, ?2, ?3)",
             params![receipt.provider_id, receipt.occurred_at_ms, json],
+        )?;
+        self.conn.execute(
+            r#"
+            DELETE FROM provider_probe_receipts
+            WHERE provider_id = ?1
+              AND sequence NOT IN (
+                  SELECT sequence FROM provider_probe_receipts
+                  WHERE provider_id = ?1
+                  ORDER BY sequence DESC
+                  LIMIT ?2
+              )
+            "#,
+            params![receipt.provider_id, PROBE_RECEIPT_RETENTION_PER_PROVIDER],
         )?;
         Ok(())
     }
@@ -1559,10 +1645,21 @@ pub fn resolve_routing_decision_from_repository(
     Ok(registry.route(&request))
 }
 
+/// Build a [`ModelRegistry`] from the providers/models an operator has
+/// already configured (enabled, disabled, or otherwise) in this workspace's
+/// [`ProviderRepository`] via Provider Center. Configuring a provider
+/// connection there is itself the explicit approval for this workspace to
+/// dispatch conversation turns to it, so this registry opts in to
+/// provider-call policy rather than relying on [`PermissionPolicy`]'s
+/// deny-by-default (which still applies to any registry built from bare/
+/// unconfigured model profiles, e.g. ad hoc `ModelRegistry::new` callers).
 pub fn model_registry_from_repository(repo: &ProviderRepository) -> Result<ModelRegistry> {
     Ok(ModelRegistry::new(
         model_profiles_from_repository(repo)?,
-        PermissionPolicy::default(),
+        PermissionPolicy {
+            allow_provider_call_without_approval: true,
+            ..PermissionPolicy::default()
+        },
     ))
 }
 
@@ -1995,7 +2092,7 @@ mod tests {
     fn disabled_model_is_never_routed() {
         let registry = ModelRegistry::new(
             vec![fake_text_model("disabled-code", false)],
-            PermissionPolicy::default(),
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
         );
         let decision = registry.route(&RoutingRequest::for_code("route-disabled"));
         assert_eq!(decision.status, RoutingStatus::BlockedDisabled);
@@ -2011,7 +2108,7 @@ mod tests {
     fn image_task_blocks_text_only_model() {
         let registry = ModelRegistry::new(
             vec![fake_text_model("text-only", true)],
-            PermissionPolicy::default(),
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
         );
         let decision = registry.route(&RoutingRequest::for_image("route-image"));
         assert_eq!(decision.status, RoutingStatus::BlockedMissingCapability);
@@ -2028,7 +2125,7 @@ mod tests {
                 fake_image_model("image-output", true),
                 fake_vision_model("vision-only", true),
             ],
-            PermissionPolicy::default(),
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
         );
         let decision = registry.route(&RoutingRequest::for_vision("route-vision"));
         assert_eq!(decision.status, RoutingStatus::Resolved);
@@ -2048,7 +2145,7 @@ mod tests {
                 priced_role_model("verifier", ModelRole::Verification, 0.94, 3.0, 6.0, 4),
                 priced_role_model("arbiter", ModelRole::Arbiter, 0.93, 2.0, 4.0, 4),
             ],
-            PermissionPolicy::default(),
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
         );
 
         let plan = registry.route_roles(&RoleRoutingRequest::hyperparallel_default(
@@ -2110,7 +2207,7 @@ mod tests {
                 evidence_refs: vec!["test-role-profile".to_string()],
             },
         );
-        let registry = ModelRegistry::new(vec![model], PermissionPolicy::default());
+        let registry = ModelRegistry::new(vec![model], PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() });
 
         let plan = registry.route_roles(&RoleRoutingRequest::hyperparallel_default(
             "route-single-model",
@@ -2136,7 +2233,7 @@ mod tests {
     fn role_routing_blocks_only_roles_without_required_capability() {
         let registry = ModelRegistry::new(
             vec![fake_text_model("text-only", true)],
-            PermissionPolicy::default(),
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
         );
         let request =
             RoleRoutingRequest::with_roles("route-mixed", vec![ModelRole::Code, ModelRole::Image]);
@@ -2164,7 +2261,7 @@ mod tests {
             priced_role_model("cheaper-parallel", ModelRole::Code, 0.89, 1.0, 1.0, 8);
         let registry = ModelRegistry::new(
             vec![expensive, cheaper_parallel],
-            PermissionPolicy::default(),
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
         );
 
         let decision = registry.route(&RoutingRequest::for_code("route-cost"));
@@ -2184,7 +2281,7 @@ mod tests {
                 fake_text_model("disabled-code", false),
                 fake_text_model("only-code", true),
             ],
-            PermissionPolicy::default(),
+            PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() },
         );
         let decision = registry.route(&RoutingRequest::for_code("route-code"));
         assert_eq!(decision.status, RoutingStatus::Resolved);
@@ -2260,7 +2357,7 @@ mod tests {
     fn unhealthy_provider_is_blocked() {
         let mut model = fake_text_model("bad-health", true);
         model.health = HealthState::OpenCircuit;
-        let registry = ModelRegistry::new(vec![model], PermissionPolicy::default());
+        let registry = ModelRegistry::new(vec![model], PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() });
         let decision = registry.route(&RoutingRequest::for_code("route-health"));
         assert_eq!(decision.status, RoutingStatus::BlockedProviderHealth);
         assert_eq!(
@@ -2271,7 +2368,7 @@ mod tests {
 
     #[test]
     fn unknown_explicit_model_does_not_infer_provider_from_prefix() {
-        let registry = ModelRegistry::new(Vec::new(), PermissionPolicy::default());
+        let registry = ModelRegistry::new(Vec::new(), PermissionPolicy { allow_provider_call_without_approval: true, ..PermissionPolicy::default() });
         let request = RoutingRequest {
             explicit_model_id: Some("openrouter/nonexistent-model".to_string()),
             ..RoutingRequest::for_code("route-unknown-explicit")

@@ -16,6 +16,7 @@ pub enum PermissionScope {
     RunCommand,
     GitWrite,
     GitPush,
+    DestructiveOp,
     ExternalNetwork,
     ProviderCall,
     SecretRead,
@@ -33,6 +34,7 @@ pub struct PermissionPolicy {
     pub allow_external_network: bool,
     pub allow_git_push_without_approval: bool,
     pub allow_destructive_without_approval: bool,
+    pub allow_provider_call_without_approval: bool,
 }
 
 impl PermissionPolicy {
@@ -49,6 +51,27 @@ impl PermissionPolicy {
                 PermissionDecision {
                     allowed: false,
                     reason_code: "blocked_git_push_requires_outbox_approval".to_string(),
+                    approval_required: true,
+                }
+            }
+            PermissionScope::DestructiveOp if !self.allow_destructive_without_approval => {
+                PermissionDecision {
+                    allowed: false,
+                    reason_code: "blocked_destructive_op_requires_approval".to_string(),
+                    approval_required: true,
+                }
+            }
+            PermissionScope::RunCommand if !self.allow_destructive_without_approval => {
+                PermissionDecision {
+                    allowed: false,
+                    reason_code: "blocked_run_command_requires_policy".to_string(),
+                    approval_required: true,
+                }
+            }
+            PermissionScope::ProviderCall if !self.allow_provider_call_without_approval => {
+                PermissionDecision {
+                    allowed: false,
+                    reason_code: "blocked_provider_call_requires_policy".to_string(),
                     approval_required: true,
                 }
             }
@@ -206,6 +229,29 @@ impl WorkspaceCapabilities {
         }
     }
 
+    /// Re-validate that an already-authorized path still resolves inside the
+    /// workspace root, right before the actual filesystem access. `check_path`
+    /// may authorize a path before all of its ancestors exist (falling back to
+    /// lexical normalization with no symlink checks); if a symlink is created
+    /// along that path afterward but before the caller performs the real I/O,
+    /// the earlier authorization is stale. This closes that TOCTOU window by
+    /// canonicalizing `path` (which must exist by the time this is called) and
+    /// re-checking containment, using the same `PathEscape` reason code as
+    /// `check_path` so existing error handling keeps working.
+    pub fn reauthorize_existing_path(&self, path: &Path) -> Result<PathBuf, CapabilityDenied> {
+        self.check_capability(Capability::FilesystemWorkspace)?;
+        let resolved = path.canonicalize().map_err(|_| CapabilityDenied::PathEscape {
+            reason_code: "blocked_path_escapes_workspace_root".to_string(),
+        })?;
+        if resolved.starts_with(&self.workspace_root) {
+            Ok(resolved)
+        } else {
+            Err(CapabilityDenied::PathEscape {
+                reason_code: "blocked_path_escapes_workspace_root".to_string(),
+            })
+        }
+    }
+
     /// Resolve `candidate` (absolute, or relative to the workspace root) into a
     /// canonical absolute path. Symlinks are followed by canonicalizing the
     /// longest existing prefix; the remaining components are normalized
@@ -311,6 +357,31 @@ fn local_rule(
     }
 }
 
+/// Like [`local_rule`], but for local paths that hold secret material: these
+/// must carry the stronger [`GitTrackingPolicy::NeverTrack`] semantics rather
+/// than the plain `Ignore` used for ordinary rebuildable/local state, so
+/// downstream git-add guards and gitignore generators can distinguish
+/// "never allowed to be tracked" from "just not currently tracked".
+fn secret_local_rule(
+    path: &str,
+    plane: DataPlane,
+    retention: &str,
+    allows_machine_absolute_paths: bool,
+    allows_raw_provider_responses: bool,
+    notes: &str,
+) -> DataPlanePathRule {
+    DataPlanePathRule {
+        path: path.to_string(),
+        plane,
+        git_tracking: GitTrackingPolicy::NeverTrack,
+        retention: retention.to_string(),
+        contains_secrets: true,
+        allows_machine_absolute_paths,
+        allows_raw_provider_responses,
+        notes: notes.to_string(),
+    }
+}
+
 pub fn default_data_plane_manifest() -> DataPlaneManifest {
     DataPlaneManifest {
         schema: DATA_PLANE_MANIFEST_SCHEMA.to_string(),
@@ -410,11 +481,10 @@ pub fn default_data_plane_manifest() -> DataPlaneManifest {
                 true,
                 "Local raw logs derived from structured events.",
             ),
-            local_rule(
+            secret_local_rule(
                 ".opensks/secrets/",
                 DataPlane::SecretLocal,
                 "never_publish",
-                true,
                 true,
                 false,
                 "Secret material placeholders only; real secret values stay out of Git.",
@@ -648,6 +718,58 @@ mod tests {
         fs::remove_dir_all(&outside).ok();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn reauthorize_existing_path_denies_toctou_symlink_swap() {
+        use std::os::unix::fs::symlink;
+
+        let root = make_temp_root("toctou-in");
+        let outside = make_temp_root("toctou-out");
+        fs::write(outside.join("secret.txt"), b"secret").expect("write outside secret");
+
+        let caps =
+            WorkspaceCapabilities::deny_by_default(&root).grant(Capability::FilesystemWorkspace);
+
+        // Authorize a path before `link_dir` exists at all (falls back to
+        // lexical normalization, as `resolve_under_root` does today).
+        let candidate = caps
+            .check_path("link_dir/file.txt")
+            .expect("not-yet-existing in-workspace path is authorized");
+        assert!(candidate.starts_with(&root));
+
+        // Simulate the TOCTOU race: `link_dir` is created as a symlink to an
+        // outside directory after authorization but before the caller's I/O.
+        symlink(&outside, root.join("link_dir")).expect("create symlink");
+        fs::write(outside.join("file.txt"), b"payload").expect("write outside file");
+
+        // Re-validating right before the actual filesystem access must catch
+        // the swap, even though the original `check_path` result looked fine.
+        let denied = caps
+            .reauthorize_existing_path(&candidate)
+            .expect_err("reauthorize must reject a path that now escapes the root");
+        assert_eq!(denied.reason_code(), "blocked_path_escapes_workspace_root");
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn reauthorize_existing_path_allows_real_in_workspace_file() {
+        let root = make_temp_root("toctou-ok");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("src/main.rs"), b"// ok").expect("write file");
+
+        let caps =
+            WorkspaceCapabilities::deny_by_default(&root).grant(Capability::FilesystemWorkspace);
+        let candidate = caps.check_path("src/main.rs").expect("in-workspace allowed");
+        let resolved = caps
+            .reauthorize_existing_path(&candidate)
+            .expect("real in-workspace file must be reauthorized");
+        assert!(resolved.starts_with(&root));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn git_push_requires_approval_by_default() {
         let decision = PermissionPolicy::default().decide(PermissionScope::GitPush);
@@ -657,6 +779,69 @@ mod tests {
             decision.reason_code,
             "blocked_git_push_requires_outbox_approval"
         );
+    }
+
+    #[test]
+    fn provider_call_requires_approval_by_default() {
+        let decision = PermissionPolicy::default().decide(PermissionScope::ProviderCall);
+        assert!(!decision.allowed);
+        assert!(decision.approval_required);
+        assert_eq!(
+            decision.reason_code,
+            "blocked_provider_call_requires_policy"
+        );
+    }
+
+    #[test]
+    fn provider_call_allowed_when_policy_grants_it() {
+        let policy = PermissionPolicy {
+            allow_provider_call_without_approval: true,
+            ..Default::default()
+        };
+        let decision = policy.decide(PermissionScope::ProviderCall);
+        assert!(decision.allowed);
+        assert!(!decision.approval_required);
+    }
+
+    #[test]
+    fn run_command_requires_approval_by_default() {
+        let decision = PermissionPolicy::default().decide(PermissionScope::RunCommand);
+        assert!(!decision.allowed);
+        assert!(decision.approval_required);
+        assert_eq!(decision.reason_code, "blocked_run_command_requires_policy");
+    }
+
+    #[test]
+    fn run_command_allowed_when_destructive_policy_grants_it() {
+        let policy = PermissionPolicy {
+            allow_destructive_without_approval: true,
+            ..Default::default()
+        };
+        let decision = policy.decide(PermissionScope::RunCommand);
+        assert!(decision.allowed);
+        assert!(!decision.approval_required);
+    }
+
+    #[test]
+    fn destructive_op_requires_approval_by_default() {
+        let decision = PermissionPolicy::default().decide(PermissionScope::DestructiveOp);
+        assert!(!decision.allowed);
+        assert!(decision.approval_required);
+        assert_eq!(
+            decision.reason_code,
+            "blocked_destructive_op_requires_approval"
+        );
+    }
+
+    #[test]
+    fn destructive_op_allowed_when_policy_grants_it() {
+        let policy = PermissionPolicy {
+            allow_destructive_without_approval: true,
+            ..Default::default()
+        };
+        let decision = policy.decide(PermissionScope::DestructiveOp);
+        assert!(decision.allowed);
+        assert!(!decision.approval_required);
     }
 
     #[test]
@@ -671,7 +856,7 @@ mod tests {
         assert!(manifest.local_paths.iter().any(|rule| {
             rule.path == ".opensks/secrets/"
                 && rule.plane == DataPlane::SecretLocal
-                && rule.git_tracking == GitTrackingPolicy::Ignore
+                && rule.git_tracking == GitTrackingPolicy::NeverTrack
                 && rule.contains_secrets
         }));
         assert!(manifest.local_paths.iter().any(|rule| {

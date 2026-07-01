@@ -81,7 +81,16 @@ impl Reapable for CounterChild {
 /// drained from the batcher.
 pub fn run_stress(config: StressConfig) -> PerfStressReport {
     let cancel = CancelToken::new();
-    let mut supervisor: ProcessSupervisor<CounterChild> = ProcessSupervisor::with_observer(&cancel);
+    run_stress_cancellable(config, &cancel)
+}
+
+/// Run the stress harness under an externally owned [`CancelToken`], allowing a
+/// caller to request early termination of a long-running (e.g. attacker- or
+/// agent-controlled `--events`/`--children`) run. The hot loop checks
+/// cancellation every iteration and, if cancelled, breaks out early and still
+/// returns a valid (partial) report rather than hanging until completion.
+pub fn run_stress_cancellable(config: StressConfig, cancel: &CancelToken) -> PerfStressReport {
+    let mut supervisor: ProcessSupervisor<CounterChild> = ProcessSupervisor::with_observer(cancel);
     for _ in 0..config.supervised_children {
         supervisor.track("perf-bookkeeping", CounterChild::new());
     }
@@ -107,6 +116,9 @@ pub fn run_stress(config: StressConfig) -> PerfStressReport {
     };
 
     for event in 0..config.events {
+        if cancel.is_cancelled() {
+            break;
+        }
         if let Some(batch) = batcher.push(event) {
             process_batch(&mut cache, &batch.events);
         }

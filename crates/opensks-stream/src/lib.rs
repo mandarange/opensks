@@ -158,6 +158,7 @@ pub enum CursorDecision {
     Accept,
     DuplicateOrOld,
     Gap { expected: u64, got: u64 },
+    AfterTerminal,
 }
 
 /// Client-side per-stream cursor tracker: dedups replays and surfaces gaps so a
@@ -174,6 +175,9 @@ impl StreamCursorTracker {
     }
 
     pub fn accept(&mut self, cursor: u64) -> CursorDecision {
+        if self.terminated {
+            return CursorDecision::AfterTerminal;
+        }
         match self.last {
             None => {
                 if cursor == 0 {
@@ -282,6 +286,22 @@ mod tests {
             }
         );
         assert_eq!(t.last_cursor(), Some(2));
+    }
+
+    #[test]
+    fn accept_after_terminal_is_rejected_regardless_of_cursor() {
+        let mut t = StreamCursorTracker::new();
+        assert_eq!(t.accept(0), CursorDecision::Accept);
+        assert_eq!(t.accept(1), CursorDecision::Accept);
+        t.observe_terminal();
+        // Would otherwise look like Accept.
+        assert_eq!(t.accept(2), CursorDecision::AfterTerminal);
+        // Would otherwise look like DuplicateOrOld.
+        assert_eq!(t.accept(1), CursorDecision::AfterTerminal);
+        // Would otherwise look like a Gap.
+        assert_eq!(t.accept(9), CursorDecision::AfterTerminal);
+        // Last cursor must not have moved.
+        assert_eq!(t.last_cursor(), Some(1));
     }
 
     #[test]

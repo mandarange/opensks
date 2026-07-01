@@ -21,6 +21,7 @@ use thiserror::Error;
 
 const PATCH_TRANSACTION_JOURNAL_SCHEMA: &str = "opensks.patch-transaction-journal.v1";
 const STALE_PATCH_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_JOURNAL_ATTEMPTS: u64 = 500;
 
 #[derive(Debug, Error)]
 pub enum PatchEngineError {
@@ -51,6 +52,11 @@ pub enum PatchEngineError {
     },
     #[error("failed to serialize patch transaction journal: {0}")]
     JournalSerialize(String),
+    #[error("journal attempt limit exceeded for proposal `{proposal_id}`: attempt {attempt_index}")]
+    JournalAttemptLimitExceeded {
+        proposal_id: String,
+        attempt_index: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +175,25 @@ fn run_apply_fault_test_hook(write: &PlannedPatchWrite) -> Option<PatchEngineErr
         .and_then(|hook| hook(write))
 }
 
+/// Process-wide registry of per-journal-file locks. Serializes attempt-index
+/// allocation and journal appends for a given proposal journal across all
+/// `PatchEngine` instances (even freshly opened ones) within this process, so
+/// concurrent `apply` calls for the same proposal cannot race on
+/// `next_journal_attempt_index` and produce duplicate attempt indices.
+static JOURNAL_LOCKS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>>,
+> = std::sync::OnceLock::new();
+
+fn journal_lock(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let registry =
+        JOURNAL_LOCKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut guard = registry.lock().expect("journal lock registry");
+    guard
+        .entry(path.to_path_buf())
+        .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
+        .clone()
+}
+
 impl PatchEngine {
     pub fn open(workspace: impl AsRef<Path>) -> Result<Self, PatchEngineError> {
         let raw = workspace.as_ref();
@@ -227,7 +252,16 @@ impl PatchEngine {
         writes: &[PlannedPatchWrite],
         context: Option<&PatchApplyContext>,
     ) -> Result<PatchApplyResult, PatchEngineError> {
+        let journal_path = self.root.join(journal_relative_path(proposal_id));
+        let journal_mutex = journal_lock(&journal_path);
+        let _journal_guard = journal_mutex.lock().expect("journal lock");
         let attempt_index = self.next_journal_attempt_index(proposal_id)?;
+        if attempt_index > MAX_JOURNAL_ATTEMPTS {
+            return Err(PatchEngineError::JournalAttemptLimitExceeded {
+                proposal_id: proposal_id.to_string(),
+                attempt_index,
+            });
+        }
         let journal_ref = format!("patch-engine:journal:{proposal_id}");
         let result = |applied: bool,
                       applied_files: Vec<String>,
@@ -421,7 +455,7 @@ impl PatchEngine {
                 return if had_applied && !rolled_back {
                     Ok(result(
                         false,
-                        vec![],
+                        applied_files,
                         conflict_paths,
                         true,
                         "rollback_failed_critical",
@@ -429,7 +463,7 @@ impl PatchEngine {
                 } else {
                     Ok(result(
                         false,
-                        vec![],
+                        applied_files,
                         conflict_paths,
                         rolled_back,
                         reason_code,
@@ -464,11 +498,11 @@ impl PatchEngine {
                     context,
                 })?;
                 return if rolled_back {
-                    Ok(result(false, vec![], vec![], true, "io_rolled_back"))
+                    Ok(result(false, applied_files, vec![], true, "io_rolled_back"))
                 } else {
                     Ok(result(
                         false,
-                        vec![],
+                        applied_files,
                         vec![],
                         true,
                         "rollback_failed_critical",
@@ -517,19 +551,36 @@ impl PatchEngine {
             applied_files.extend(applied_paths(prepared));
         }
 
-        self.append_journal_event(PatchJournalEvent {
-            proposal_id,
-            attempt_index,
-            sequence: 1,
-            state: "applied",
-            writes,
-            applied_files: &applied_files,
-            conflict_paths: &[],
-            rolled_back: false,
-            reason_code: "applied",
-            context,
-        })?;
-        Ok(result(true, applied_files, vec![], false, "applied"))
+        // The real target files are already atomically written and read-back
+        // verified at this point. A failure to append the terminal "applied"
+        // journal event (e.g. ENOSPC, transient EIO) must not be surfaced as
+        // an Err, since that would tell the caller the patch was rejected
+        // when it was in fact fully and correctly applied.
+        let journal_write_failed = self
+            .append_journal_event(PatchJournalEvent {
+                proposal_id,
+                attempt_index,
+                sequence: 1,
+                state: "applied",
+                writes,
+                applied_files: &applied_files,
+                conflict_paths: &[],
+                rolled_back: false,
+                reason_code: "applied",
+                context,
+            })
+            .is_err();
+        Ok(result(
+            true,
+            applied_files,
+            vec![],
+            false,
+            if journal_write_failed {
+                "applied_journal_write_degraded"
+            } else {
+                "applied"
+            },
+        ))
     }
 
     pub fn recovery_report(
@@ -542,8 +593,8 @@ impl PatchEngine {
         self.guard_no_symlink(&relative, &path)?;
         self.verify_containment(&relative, &path)?;
 
-        let content = match fs::read_to_string(&path) {
-            Ok(content) => content,
+        let file = match File::open(&path) {
+            Ok(file) => file,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(PatchRecoveryReport {
                     proposal_id: proposal_id.to_string(),
@@ -567,11 +618,15 @@ impl PatchEngine {
         let mut requires_operator_review = false;
         let mut inferred_attempt_index = 0;
 
-        for line in content
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-        {
+        for line in std::io::BufRead::lines(std::io::BufReader::new(file)) {
+            let Ok(line) = line else {
+                requires_operator_review = true;
+                continue;
+            };
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
             let Ok(event) = serde_json::from_str::<Value>(line) else {
                 requires_operator_review = true;
                 continue;
@@ -1180,8 +1235,8 @@ impl PatchEngine {
         let path = self.root.join(&relative);
         self.guard_no_symlink(&relative, &path)?;
         self.verify_containment(&relative, &path)?;
-        let content = match fs::read_to_string(&path) {
-            Ok(content) => content,
+        let file = match File::open(&path) {
+            Ok(file) => file,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(1),
             Err(source) => {
                 return Err(PatchEngineError::Io {
@@ -1193,11 +1248,16 @@ impl PatchEngine {
         };
         let mut max_attempt = 0;
         let mut legacy_attempts = 0;
-        for line in content
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-        {
+        for line in std::io::BufRead::lines(std::io::BufReader::new(file)) {
+            let line = line.map_err(|source| PatchEngineError::Io {
+                path: relative.clone(),
+                stage: "read_journal_attempts",
+                source,
+            })?;
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
             let Ok(event) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
@@ -1225,7 +1285,8 @@ fn error_paths(error: &PatchEngineError) -> Vec<String> {
         PatchEngineError::InvalidWorkspace(_)
         | PatchEngineError::PathEscape(_)
         | PatchEngineError::SymlinkRejected(_)
-        | PatchEngineError::JournalSerialize(_) => Vec::new(),
+        | PatchEngineError::JournalSerialize(_)
+        | PatchEngineError::JournalAttemptLimitExceeded { .. } => Vec::new(),
     }
 }
 

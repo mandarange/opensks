@@ -18,6 +18,11 @@ pub mod projection;
 
 pub use projection::{ProjectionReducer, project_run, project_run_from_store};
 
+/// Maximum byte length for a run-control message before it is truncated.
+/// Prevents a single oversized steer/pause/resume/cancel message from
+/// bloating the durable event log and the in-memory mailbox replay.
+const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
+
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error("graph has compile errors")]
@@ -347,6 +352,7 @@ pub fn run_graph_with_event_stream(
     store.write_snapshot(
         run_id,
         snapshot_event.sequence,
+        Sensitivity::Internal,
         serde_json::to_value(&snapshot)?,
     )?;
     let events = store.replay(run_id)?;
@@ -357,6 +363,20 @@ pub fn run_graph_with_event_stream(
         dispatch_report,
         events,
     })
+}
+
+/// Truncate `message` to at most `MAX_CONTROL_MESSAGE_BYTES` bytes, cutting on
+/// a UTF-8 char boundary and appending a marker so truncation is visible in
+/// the persisted event and to anyone reading the mailbox later.
+fn cap_control_message(message: &str) -> String {
+    if message.len() <= MAX_CONTROL_MESSAGE_BYTES {
+        return message.to_string();
+    }
+    let mut end = MAX_CONTROL_MESSAGE_BYTES;
+    while end > 0 && !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...[truncated]", &message[..end])
 }
 
 pub fn append_run_control_event(
@@ -391,7 +411,7 @@ pub fn append_run_control_event(
     let next_sequence = store.next_sequence(run_id)?;
     // The steer message may carry user-provided text; redact secrets before it
     // is persisted to the durable event store.
-    let safe_message = redact_secrets(message);
+    let safe_message = redact_secrets(&cap_control_message(message));
     let mut payload = serde_json::json!({
         "message": safe_message,
         "reason_code": reason_code,
@@ -882,6 +902,74 @@ mod tests {
     }
 
     #[test]
+    fn engine_caps_oversized_control_message_before_persisting() {
+        let workspace = std::env::temp_dir().join(format!(
+            "opensks-engine-control-message-cap-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let started = run_template_with_event_stream(
+            &workspace,
+            "run-control-cap",
+            "single-model-safe",
+            "prove control message cap",
+        )
+        .expect("start run");
+        assert!(!started.events.is_empty());
+
+        let oversized_message = "a".repeat(MAX_CONTROL_MESSAGE_BYTES * 2);
+        append_run_control_event(
+            &workspace,
+            "run-control-cap",
+            EventKind::SteeringRequested,
+            Some("work-template-delegate"),
+            &oversized_message,
+            "user_steering",
+        )
+        .expect("steer event");
+
+        let store = EventStore::open_workspace(&workspace).expect("store");
+        let events = store.replay("run-control-cap").expect("replay");
+        let mailbox = opensks_scheduler::CommandMailbox::from_events(&events);
+        let steered = mailbox
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                opensks_scheduler::SchedulerCommand::Steer { message, .. } => Some(message),
+                _ => None,
+            })
+            .expect("steer command in mailbox");
+        assert!(steered.len() <= MAX_CONTROL_MESSAGE_BYTES + "...[truncated]".len());
+        assert!(steered.ends_with("...[truncated]"));
+
+        let short_message = "focus the delegate on tests";
+        append_run_control_event(
+            &workspace,
+            "run-control-cap",
+            EventKind::SteeringRequested,
+            Some("work-template-delegate"),
+            short_message,
+            "user_steering",
+        )
+        .expect("steer event");
+        let events = store.replay("run-control-cap").expect("replay");
+        let mailbox = opensks_scheduler::CommandMailbox::from_events(&events);
+        let short_steered = mailbox
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                opensks_scheduler::SchedulerCommand::Steer { message, .. } => Some(message),
+                _ => None,
+            })
+            .expect("steer command in mailbox");
+        assert_eq!(short_steered, short_message);
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
     fn engine_steer_returns_applied_or_rejected_receipt() {
         // Acceptance criterion 4 (engine boundary): append_run_control_event
         // RETURNS a typed steer receipt; we assert the receipt, not just an event.
@@ -903,7 +991,7 @@ mod tests {
             .cloned()
             .expect("ready item");
         scheduler
-            .lease_ready_item(&mut store, &target_id, "worker")
+            .lease_ready_item(&mut store, &target_id, "worker", 1_700_000_000_000)
             .expect("lease target");
         drop(store);
 

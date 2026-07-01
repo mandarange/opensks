@@ -839,6 +839,10 @@ pub struct TerminalCommandBlock {
     pub finished_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// SHA-256 digest (see `sha256:<hex>` format) of the raw, pre-redaction
+    /// stdout bytes captured for this block. This is a content-integrity
+    /// digest of the actual command output, not of the redacted summary
+    /// text shown to users.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdout_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

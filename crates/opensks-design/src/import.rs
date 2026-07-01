@@ -64,6 +64,9 @@ pub const PAYLOAD_DIR: &str = "payload";
 pub const ENTRY_FILE_NAME: &str = "quarantine.json";
 /// Where promoted packages land (under the workspace).
 pub const DESIGN_SYSTEMS_DIR: &str = "design-systems";
+/// Exclusive lock file used by [`approve_import`] to serialize concurrent
+/// approvals of the same quarantine id.
+const APPROVE_LOCK_FILE_NAME: &str = "approve.lock";
 
 /// Default strict ingestion limits. Conservative on purpose: a design package is
 /// small, data-only content.
@@ -308,6 +311,9 @@ pub enum ImportError {
     EntryUnreadable,
     /// Promotion target id collides with an existing registry package.
     AlreadyPromoted { package_id: String },
+    /// A concurrent `approve_import` for the same quarantine id is already
+    /// running (an exclusive lock file for the quarantine is held).
+    ApprovalInProgress { quarantine_id: String },
     /// Re-validation at approval time failed (the quarantined bytes do not pass
     /// the PR-037 registry validation).
     Validation(DesignRegistryError),
@@ -328,6 +334,9 @@ impl std::fmt::Display for ImportError {
             Self::EntryUnreadable => write!(f, "design_import_entry_unreadable"),
             Self::AlreadyPromoted { package_id } => {
                 write!(f, "design_import_already_promoted: {package_id}")
+            }
+            Self::ApprovalInProgress { quarantine_id } => {
+                write!(f, "design_import_approval_in_progress: {quarantine_id}")
             }
             Self::Validation(error) => write!(f, "design_import_validation: {error}"),
             Self::Io(error) => write!(f, "design_import_io: {error}"),
@@ -497,6 +506,28 @@ pub fn approve_import(
             })?;
     let canonical_payload = canonical_quarantine.join(PAYLOAD_DIR);
 
+    // Take an exclusive claim on this quarantine so two concurrent approvals of
+    // the same quarantine id cannot race each other's promotion writes or the
+    // transient validation alias. `LockGuard`'s `Drop` releases it on every
+    // return path below.
+    let lock_path = quarantine_dir.join(APPROVE_LOCK_FILE_NAME);
+    let _lock_guard = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true) // O_EXCL: fails if the lock file already exists
+        .open(&lock_path)
+    {
+        Ok(file) => LockGuard {
+            path: lock_path,
+            _file: file,
+        },
+        Err(ref error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(ImportError::ApprovalInProgress {
+                quarantine_id: quarantine_id.to_string(),
+            });
+        }
+        Err(error) => return Err(ImportError::Io(error)),
+    };
+
     // RE-validate the staged tree with the full ingestion defense set. This
     // re-checks symlinks, executables, MIME, and size/count limits over what is
     // on disk now (TOCTOU-resistant: approval trusts disk, not the import-time
@@ -532,15 +563,24 @@ pub fn approve_import(
     // Promote: copy the validated payload into the registry, then re-validate in
     // place via the registry to prove it resolves.
     fs::create_dir_all(design_systems_root(workspace))?;
-    copy_tree(&payload_dir, &target)?;
-    let registry = DesignRegistry::with_default_order(workspace, None);
-    if let Err(error) = registry.resolve(&package_id) {
-        // Roll back a promotion that does not resolve so the registry is never
-        // left with a half-written package.
+    let rollback = || {
         let canonical_systems = design_systems_root(workspace)
             .canonicalize()
             .unwrap_or_else(|_| design_systems_root(workspace));
         let _ = remove_dir_within(&target, &canonical_systems);
+    };
+    if let Err(error) = copy_tree(&payload_dir, &target) {
+        // Roll back a promotion that fails partway through so the registry is
+        // never left with a half-written package (mirrors the resolve-failure
+        // rollback below).
+        rollback();
+        return Err(ImportError::Io(error));
+    }
+    let registry = DesignRegistry::with_default_order(workspace, None);
+    if let Err(error) = registry.resolve(&package_id) {
+        // Roll back a promotion that does not resolve so the registry is never
+        // left with a half-written package.
+        rollback();
         return Err(ImportError::Validation(error));
     }
 
@@ -593,6 +633,20 @@ pub fn list_quarantines(workspace: &Path) -> Result<Vec<QuarantineEntry>, Import
 }
 
 // ---- internals -----------------------------------------------------------
+
+/// RAII guard for an exclusively-held lock file: removes the lock file on
+/// every return path (success, validation error, or early return) so the
+/// caller never has to duplicate cleanup at each `return Err(...)`.
+struct LockGuard {
+    path: PathBuf,
+    _file: fs::File,
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
 
 /// Per-import accumulated stats.
 struct StageStats {
@@ -763,6 +817,13 @@ fn stage_archive(
     canonical_payload: &Path,
     limits: &ImportLimits,
 ) -> Result<StageStats, StageError> {
+    // Reject on raw on-disk size before reading the whole file into memory —
+    // the post-decode caps below only see already-resident bytes, so a huge
+    // archive must be rejected here to avoid unbounded allocation.
+    let on_disk_len = fs::metadata(source)?.len();
+    if on_disk_len > limits.max_total_bytes {
+        return Err(StageError::Rejected(RejectedReason::TooLarge));
+    }
     let archive_bytes = fs::read(source)?;
     let entries = zip::read_central_directory(&archive_bytes)
         .map_err(|_| StageError::Rejected(RejectedReason::MimeNotAllowed))?;
@@ -1089,12 +1150,17 @@ fn validate_staged_as_package(
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let alias = parent.join(package_id);
+    // Nest the alias under a per-call unique parent (mint_quarantine_id()
+    // combines pid + nanos and is proven unique elsewhere in this file) so
+    // concurrent approve_import calls never collide on the same alias path.
+    let alias_parent = parent.join(mint_quarantine_id());
+    let alias = alias_parent.join(package_id);
     // Avoid clobbering if an alias somehow exists.
-    if alias.exists() {
-        let _ = fs::remove_dir_all(&alias);
+    if alias_parent.exists() {
+        let _ = fs::remove_dir_all(&alias_parent);
     }
     if copy_tree(payload_dir, &alias).is_err() {
+        let _ = fs::remove_dir_all(&alias_parent);
         // Last resort: if the payload dir is itself named the package id.
         if payload_dir
             .file_name()
@@ -1109,7 +1175,7 @@ fn validate_staged_as_package(
         });
     }
     let result = validate_package(package_id, &alias).map(|_| ());
-    let _ = fs::remove_dir_all(&alias);
+    let _ = fs::remove_dir_all(&alias_parent);
     result
 }
 

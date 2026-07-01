@@ -1,8 +1,8 @@
 // PipelineRunCard.swift — an inline card surfacing the LIVE node-level state of
 // one pipeline run, driven entirely by its PR-029 `PipelineExecutionProjection`.
 // Unlike `RunCard` (PR-027, a single completed deterministic run), this card
-// summarises a run with many nodes: a node-count breakdown, a compact mini-graph
-// strip, elapsed time, and the run control affordances.
+// summarises a run with many nodes: a node-count breakdown, a wrapping grid of
+// one cell per node (`NodeStateGrid`), and the run control affordances.
 //
 // Honesty rules this card obeys:
 //   * Every number it shows is DERIVED from the projection — nothing is faked or
@@ -142,8 +142,8 @@ struct PipelineRunCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
-            MiniGraphStrip(projection: projection)
-                .frame(height: 22)
+            NodeStateGrid(states: projection.nodes.map(\.state))
+                .frame(height: gridHeight)
             controls
         }
         .padding(12)
@@ -188,6 +188,36 @@ struct PipelineRunCard: View {
             Spacer(minLength: 0)
 
             StatusPill(kind: model.runState.pillKind, label: model.runState.displayLabel)
+
+            // Chevron affordance for "open the full live graph" — a real Button
+            // (not a whole-header tap gesture) per this card's hit-target
+            // convention, but visually echoing the expand cue of the node grid.
+            Button {
+                onControl(.openGraph)
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.faint)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Open live graph")
+            .accessibilityLabel("Open live graph for run \(model.shortRunID)")
+            .accessibilityIdentifier("pipeline.runCard.chevron.\(model.runId)")
+        }
+    }
+
+    /// Enough rows for a typical run to show every node without truncation at
+    /// common card widths, capped so a huge run stays a compact "at a glance"
+    /// view rather than growing unbounded — the summary line above already
+    /// carries the complete counts.
+    private var gridHeight: CGFloat {
+        switch model.totalNodes {
+        case ..<20: return 18
+        case ..<80: return 34
+        case ..<200: return 54
+        default: return 74
         }
     }
 
@@ -228,39 +258,3 @@ struct PipelineRunCard: View {
     }
 }
 
-// MARK: - Mini-graph strip
-
-/// A compact, single-surface strip rendering one dot per node in projection
-/// order, coloured by node state (semantic tokens). Drawn with `Canvas` so a
-/// long run is a single drawing pass, never one subview per node. This is a
-/// preview/affordance — the full pannable canvas is `PipelineGraphView`.
-struct MiniGraphStrip: View {
-    let projection: PipelineExecutionProjection
-
-    var body: some View {
-        Canvas { context, size in
-            let nodes = projection.nodes
-            guard !nodes.isEmpty else { return }
-            let layout = GraphLayout(nodes: nodes, metrics: .strip)
-            let bounds = layout.contentBounds
-            // Scale the strip layout to fit the available height, left-aligned.
-            let scale = bounds.height > 0 ? size.height / bounds.height : 1
-            let radius = max(2.0, layout.nodeRadius * scale)
-
-            for position in layout.positions {
-                let x = (position.center.x - bounds.minX) * scale
-                let y = (position.center.y - bounds.minY) * scale
-                // Stop drawing once we run past the visible width (bounded work).
-                if x - radius > size.width { break }
-                let state = nodes[position.index].state
-                let rect = CGRect(
-                    x: x - radius, y: y - radius,
-                    width: radius * 2, height: radius * 2
-                )
-                context.fill(Path(ellipseIn: rect), with: .color(state.graphTint))
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityHidden(true) // The card header already conveys the summary.
-    }
-}

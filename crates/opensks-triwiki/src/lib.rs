@@ -2,6 +2,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use opensks_contracts::{TRIWIKI_RECORD_SCHEMA, TriWikiRecord, TriWikiRecordKind};
 use thiserror::Error;
 
@@ -13,6 +14,8 @@ pub enum TriWikiError {
     Json(#[from] serde_json::Error),
     #[error("secret-looking content cannot be written to shared TriWiki records")]
     SecretPublishBlocked,
+    #[error("record shard does not match derived shard for id")]
+    ShardMismatch,
 }
 
 pub fn make_record(
@@ -46,14 +49,24 @@ pub fn append_record(workspace: &Path, record: &TriWikiRecord) -> Result<PathBuf
     if looks_secret(&record.title) || looks_secret(&record.body) {
         return Err(TriWikiError::SecretPublishBlocked);
     }
+    let expected_shard = shard_for_id(&record.id);
+    if record.shard != expected_shard {
+        return Err(TriWikiError::ShardMismatch);
+    }
     let path = workspace
         .join(".opensks")
         .join("wiki")
         .join("records")
-        .join(&record.shard);
+        .join(&expected_shard);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    let lock_path = path.with_extension("jsonl.lock");
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)?;
+    lock_file.lock_exclusive()?;
     if path.exists() {
         for line in fs::read_to_string(&path)?.lines() {
             if line.trim().is_empty() {

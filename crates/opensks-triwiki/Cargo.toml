@@ -9,3 +9,4 @@ license.workspace = true
 opensks-contracts = { path = "../opensks-contracts" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+fs2 = "0.4"

@@ -170,9 +170,17 @@ struct LocalTestEnvelope {
     local_test: LocalTestInstruction,
 }
 
+/// Cap on the raw prompt size considered for structured local-test instruction
+/// parsing, so a caller-controlled prompt cannot force an unbounded JSON parse
+/// before any loop/step budget has a chance to bound execution.
+const MAX_LOCAL_TEST_PROMPT_BYTES: usize = 1 << 20; // 1 MiB
+
 impl LocalTestInstruction {
     /// Parse a structured instruction from a prompt, if present.
     pub fn from_prompt(prompt: &str) -> Option<Self> {
+        if prompt.len() > MAX_LOCAL_TEST_PROMPT_BYTES {
+            return None;
+        }
         serde_json::from_str::<LocalTestEnvelope>(prompt)
             .ok()
             .map(|e| e.local_test)
@@ -278,6 +286,14 @@ impl AgentAdapter for LocalTestAdapter {
         // A multi-step instruction drives the REAL agentic loop: each tool call is
         // one loop step, applied transactionally with its result fed back.
         if let LocalTestInstruction::Steps { steps } = &instruction {
+            const MAX_LOCAL_TEST_STEPS: usize = 256;
+            if steps.len() > MAX_LOCAL_TEST_STEPS {
+                return Err(AgentAdapterError::InvalidInstruction(format!(
+                    "local_test Steps instruction has {} steps, exceeding the {} limit",
+                    steps.len(),
+                    MAX_LOCAL_TEST_STEPS
+                )));
+            }
             let groups: Vec<Vec<agentic::ToolCall>> =
                 steps.iter().cloned().map(|call| vec![call]).collect();
             let count = groups.len();
@@ -321,6 +337,7 @@ impl AgentAdapter for LocalTestAdapter {
             base_tree_hash: before_hash.clone(),
             files: vec![FilePatch {
                 path: rel.clone(),
+                orig_path: None,
                 before_hash: before_hash.clone(),
                 after_hash: after_hash.clone(),
                 unified_diff: minimal_unified_diff(&rel, &before, &after),
@@ -463,13 +480,26 @@ pub struct ParallelOutcome {
 /// merged patch set through ONE atomic transaction (§8.4: workers produce
 /// patches in parallel; an arbiter applies them). Two packets that target the
 /// SAME path are a cross-worker conflict — the arbiter refuses the whole set
-/// rather than letting concurrent writes race. All packets are assumed to share
-/// the first packet's workspace.
+/// rather than letting concurrent writes race. All packets must share the
+/// first packet's workspace; a mismatch is rejected with
+/// `AgentAdapterError::InvalidInstruction` rather than merely assumed.
 pub fn run_parallel(
     packets: &[SubPacket],
     max_concurrency: usize,
 ) -> Result<ParallelOutcome, AgentAdapterError> {
     use std::sync::Mutex;
+
+    if let Some(first) = packets.first() {
+        if let Some(mismatch) = packets.iter().find(|p| p.workspace != first.workspace) {
+            return Err(AgentAdapterError::InvalidInstruction(format!(
+                "run_parallel: packet `{}` targets workspace `{}` but packet `{}` targets `{}`; all packets in one run_parallel call must share the same workspace",
+                mismatch.id,
+                mismatch.workspace.display(),
+                first.id,
+                first.workspace.display(),
+            )));
+        }
+    }
 
     let max = max_concurrency.max(1);
     let planned: Mutex<Vec<(String, PlannedWrite)>> = Mutex::new(Vec::new());
@@ -895,5 +925,32 @@ mod tests {
         assert_eq!(outcome.apply.applied_files.len(), 5);
         assert_eq!(outcome.planned_per_packet.len(), 5);
         std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn parallel_rejects_packets_with_mismatched_workspaces() {
+        // A caller that mistakenly supplies packets pointing at two different
+        // workspaces must be rejected, not silently applied against only the
+        // first packet's workspace.
+        let ws_a = temp_workspace("par-ws-a");
+        let ws_b = temp_workspace("par-ws-b");
+        let packets = vec![
+            SubPacket {
+                id: "w1".to_string(),
+                workspace: ws_a.clone(),
+                prompt: r#"{"local_test":{"op":"create_file","path":"a.txt","value":"A"}}"#
+                    .to_string(),
+            },
+            SubPacket {
+                id: "w2".to_string(),
+                workspace: ws_b.clone(),
+                prompt: r#"{"local_test":{"op":"create_file","path":"b.txt","value":"B"}}"#
+                    .to_string(),
+            },
+        ];
+        let err = run_parallel(&packets, 4).unwrap_err();
+        assert!(matches!(err, AgentAdapterError::InvalidInstruction(_)));
+        std::fs::remove_dir_all(&ws_a).ok();
+        std::fs::remove_dir_all(&ws_b).ok();
     }
 }

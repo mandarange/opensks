@@ -22,6 +22,11 @@ use opensks_contracts::{
 };
 use thiserror::Error;
 
+/// Upper bound on the number of target paths processed per patch envelope /
+/// diff request, to prevent unbounded subprocess spawning from adversarial
+/// or malformed input (e.g. a worker-produced candidate receipt).
+const MAX_TARGET_PATHS: usize = 512;
+
 #[derive(Debug, Error)]
 pub enum GitError {
     #[error("io error: {0}")]
@@ -52,6 +57,8 @@ pub enum GitError {
     DuplicateOutboxWrite(String),
     #[error("outbox has no dispatchable item")]
     EmptyOutbox,
+    #[error("target_paths exceeds maximum of {max} entries: {actual}")]
+    TooManyTargetPaths { actual: usize, max: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -354,6 +361,12 @@ fn isolation_artifact_ref(run_id: &str, worker_id: impl AsRef<str>) -> String {
 }
 
 pub fn check_patch_envelope(workspace: &Path, envelope: &PatchEnvelope) -> Result<(), GitError> {
+    if envelope.target_paths.len() > MAX_TARGET_PATHS {
+        return Err(GitError::TooManyTargetPaths {
+            actual: envelope.target_paths.len(),
+            max: MAX_TARGET_PATHS,
+        });
+    }
     for target in &envelope.target_paths {
         let path = resolve_repo_path(workspace, target)?;
         if is_dirty_path(workspace, target)? {
@@ -423,6 +436,12 @@ where
 }
 
 pub fn working_tree_diff(workspace: &Path, target_paths: &[String]) -> Result<String, GitError> {
+    if target_paths.len() > MAX_TARGET_PATHS {
+        return Err(GitError::TooManyTargetPaths {
+            actual: target_paths.len(),
+            max: MAX_TARGET_PATHS,
+        });
+    }
     if discover_repository(workspace).is_none() {
         return Err(GitError::GitRequired);
     }
@@ -466,6 +485,12 @@ pub fn target_paths_changed_since_base(
 ) -> Result<bool, GitError> {
     if target_paths.is_empty() {
         return Ok(false);
+    }
+    if target_paths.len() > MAX_TARGET_PATHS {
+        return Err(GitError::TooManyTargetPaths {
+            actual: target_paths.len(),
+            max: MAX_TARGET_PATHS,
+        });
     }
     if discover_repository(workspace).is_none() {
         return Err(GitError::GitRequired);
@@ -568,7 +593,7 @@ impl Outbox {
         approved: bool,
     ) -> Result<OutboxItem, GitError> {
         let branch = branch.into();
-        let protected = matches!(branch.as_str(), "main" | "master" | "trunk");
+        let protected = crate::push::is_protected_ref(&branch);
         let approval_id = format!("approval-push-{branch}");
         let item = OutboxItem {
             schema: OUTBOX_ITEM_SCHEMA.to_string(),
@@ -781,11 +806,24 @@ fn resolve_repo_path(workspace: &Path, target: &str) -> Result<PathBuf, GitError
         .canonicalize()
         .unwrap_or_else(|_| workspace.to_path_buf());
     let path = workspace.join(rel);
-    let parent = path.parent().unwrap_or(&workspace);
-    let canonical_parent = parent
-        .canonicalize()
-        .unwrap_or_else(|_| parent.to_path_buf());
-    if !canonical_parent.starts_with(&workspace) {
+    // Walk up from the target's parent to the nearest ancestor that actually
+    // exists on disk, canonicalizing that ancestor (which resolves any
+    // symlinks in the existing prefix of the path). This prevents a missing
+    // intermediate directory from causing the guard to silently no-op via a
+    // non-canonicalized fallback.
+    let mut probe = path.parent().unwrap_or(&workspace).to_path_buf();
+    let canonical_ancestor = loop {
+        match probe.canonicalize() {
+            Ok(canonical) => break canonical,
+            Err(_) => {
+                let Some(next) = probe.parent() else {
+                    break workspace.clone();
+                };
+                probe = next.to_path_buf();
+            }
+        }
+    };
+    if !canonical_ancestor.starts_with(&workspace) {
         return Err(GitError::PathEscape(target.to_string()));
     }
     Ok(path)
@@ -889,12 +927,23 @@ fn run_git_with_stdin<const N: usize>(
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    child
-        .stdin
-        .as_mut()
-        .expect("git stdin")
-        .write_all(stdin_text.as_bytes())?;
+    // Write stdin on a separate thread so a large diff can't fill the stdin
+    // pipe buffer while git's stderr pipe buffer is simultaneously filling
+    // with error output; wait_with_output() below drains stdout/stderr
+    // concurrently with this write, avoiding the classic pipe deadlock.
+    let mut stdin = child.stdin.take().expect("git stdin");
+    let stdin_text = stdin_text.to_string();
+    let writer = std::thread::spawn(move || stdin.write_all(stdin_text.as_bytes()));
     let output = child.wait_with_output()?;
+    // git may exit (and close its stdin) before the writer thread finishes
+    // sending the full payload, e.g. when it rejects the patch early; that
+    // surfaces as a benign broken-pipe error on the writer side and should
+    // not mask the real outcome, which is already captured in `output`.
+    if let Ok(Err(write_error)) = writer.join() {
+        if write_error.kind() != std::io::ErrorKind::BrokenPipe {
+            return Err(GitError::Io(write_error));
+        }
+    }
     if !output.status.success() {
         return Err(GitError::GitCommand(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
@@ -1259,6 +1308,20 @@ index 3b18e51..a5df3c0 100644
         assert_eq!(protected.state, "awaiting_approval");
         assert!(protected.approval_required);
         assert!(protected.protected_branch);
+    }
+
+    #[test]
+    fn outbox_enqueue_push_marks_release_and_production_protected() {
+        let mut outbox = Outbox::new();
+        let release = outbox
+            .enqueue_push("release", false)
+            .expect("release push queued for approval");
+        assert!(release.protected_branch);
+
+        let production = outbox
+            .enqueue_push("production", false)
+            .expect("production push queued for approval");
+        assert!(production.protected_branch);
     }
 
     #[test]

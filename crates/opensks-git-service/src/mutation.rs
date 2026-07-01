@@ -24,18 +24,23 @@
 //! # Index-hash staleness
 //!
 //! [`commit_preview`] returns a stable `index_hash` derived from the staged path
-//! list and each path's staged blob oid (via `git diff --cached --raw -z`). Any
-//! change to the index — adding a path, removing one, or restaging different
-//! content — changes the set of (oid, path) pairs and therefore the hash.
-//! [`commit`] recomputes the live hash and refuses with `index_changed` when it
-//! does not match the caller's `expected_index_hash`, so a commit can never be
-//! built from a stale preview. Preview and commit receipts also carry a reviewed
-//! staged-diff hash/ref, binding the operator-visible diff evidence to the
-//! committed receipt.
+//! list and each path's staged blob oid and destination file mode (via
+//! `git diff --cached --raw -z`). Any change to the index — adding a path,
+//! removing one, or restaging different content or mode — changes the set of
+//! (oid, mode, path) pairs and therefore the hash. [`commit`] recomputes the
+//! live hash and refuses with `index_changed` when it does not match the
+//! caller's `expected_index_hash`, so a commit can never be built from a stale
+//! preview. Preview and commit receipts also carry a reviewed staged-diff
+//! hash/ref, binding the operator-visible diff evidence to the committed
+//! receipt. The commit receipt's path list is derived from the actual
+//! committed tree at `HEAD` after `git commit` succeeds, not from the
+//! pre-commit snapshot, so it cannot misreport committed content under
+//! concurrent index mutation.
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use opensks_contracts::{
     GitCommit, GitCommitPreview, GitCreateBranch, GitMutationError, GitStageRejectReason,
@@ -188,9 +193,17 @@ pub fn stage(workspace: &Path, paths: &[String]) -> Result<GitStageResult, GitSe
             continue;
         }
         // Stage exactly this path; `--` guards against a path that looks like a
-        // flag.
-        git(workspace, &["add", "--", path])?;
-        staged.push(path.clone());
+        // flag. A per-path failure (e.g. the path does not exist) is recorded as
+        // a rejection rather than propagated, so paths already staged in earlier
+        // loop iterations are not lost from the returned result.
+        match git(workspace, &["add", "--", path]) {
+            Ok(_) => staged.push(path.clone()),
+            Err(GitServiceError::GitCommand(message)) => rejected.push(GitStageRejection {
+                path: path.clone(),
+                reason: GitStageRejectReason::CommandFailed(message),
+            }),
+            Err(other) => return Err(other),
+        }
     }
     Ok(GitStageResult::new(staged, rejected))
 }
@@ -245,9 +258,13 @@ pub fn commit(
         return Ok(Err(GitMutationError::index_changed()));
     }
     // Defense in depth: even though `stage` filters restricted paths, re-check
-    // the live staged set so a path staged out-of-band (or by an older client)
-    // can never be committed.
-    let restricted: Vec<String> = staged_paths
+    // the live staged set immediately before committing (rather than the
+    // snapshot taken above) so a path staged out-of-band — including by a
+    // concurrent mutation racing this call — can never be committed. This
+    // narrows, but does not eliminate, the check-then-commit window; true
+    // atomicity would require an external lock that git does not expose.
+    let (_, live_staged_paths) = index_state(workspace)?;
+    let restricted: Vec<String> = live_staged_paths
         .iter()
         .filter(|path| restricted_reason(path).is_some())
         .cloned()
@@ -259,11 +276,29 @@ pub fn commit(
     // only reviewed/staged paths are included.
     git(workspace, &["commit", "--message", message])?;
     let sha = rev_parse(workspace, "HEAD")?;
-    let commit = GitCommit::new(sha, staged_paths);
+    // Re-derive the committed path list from the new HEAD commit itself
+    // (rather than reusing the pre-commit `staged_paths` snapshot) so the
+    // receipt describes what was truly committed even if the index was
+    // mutated concurrently between the checks above and this commit.
+    let committed_paths = committed_paths_at_head(workspace)?;
+    let commit = GitCommit::new(sha, committed_paths);
     Ok(Ok(match staged_diff_evidence {
         Some(evidence) => apply_commit_diff_evidence(commit, evidence),
         None => commit,
     }))
+}
+
+/// The paths touched by the commit at `HEAD`, via `git show --name-only`.
+fn committed_paths_at_head(workspace: &Path) -> Result<Vec<String>, GitServiceError> {
+    let raw = git(
+        workspace,
+        &["show", "--name-only", "--pretty=format:", "HEAD"],
+    )?;
+    Ok(raw
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 // --- restricted-path policy -------------------------------------------------
@@ -307,9 +342,7 @@ fn is_data_plane_path(path: &str) -> bool {
 fn data_plane_rule_matches(rule: &str, candidate: &str) -> bool {
     if let Some(prefix) = rule.strip_suffix('/') {
         // Directory rule: the candidate is inside this directory.
-        return candidate == prefix
-            || candidate.starts_with(&format!("{prefix}/"))
-            || candidate.starts_with(prefix);
+        return candidate == prefix || candidate.starts_with(&format!("{prefix}/"));
     }
     if rule.contains('*') {
         return glob_segments_match(rule, candidate);
@@ -335,25 +368,31 @@ fn glob_segments_match(rule: &str, candidate: &str) -> bool {
 
 /// Compute the stable index hash and the sorted staged path list.
 ///
-/// The hash is an FNV-1a 64 digest over each staged entry's `dst_oid` and path,
-/// taken from `git diff --cached --raw -z` (which compares the index to HEAD).
-/// Entries are sorted by path first so the hash is independent of git's output
-/// order. Any added/removed path or any change to a staged blob's oid flips the
-/// digest.
+/// The hash is an FNV-1a 64 digest over each staged entry's `dst_oid`,
+/// `dst_mode`, and path, taken from `git diff --cached --raw -z` (which
+/// compares the index to HEAD). Entries are sorted by path first so the hash
+/// is independent of git's output order. Any added/removed path, or any
+/// change to a staged blob's oid or mode, flips the digest.
 fn index_state(workspace: &Path) -> Result<(String, Vec<String>), GitServiceError> {
     let raw = git(
         workspace,
         &["diff", "--cached", "--raw", "--no-color", "-z"],
     )?;
     let mut entries = parse_raw_cached(&raw)?;
-    entries.sort_by(|a, b| a.1.cmp(&b.1));
+    entries.sort_by(|a, b| a.2.cmp(&b.2));
     let mut hash: u64 = 0xcbf29ce484222325;
-    for (oid, path) in &entries {
+    for (mode, oid, path) in &entries {
         for byte in oid.as_bytes() {
             hash ^= *byte as u64;
             hash = hash.wrapping_mul(0x100000001b3);
         }
-        hash ^= 0x1f; // unit separator between oid and path
+        hash ^= 0x1f; // unit separator between oid and mode
+        hash = hash.wrapping_mul(0x100000001b3);
+        for byte in mode.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= 0x1f; // unit separator between mode and path
         hash = hash.wrapping_mul(0x100000001b3);
         for byte in path.as_bytes() {
             hash ^= *byte as u64;
@@ -362,7 +401,7 @@ fn index_state(workspace: &Path) -> Result<(String, Vec<String>), GitServiceErro
         hash ^= 0x1e; // record separator between entries
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    let paths: Vec<String> = entries.into_iter().map(|(_, path)| path).collect();
+    let paths: Vec<String> = entries.into_iter().map(|(_, _, path)| path).collect();
     Ok((format!("fnv1a64:{hash:016x}"), paths))
 }
 
@@ -505,13 +544,14 @@ fn fnv1a64_text(value: &str) -> String {
     format!("fnv1a64:{hash:016x}")
 }
 
-/// Parse `git diff --cached --raw -z` records into `(dst_oid, path)` pairs.
+/// Parse `git diff --cached --raw -z` records into `(dst_mode, dst_oid, path)`
+/// triples.
 ///
 /// Each record is `:<srcMode> <dstMode> <srcOid> <dstOid> <status>\0<path>`
 /// (renames/copies carry a second NUL-separated path). The metadata line and
 /// the path(s) are separate NUL fields, so we alternate: a field beginning with
 /// `:` is metadata, and the following NUL field(s) are its path(s).
-fn parse_raw_cached(raw: &str) -> Result<Vec<(String, String)>, GitServiceError> {
+fn parse_raw_cached(raw: &str) -> Result<Vec<(String, String, String)>, GitServiceError> {
     let mut entries = Vec::new();
     let mut fields = raw.split('\0');
     while let Some(meta) = fields.next() {
@@ -524,6 +564,10 @@ fn parse_raw_cached(raw: &str) -> Result<Vec<(String, String)>, GitServiceError>
         }
         let parts: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
         // parts: [srcMode, dstMode, srcOid, dstOid, status]
+        let dst_mode = parts
+            .get(1)
+            .ok_or_else(|| GitServiceError::Parse(format!("raw cached missing dst mode: {meta:?}")))?
+            .to_string();
         let dst_oid = parts
             .get(3)
             .ok_or_else(|| GitServiceError::Parse(format!("raw cached missing dst oid: {meta:?}")))?
@@ -543,7 +587,7 @@ fn parse_raw_cached(raw: &str) -> Result<Vec<(String, String)>, GitServiceError>
         } else {
             dst_path.to_string()
         };
-        entries.push((dst_oid, path));
+        entries.push((dst_mode, dst_oid, path));
     }
     Ok(entries)
 }
@@ -556,14 +600,48 @@ fn rev_parse(workspace: &Path, rev: &str) -> Result<String, GitServiceError> {
     Ok(out.trim().to_string())
 }
 
+/// Wall-clock ceiling for a single `git` invocation. Guards against a hung
+/// subprocess (stale `index.lock`, an interactive credential prompt, a
+/// pathological repo) blocking the caller thread forever.
+const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Poll interval while waiting for the child to exit within [`GIT_TIMEOUT`].
+const GIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
 /// Run a **local** git command in `workspace`. Every call site in this module
 /// passes a local index/branch/commit verb or a read-only inspection verb; no
 /// `push`/`fetch`/`pull`/`remote` verb is ever assembled here.
+///
+/// Stdin is explicitly closed so a credential helper or pager can never block
+/// waiting on inherited input, and the child is killed if it does not exit
+/// within [`GIT_TIMEOUT`].
 fn git(workspace: &Path, args: &[&str]) -> Result<String, GitServiceError> {
-    let output = Command::new("git")
+    let mut child = Command::new("git")
         .args(args)
         .current_dir(workspace)
-        .output()?;
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let deadline = Instant::now() + GIT_TIMEOUT;
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(GitServiceError::Timeout(format!(
+                "git {} timed out after {:?}",
+                args.join(" "),
+                GIT_TIMEOUT
+            )));
+        }
+        std::thread::sleep(GIT_POLL_INTERVAL);
+    }
+
+    let output = child.wait_with_output()?;
     if !output.status.success() {
         return Err(GitServiceError::GitCommand(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
@@ -680,6 +758,24 @@ mod tests {
         assert_eq!(head.trim(), "feature");
     }
 
+    // --- data-plane directory-rule matching ---------------------------------
+
+    #[test]
+    fn data_plane_rule_matches_directory_prefix_requires_separator() {
+        // A candidate that merely shares a string prefix with a directory rule
+        // (no path separator) must NOT be treated as inside that directory.
+        assert!(!data_plane_rule_matches(
+            ".opensks/runtime/",
+            ".opensks/runtime-extra/foo.txt"
+        ));
+        // True positives still match: the directory itself, and a path under it.
+        assert!(data_plane_rule_matches(
+            ".opensks/runtime/",
+            ".opensks/runtime/foo.txt"
+        ));
+        assert!(data_plane_rule_matches(".opensks/runtime/", ".opensks/runtime"));
+    }
+
     // --- staging rejects secret + data-plane paths --------------------------
 
     #[test]
@@ -734,10 +830,39 @@ mod tests {
         let result = stage(&dir, &[".env".to_string()]).expect("stage");
         assert!(result.staged.is_empty());
         assert_eq!(
-            result.rejected.first().map(|r| r.reason),
+            result.rejected.first().map(|r| r.reason.clone()),
             Some(GitStageRejectReason::SecretRestricted)
         );
         assert!(staged_paths(&dir).is_empty());
+    }
+
+    #[test]
+    fn staging_one_valid_and_one_missing_path_preserves_partial_result() {
+        let dir = init_repo("stage-partial-failure");
+        commit_file(&dir, "seed.txt", "seed\n", "init");
+        write(&dir, "good.rs", "fn good() {}\n");
+        // "missing.rs" is never written to the worktree, so `git add` fails
+        // for it with a nonzero exit while "good.rs" stages successfully.
+        let result = stage(
+            &dir,
+            &["good.rs".to_string(), "missing.rs".to_string()],
+        )
+        .expect("stage must not fail outright when one path fails to add");
+
+        assert_eq!(result.staged, vec!["good.rs".to_string()]);
+        let rejection = result
+            .rejected
+            .iter()
+            .find(|r| r.path == "missing.rs")
+            .expect("missing.rs rejected");
+        assert!(matches!(
+            rejection.reason,
+            GitStageRejectReason::CommandFailed(_)
+        ));
+
+        // The already-staged path is genuinely staged in the real index —
+        // no state is lost even though a later path in the same call failed.
+        assert_eq!(staged_paths(&dir), vec!["good.rs".to_string()]);
     }
 
     // --- commit preview / staleness / commit --------------------------------

@@ -600,15 +600,8 @@ impl PushOutbox {
                 return Ok(Some(oid.to_string()));
             }
         }
-        // Fall back to the first line's oid when ls-remote echoed a bare match.
-        if let Some(first) = out.lines().next() {
-            if let Some(oid) = first.split('\t').next() {
-                let oid = oid.trim();
-                if !oid.is_empty() {
-                    return Ok(Some(oid.to_string()));
-                }
-            }
-        }
+        // No line matched the heads ref (e.g. only a same-named tag exists);
+        // treat this as "not present as a branch on the remote" (a create).
         Ok(None)
     }
 

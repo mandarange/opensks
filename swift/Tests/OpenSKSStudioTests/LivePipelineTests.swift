@@ -220,7 +220,7 @@ final class LivePipelineTests: XCTestCase {
 
         let renderer = ImageRenderer(content: card)
         renderer.scale = 1
-        let image = try XCTUnwrap(renderer.nsImage, "the run card (with mini strip) must render for 1,000 nodes")
+        let image = try XCTUnwrap(renderer.nsImage, "the run card (with node-state grid) must render for 1,000 nodes")
         XCTAssertEqual(image.size.width, 720, accuracy: 1.0)
     }
 

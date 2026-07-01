@@ -7,7 +7,7 @@
 //! never placed in process argv. Transport is native HTTP over rustls-backed
 //! `reqwest`, so provider dispatch no longer depends on a subprocess.
 
-use std::{collections::BTreeMap, sync::atomic::Ordering, time::Duration};
+use std::{collections::BTreeMap, io::Read as _, sync::atomic::Ordering, time::Duration};
 
 use base64::Engine as _;
 use opensks_contracts::projection::RunProjectionState;
@@ -28,6 +28,12 @@ use crate::{
 
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_API_KEY_ENV: &str = "OPENROUTER_API_KEY";
+/// Cap on a provider-supplied image download so a malicious/misbehaving
+/// provider cannot exhaust daemon memory via an oversized response body.
+const MAX_PROVIDER_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
+/// Cap on a chat/JSON provider response body so a malicious/misbehaving
+/// provider cannot exhaust daemon memory via an oversized response body.
+const MAX_CHAT_RESPONSE_BYTES: u64 = 25 * 1024 * 1024;
 
 /// A live text/code model adapter. Configured with a model id and the env var
 /// holding the API key; performs one non-streaming chat completion per turn.
@@ -105,11 +111,8 @@ impl OpenRouterAdapter {
                 ))
             })?;
         let status = response.status();
-        let response_body = response.text().map_err(|error| {
-            AgentAdapterError::Provider(redact_with_secrets(
-                &error.to_string(),
-                &[api_key.as_str()],
-            ))
+        let response_body = read_capped_text(response, MAX_CHAT_RESPONSE_BYTES).map_err(|error| {
+            AgentAdapterError::Provider(redact_with_secrets(&error, &[api_key.as_str()]))
         })?;
         if !status.is_success() {
             return Err(AgentAdapterError::Provider(format!(
@@ -449,6 +452,7 @@ impl OpenAiCompatibleImageGenerator {
     }
 
     fn download_image_url(&self, url: &str) -> Result<(Vec<u8>, Option<String>), ImageError> {
+        validate_provider_image_url(url)?;
         let client = reqwest::blocking::Client::builder()
             .timeout(self.timeout)
             .user_agent("opensks-adapter/0.1 provider-image-download")
@@ -472,12 +476,24 @@ impl OpenAiCompatibleImageGenerator {
                 status.as_u16()
             )));
         }
+        if let Some(len) = response.content_length()
+            && len > MAX_PROVIDER_IMAGE_BYTES
+        {
+            return Err(ImageError::Provider(
+                "provider image download exceeded maximum allowed size".to_string(),
+            ));
+        }
         let bytes = response.bytes().map_err(|error| {
             ImageError::Provider(redact_with_secrets(
                 &error.to_string(),
                 &[self.bearer_token.as_str()],
             ))
         })?;
+        if bytes.len() as u64 > MAX_PROVIDER_IMAGE_BYTES {
+            return Err(ImageError::Provider(
+                "provider image download exceeded maximum allowed size".to_string(),
+            ));
+        }
         Ok((bytes.to_vec(), content_type))
     }
 }
@@ -570,12 +586,10 @@ impl OpenAiCompatibleImageGenerator {
                 ))
             })?;
         let status = response.status();
-        let response_body = response.text().map_err(|error| {
-            ImageError::Provider(redact_with_secrets(
-                &error.to_string(),
-                &[self.bearer_token.as_str()],
-            ))
-        })?;
+        let response_body =
+            read_capped_text(response, MAX_CHAT_RESPONSE_BYTES).map_err(|error| {
+                ImageError::Provider(redact_with_secrets(&error, &[self.bearer_token.as_str()]))
+            })?;
         if !status.is_success() {
             return Err(ImageError::Provider(format!(
                 "provider HTTP status {}: {}",
@@ -663,12 +677,13 @@ impl ChatCompleter for OpenAiCompatibleChatCompleter {
                 ))
             })?;
         let status = response.status();
-        let response_body = response.text().map_err(|error| {
-            AgentAdapterError::Provider(redact_with_secrets(
-                &error.to_string(),
-                &[self.bearer_token.as_str()],
-            ))
-        })?;
+        let response_body =
+            read_capped_text(response, MAX_CHAT_RESPONSE_BYTES).map_err(|error| {
+                AgentAdapterError::Provider(redact_with_secrets(
+                    &error,
+                    &[self.bearer_token.as_str()],
+                ))
+            })?;
         if !status.is_success() {
             return Err(AgentAdapterError::Provider(format!(
                 "provider HTTP status {}: {}",
@@ -742,12 +757,13 @@ impl ChatCompleter for OpenAiResponsesChatCompleter {
                 ))
             })?;
         let status = response.status();
-        let response_body = response.text().map_err(|error| {
-            AgentAdapterError::Provider(redact_with_secrets(
-                &error.to_string(),
-                &[self.bearer_token.as_str()],
-            ))
-        })?;
+        let response_body =
+            read_capped_text(response, MAX_CHAT_RESPONSE_BYTES).map_err(|error| {
+                AgentAdapterError::Provider(redact_with_secrets(
+                    &error,
+                    &[self.bearer_token.as_str()],
+                ))
+            })?;
         if !status.is_success() {
             return Err(AgentAdapterError::Provider(format!(
                 "provider HTTP status {}: {}",
@@ -1105,7 +1121,15 @@ fn chat_completion_from_responses_body(
         }
         "stop"
     } else {
-        message["content"] = serde_json::Value::Null;
+        let content_text = message
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        message["content"] = if content_text.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(content_text.to_string())
+        };
         message["tool_calls"] = serde_json::Value::Array(tool_calls);
         "tool_calls"
     };
@@ -1356,6 +1380,52 @@ fn validate_chat_base_url(base_url: &str) -> Result<(), AgentAdapterError> {
 
 fn is_loopback_host(host: Option<&str>) -> bool {
     matches!(host, Some("localhost") | Some("127.0.0.1") | Some("::1"))
+}
+
+/// SSRF guard for image URLs returned inside a provider's own JSON response
+/// (as opposed to the operator-configured `base_url`, which is checked by
+/// `validate_chat_base_url`). A malicious or compromised provider could
+/// otherwise steer this adapter into fetching internal/loopback resources.
+fn validate_provider_image_url(url: &str) -> Result<(), ImageError> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|error| ImageError::Provider(format!("invalid provider image URL: {error}")))?;
+    if parsed.scheme() != "https" {
+        return Err(ImageError::Provider(
+            "provider image URL must use https".to_string(),
+        ));
+    }
+    if url.contains('@') {
+        return Err(ImageError::Provider(
+            "provider image URL must not contain userinfo credentials".to_string(),
+        ));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ImageError::Provider("provider image URL missing host".to_string()))?;
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        let is_disallowed = match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_multicast()
+            }
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback() || v6.is_unspecified() || v6.is_multicast()
+            }
+        };
+        if is_disallowed {
+            return Err(ImageError::Provider(
+                "provider image URL resolves to a disallowed host".to_string(),
+            ));
+        }
+    } else if host.eq_ignore_ascii_case("localhost") {
+        return Err(ImageError::Provider(
+            "provider image URL resolves to a disallowed host".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn decode_base64_image(encoded: &str) -> Result<Vec<u8>, ImageError> {
@@ -2005,6 +2075,29 @@ fn redact_with_secrets(s: &str, secrets: &[&str]) -> String {
         }
     }
     redacted
+}
+
+/// Read a blocking response body as text, capped at `limit` bytes so an
+/// oversized (or maliciously unbounded) provider response cannot exhaust
+/// daemon memory. Checks `Content-Length` first, then bounds the actual read
+/// in case that header is absent or understated.
+fn read_capped_text(response: reqwest::blocking::Response, limit: u64) -> Result<String, String> {
+    if let Some(len) = response.content_length()
+        && len > limit
+    {
+        return Err(format!(
+            "provider response exceeded size limit ({len} > {limit} bytes)"
+        ));
+    }
+    let mut buf = Vec::new();
+    response
+        .take(limit + 1)
+        .read_to_end(&mut buf)
+        .map_err(|error| error.to_string())?;
+    if buf.len() as u64 > limit {
+        return Err(format!("provider response exceeded size limit ({limit} bytes)"));
+    }
+    String::from_utf8(buf).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

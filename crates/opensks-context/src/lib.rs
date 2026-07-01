@@ -136,7 +136,7 @@ pub fn add_conversation_summary(pack: &mut ContextPack, digest: ConversationDige
     let reason_code = if secret_like {
         "conversation_summary_redacted_secret_like"
     } else {
-        "redacted_conversation_summary"
+        "conversation_summary_included"
     };
     let item = ContextPackConversationSummary {
         conversation_id: digest.conversation_id,
@@ -309,6 +309,7 @@ fn add_turn_context_refs(pack: &mut ContextPack, refs: &[String]) {
         .collect::<Vec<_>>();
     refs.sort();
     refs.dedup();
+    refs.truncate(MAX_TURN_CONTEXT_REFS);
     if refs.is_empty() {
         return;
     }
@@ -333,10 +334,16 @@ fn add_turn_context_refs(pack: &mut ContextPack, refs: &[String]) {
     );
 }
 
+/// Upper bound on the number of turn-context refs resolved into items per
+/// pack, to guard against unbounded file reads from an attacker/agent
+/// controlled `refs` list.
+const MAX_TURN_CONTEXT_REFS: usize = 64;
+
 fn add_turn_context_items(pack: &mut ContextPack, workspace: &Path, refs: &[String]) {
     let items = refs
         .iter()
         .filter(|reference| !reference.trim().is_empty())
+        .take(MAX_TURN_CONTEXT_REFS)
         .map(|reference| resolve_turn_context_ref(workspace, reference))
         .collect::<Vec<_>>();
     if items.is_empty() {
@@ -390,6 +397,10 @@ struct ParsedEditorContextRef {
     captured_hash: String,
 }
 
+/// Upper bound on the number of lines an `editor://` ref may span, to guard
+/// against absurd ranges forcing huge in-memory line collections.
+const MAX_EDITOR_REF_LINE_SPAN: u32 = 20_000;
+
 fn parse_editor_context_ref(reference: &str) -> Option<ParsedEditorContextRef> {
     let body = reference.strip_prefix("editor://")?;
     let mut parts = body.splitn(3, '#');
@@ -407,6 +418,9 @@ fn parse_editor_context_ref(reference: &str) -> Option<ParsedEditorContextRef> {
     if path.is_empty() || start_line == 0 || end_line < start_line || captured_hash.is_empty() {
         return None;
     }
+    if end_line - start_line > MAX_EDITOR_REF_LINE_SPAN {
+        return None;
+    }
     Some(ParsedEditorContextRef {
         path,
         start_line,
@@ -414,6 +428,10 @@ fn parse_editor_context_ref(reference: &str) -> Option<ParsedEditorContextRef> {
         captured_hash,
     })
 }
+
+/// Upper bound on the size of a file read for an `editor://` ref, to guard
+/// against unbounded memory growth from reading arbitrarily large files.
+const MAX_EDITOR_REF_FILE_BYTES: u64 = 5 * 1024 * 1024;
 
 fn resolve_editor_context_ref(
     workspace: &Path,
@@ -438,6 +456,37 @@ fn resolve_editor_context_ref(
             },
         );
     };
+    match fs::metadata(&path) {
+        Ok(meta) if meta.len() > MAX_EDITOR_REF_FILE_BYTES => {
+            return editor_context_item(
+                reference,
+                parsed,
+                EditorContextItemStatus {
+                    current_hash: None,
+                    stale: false,
+                    redacted: false,
+                    reason_code: "file_too_large",
+                    body: None,
+                    evidence_refs,
+                },
+            );
+        }
+        Err(_) => {
+            return editor_context_item(
+                reference,
+                parsed,
+                EditorContextItemStatus {
+                    current_hash: None,
+                    stale: false,
+                    redacted: false,
+                    reason_code: "unreadable_file",
+                    body: None,
+                    evidence_refs,
+                },
+            );
+        }
+        _ => {}
+    }
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(_) => {
@@ -914,20 +963,82 @@ fn fnv1a64(bytes: &[u8]) -> String {
     format!("fnv1a64:{hash:016x}")
 }
 
+/// Best-effort heuristic for common credential shapes; not exhaustive and
+/// not a substitute for a dedicated secret-scanning solution. False
+/// negatives are still possible for novel token formats.
 fn looks_secret(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     lower.contains("api_key")
+        || lower.contains("api-key")
         || lower.contains("secret=")
+        || lower.contains("secret:")
         || lower.contains("bearer ")
+        || lower.contains("authorization:")
         || lower.contains("sk-")
         || lower.contains("password=")
+        || lower.contains("password:")
+        || lower.contains("passwd=")
+        || lower.contains("-----begin ")
+        || value.contains("AKIA")
+        || value.contains("ghp_")
+        || value.contains("gho_")
+        || value.contains("ghu_")
+        || value.contains("ghs_")
+        || value.contains("github_pat_")
+        || looks_like_jwt(value)
+        || looks_like_credentialed_url(value)
+}
+
+fn looks_like_jwt(value: &str) -> bool {
+    // Crude structural check: header.payload.signature, each segment
+    // base64url-ish.
+    value.split_whitespace().any(|token| {
+        let parts: Vec<&str> = token.split('.').collect();
+        parts.len() == 3
+            && parts.iter().all(|part| {
+                !part.is_empty()
+                    && part
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            })
+            && parts[0].len() > 10
+    })
+}
+
+fn looks_like_credentialed_url(value: &str) -> bool {
+    // Matches scheme://user:pass@ patterns, e.g. postgres://user:pass@host.
+    value.split("://").skip(1).any(|rest| {
+        rest.split('@')
+            .next()
+            .is_some_and(|creds| creds.contains(':'))
+    })
+}
+
+/// Upper bound on how long any single `git` subprocess call is allowed to
+/// run before it is treated as a failure, so a hung/stuck git invocation
+/// cannot block the calling thread indefinitely.
+const GIT_SUBPROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Runs `git` with the given args, bounded by `GIT_SUBPROCESS_TIMEOUT`.
+/// Returns `None` if the process fails to spawn, fails to complete in time,
+/// or the result channel is otherwise unavailable — treated the same as
+/// any other git failure by callers.
+fn git_output_with_timeout(workspace: &Path, args: &[&str]) -> Option<std::process::Output> {
+    let workspace = workspace.to_path_buf();
+    let args = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = Command::new("git")
+            .args(&args)
+            .current_dir(&workspace)
+            .output();
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(GIT_SUBPROCESS_TIMEOUT).ok()?.ok()
 }
 
 fn git_changed_paths(workspace: &Path) -> Vec<String> {
-    let Ok(output) = Command::new("git")
-        .args(["status", "--porcelain", "-z", "--"])
-        .current_dir(workspace)
-        .output()
+    let Some(output) = git_output_with_timeout(workspace, &["status", "--porcelain", "-z", "--"])
     else {
         return Vec::new();
     };
@@ -936,14 +1047,21 @@ fn git_changed_paths(workspace: &Path) -> Vec<String> {
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut paths = Vec::new();
-    for field in stdout.split('\0') {
-        if field.is_empty() {
+    let mut fields = stdout.split('\0').filter(|field| !field.is_empty());
+    while let Some(field) = fields.next() {
+        if field.len() < 3 {
+            paths.push(field.replace('\\', "/"));
             continue;
         }
-        if field.len() >= 3 && field.as_bytes()[2] == b' ' {
-            paths.push(field[3..].replace('\\', "/"));
-        } else {
-            paths.push(field.replace('\\', "/"));
+        let status = field.as_bytes();
+        let (x, y) = (status[0], status[1]);
+        paths.push(field[3..].replace('\\', "/"));
+        // Rename/copy records carry one extra bare old-path field with no
+        // status prefix; only consume it when the status codes say so.
+        if x == b'R' || x == b'C' || y == b'R' || y == b'C' {
+            if let Some(old_path) = fields.next() {
+                paths.push(old_path.replace('\\', "/"));
+            }
         }
     }
     paths.sort();
@@ -1050,20 +1168,13 @@ fn ahead_behind_counts(workspace: &Path, base_ref: &str) -> (Option<u32>, Option
 }
 
 fn git_success(workspace: &Path, args: &[&str]) -> bool {
-    Command::new("git")
-        .args(args)
-        .current_dir(workspace)
-        .output()
+    git_output_with_timeout(workspace, args)
         .map(|output| output.status.success())
         .unwrap_or(false)
 }
 
 fn git_text(workspace: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(workspace)
-        .output()
-        .ok()?;
+    let output = git_output_with_timeout(workspace, args)?;
     if !output.status.success() {
         return None;
     }
@@ -1339,6 +1450,25 @@ mod tests {
     }
 
     #[test]
+    fn git_changed_paths_preserves_full_rename_old_path() {
+        let root = temp_workspace("rename-old-path");
+        run_git(&root, &["init"]);
+        run_git(&root, &["config", "user.email", "context@example.test"]);
+        run_git(&root, &["config", "user.name", "Context Test"]);
+
+        // The old path's first "word" is exactly 2 chars followed by a
+        // space, which used to be misdetected as a bogus 3-char status
+        // prefix on the bare old-path field of a rename record.
+        fs::write(root.join("ab cdef"), "content\n").expect("seed rename source");
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-m", "seed rename source"]);
+        run_git(&root, &["mv", "ab cdef", "newname.txt"]);
+
+        let paths = git_changed_paths(&root);
+        assert_eq!(paths, vec!["ab cdef".to_string(), "newname.txt".to_string()]);
+    }
+
+    #[test]
     fn codegraph_selection_includes_adjacent_reference_records() {
         let changed = CodeGraphRecord {
             schema: "opensks.codegraph-record.v1".to_string(),
@@ -1496,7 +1626,7 @@ mod tests {
         assert_eq!(summary.source_message_sequence, 7);
         assert_eq!(summary.generated_at_ms, 1_700);
         assert!(!summary.redacted);
-        assert_eq!(summary.reason_code, "redacted_conversation_summary");
+        assert_eq!(summary.reason_code, "conversation_summary_included");
         assert!(safe.body.contains("## Conversation Summary"));
         assert!(safe.body.contains("worker planning"));
         assert!(

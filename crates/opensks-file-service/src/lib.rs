@@ -233,7 +233,7 @@ impl WorkspaceFileService {
         Ok(WatchHandle {
             service: self.clone(),
             workspace_relative_path: relative.to_string(),
-            baseline_hash: hash_of(self, relative).unwrap_or_default(),
+            baseline_hash: hash_of(self, relative)?,
             baseline_mtime_ms: entry.modification_ms,
         })
     }
@@ -384,9 +384,9 @@ impl WorkspaceFileService {
         }
 
         // fsync the parent directory so the rename is durable.
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
-        }
+        let dir = File::open(parent).map_err(|error| atomic_failed(relative, "open_parent_dir", error))?;
+        dir.sync_all()
+            .map_err(|error| atomic_failed(relative, "fsync_parent_dir", error))?;
         Ok(())
     }
 }
@@ -427,8 +427,7 @@ impl WatchHandle {
     pub fn poll(&self) -> Result<WatchChange, FileServiceError> {
         match self.service.stat(&self.workspace_relative_path) {
             Ok(entry) => {
-                let current_hash =
-                    hash_of(&self.service, &self.workspace_relative_path).unwrap_or_default();
+                let current_hash = hash_of(&self.service, &self.workspace_relative_path)?;
                 if current_hash != self.baseline_hash
                     || entry.modification_ms != self.baseline_mtime_ms
                 {

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use opensks_contracts::{
     CONCURRENCY_DECISION_SCHEMA, CapabilityRequirements, ConcurrencyDecision,
@@ -203,6 +204,7 @@ struct LeaseFence<'a> {
 #[derive(Debug, Clone)]
 struct RunningDispatch {
     item_id: String,
+    holder: String,
     lease_id: String,
     batch_id: String,
     batch_size: usize,
@@ -314,6 +316,22 @@ impl WorkerDispatchReport {
     }
 }
 
+/// A synchronous worker execution backend for [`DurableScheduler`] dispatch.
+///
+/// The scheduler transitions work items to `Running` and commits those
+/// transitions durably *before* calling `execute`/`execute_batch`, and it
+/// performs zero timeout enforcement of its own around these synchronous
+/// calls — `WorkBudget.timeout_ms` on each dispatched item is not read or
+/// enforced by the scheduler. Implementations MUST enforce
+/// `WorkBudget.timeout_ms` (or an equivalent deadline) themselves, e.g. by
+/// running the underlying subprocess/provider call under their own
+/// timeout-and-kill mechanism, and MUST return a
+/// `WorkerDispatchOutcome { ok: false, .. }` on timeout rather than blocking
+/// indefinitely. If `execute`/`execute_batch` never returns, the scheduler
+/// (and any caller of `dispatch_until_idle`/`dispatch_until_idle_with_control`)
+/// blocks forever with the affected items durably stranded in `Running`,
+/// recoverable only via an out-of-band lease TTL sweep
+/// (see [`DurableScheduler::expire_stale_leases`]).
 pub trait WorkerDriver {
     fn acquire_holder(&mut self, item: &SchedulerWorkItem) -> String;
     fn execute(&mut self, item: &SchedulerWorkItem) -> WorkerDispatchOutcome;
@@ -644,7 +662,7 @@ impl DurableScheduler {
             let batch: Vec<String> = ready.into_iter().take(admitted).collect();
             self.max_concurrent_workers = self.max_concurrent_workers.max(batch.len() as u32);
             for item_id in &batch {
-                let lease = self.assign_lease(item_id, "sim-worker")?;
+                let lease = self.assign_lease(item_id, "sim-worker", 1_700_000_000_000)?;
                 self.transition(store, item_id, WorkState::Leased, Vec::new())?;
                 self.transition_with_fence(
                     store,
@@ -682,11 +700,12 @@ impl DurableScheduler {
         store: &mut EventStore,
         item_id: &str,
         holder: &str,
+        acquired_at_ms: u64,
     ) -> Result<(), SchedulerError> {
         if !self.ready_items().iter().any(|ready| ready == item_id) {
             return Err(SchedulerError::WorkItemNotReady(item_id.to_string()));
         }
-        self.assign_lease(item_id, holder)?;
+        self.assign_lease(item_id, holder, acquired_at_ms)?;
         self.transition_with_payload(
             store,
             item_id,
@@ -1153,7 +1172,7 @@ impl DurableScheduler {
             item.worker_context_pack_ref = worker_context_pack_ref.clone();
             let holder = driver.acquire_holder(&item);
             report.add_worker_id(&holder);
-            let lease = self.assign_lease(item_id, &holder)?;
+            let lease = self.assign_lease(item_id, &holder, current_unix_millis())?;
             if let Some(stored_item) = self.items.get_mut(item_id) {
                 stored_item.worker_context_pack_ref = worker_context_pack_ref.clone();
             }
@@ -1233,6 +1252,7 @@ impl DurableScheduler {
 
             running_batch.push(RunningDispatch {
                 item_id: item_id.clone(),
+                holder: holder.clone(),
                 lease_id: lease.id,
                 batch_id: batch_id.clone(),
                 batch_size,
@@ -1255,24 +1275,86 @@ impl DurableScheduler {
         }
         let outcomes = driver.execute_batch(running_items);
         let mut outcomes_by_item = BTreeMap::new();
+        let mut invalid_outcome_error = None;
         for outcome in outcomes {
             if !expected_item_ids.contains(&outcome.work_item_id) {
-                return Err(SchedulerError::UnknownWorkerOutcome(
+                invalid_outcome_error = Some(SchedulerError::UnknownWorkerOutcome(
                     outcome.work_item_id.clone(),
                 ));
+                break;
             }
             if outcomes_by_item.contains_key(&outcome.work_item_id) {
-                return Err(SchedulerError::DuplicateWorkerOutcome(
+                invalid_outcome_error = Some(SchedulerError::DuplicateWorkerOutcome(
                     outcome.work_item_id.clone(),
                 ));
+                break;
             }
             outcomes_by_item.insert(outcome.work_item_id.clone(), outcome);
         }
 
-        for running in running_batch {
-            let mut outcome = outcomes_by_item
-                .remove(&running.item_id)
-                .ok_or_else(|| SchedulerError::MissingWorkerOutcome(running.item_id.clone()))?;
+        // A malformed batch outcome (unknown/duplicate item id) must not leave
+        // the already-dispatched items dangling in `Running`: fail them
+        // durably so a subsequent dispatch/retry doesn't get stuck waiting on
+        // work that will never report progress, short of an unrelated lease
+        // TTL sweep.
+        if let Some(error) = invalid_outcome_error {
+            for running in &running_batch {
+                let _ = self.transition_with_fenced_payload(
+                    store,
+                    &running.item_id,
+                    WorkState::Failed,
+                    LeaseFence {
+                        holder: &running.holder,
+                        lease_id: &running.lease_id,
+                    },
+                    vec!["scheduler:worker-outcome-invalid".to_string()],
+                    worker_batch_payload(
+                        &running.holder,
+                        Some(&format!(
+                            "driver outcome validation failed: {error}; reason_code=malformed_worker_batch_outcome"
+                        )),
+                        Some(false),
+                        &running.batch_id,
+                        running.batch_size,
+                        running.lane_index,
+                        running.worker_context_pack_ref.as_deref(),
+                    ),
+                );
+            }
+            return Err(error);
+        }
+
+        for (running_index, running) in running_batch.iter().enumerate() {
+            let Some(mut outcome) = outcomes_by_item.remove(&running.item_id) else {
+                let error = SchedulerError::MissingWorkerOutcome(running.item_id.clone());
+                // Fail this item and every not-yet-processed item in the
+                // batch durably, rather than returning with them stranded in
+                // `Running`.
+                for stranded in &running_batch[running_index..] {
+                    let _ = self.transition_with_fenced_payload(
+                        store,
+                        &stranded.item_id,
+                        WorkState::Failed,
+                        LeaseFence {
+                            holder: &stranded.holder,
+                            lease_id: &stranded.lease_id,
+                        },
+                        vec!["scheduler:worker-outcome-invalid".to_string()],
+                        worker_batch_payload(
+                            &stranded.holder,
+                            Some(&format!(
+                                "driver outcome validation failed: {error}; reason_code=malformed_worker_batch_outcome"
+                            )),
+                            Some(false),
+                            &stranded.batch_id,
+                            stranded.batch_size,
+                            stranded.lane_index,
+                            stranded.worker_context_pack_ref.as_deref(),
+                        ),
+                    );
+                }
+                return Err(error);
+            };
             report.attempted += 1;
             report.add_worker_id(&outcome.worker_id);
             let mut outcome_evidence_refs = outcome.evidence_refs.clone();
@@ -1463,8 +1545,12 @@ impl DurableScheduler {
         Ok(())
     }
 
-    fn assign_lease(&mut self, item_id: &str, holder: &str) -> Result<Lease, SchedulerError> {
-        let acquired_at_ms = self.transitions_committed + 1;
+    fn assign_lease(
+        &mut self,
+        item_id: &str,
+        holder: &str,
+        acquired_at_ms: u64,
+    ) -> Result<Lease, SchedulerError> {
         let lease_type = self
             .items
             .get(item_id)
@@ -1477,7 +1563,11 @@ impl DurableScheduler {
                 }
             })?;
         let lease = Lease {
-            id: format!("lease-{}-{item_id}-{acquired_at_ms}", self.run_id),
+            id: format!(
+                "lease-{}-{item_id}-{}",
+                self.run_id,
+                self.transitions_committed + 1
+            ),
             lease_type,
             holder: holder.to_string(),
             acquired_at_ms,
@@ -1491,6 +1581,13 @@ impl DurableScheduler {
         item.lease = Some(lease.clone());
         Ok(lease)
     }
+}
+
+fn current_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn path_scope_is_explicit(scope: &opensks_contracts::PathScope) -> bool {
@@ -1525,11 +1622,17 @@ fn path_scopes_conflict(
 }
 
 fn path_roots_overlap(left: &str, right: &str) -> bool {
+    // A root that fails to normalize is a genuine workspace escape (e.g. a
+    // leading ".." with no preceding component to resolve against). Such a
+    // root cannot be proven disjoint from any other explicit root, so treat
+    // it as maximally conflicting rather than silently ignoring it as "no
+    // overlap" — this errs toward blocking concurrent path-write leases,
+    // matching the allow_external_write short-circuit above.
     let Some(left) = normalize_path_scope_root(left) else {
-        return false;
+        return true;
     };
     let Some(right) = normalize_path_scope_root(right) else {
-        return false;
+        return true;
     };
     left == right
         || right
@@ -1541,15 +1644,25 @@ fn path_roots_overlap(left: &str, right: &str) -> bool {
 }
 
 fn normalize_path_scope_root(root: &str) -> Option<String> {
-    let normalized = root
-        .split('/')
-        .filter(|part| !part.is_empty() && *part != ".")
-        .collect::<Vec<_>>()
-        .join("/");
-    if normalized.is_empty() || normalized.split('/').any(|part| part == "..") {
+    let mut normalized: Vec<&str> = Vec::new();
+    for part in root.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            if normalized.pop().is_none() {
+                // The ".." escapes above the workspace root and cannot be
+                // represented as a workspace-relative root.
+                return None;
+            }
+            continue;
+        }
+        normalized.push(part);
+    }
+    if normalized.is_empty() {
         None
     } else {
-        Some(normalized)
+        Some(normalized.join("/"))
     }
 }
 
@@ -2026,23 +2139,25 @@ pub fn bootstrap_conversation_turn_scheduler(
         evidence_refs.clone(),
     );
     let existing_events = store.replay(input.run_id)?;
+    // Identify already-queued work items by `correlation_id` (a top-level,
+    // never-redacted envelope field always set to the work item id when this
+    // event is appended), not by re-parsing `work_item_id` back out of
+    // `payload`: `EventStore::append_event` redacts non-public payload string
+    // fields that look secret-shaped, and a work item id embedding a long
+    // hex turn/run id can match that heuristic. Comparing against the
+    // (possibly-redacted) payload copy would then never match the freshly
+    // computed, never-redacted `work_item.id`, causing this bootstrap to
+    // re-insert an event whose id already exists and fail on the events
+    // table's unique constraint instead of recognizing reuse.
     let existing_queued_ids: BTreeSet<String> = existing_events
         .iter()
         .filter(|event| event.kind == EventKind::WorkItemQueued)
-        .filter_map(|event| {
-            event
-                .payload
-                .get("work_item_id")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
+        .filter_map(|event| event.correlation_id.clone())
         .collect();
     let existing = existing_events
         .iter()
         .filter(|event| event.kind == EventKind::WorkItemQueued)
-        .filter(|event| {
-            event.payload.get("work_item_id").and_then(Value::as_str) == Some(work_item.id.as_str())
-        })
+        .filter(|event| event.correlation_id.as_deref() == Some(work_item.id.as_str()))
         .max_by_key(|event| event.sequence);
     if let Some(event) = existing {
         let root_sequence = event.sequence;
@@ -2065,6 +2180,7 @@ pub fn bootstrap_conversation_turn_scheduler(
         store.write_snapshot(
             input.run_id,
             latest_sequence,
+            Sensitivity::Internal,
             serde_json::to_value(&snapshot)?,
         )?;
         return Ok(ConversationTurnSchedulerBootstrap {
@@ -2139,6 +2255,7 @@ pub fn bootstrap_conversation_turn_scheduler(
     store.write_snapshot(
         input.run_id,
         latest_sequence,
+        Sensitivity::Internal,
         serde_json::to_value(&snapshot)?,
     )?;
     Ok(ConversationTurnSchedulerBootstrap {
@@ -3242,6 +3359,60 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn worker_dispatch_treats_dot_dot_resolved_path_scopes_as_overlapping() {
+        let run_id = "run-path-scope-dot-dot";
+        let mut plain_item = make_work_item(run_id, "plain", Vec::new());
+        plain_item.path_scope = opensks_contracts::PathScope {
+            workspace_relative_roots: vec!["src".to_string()],
+            allow_external_write: false,
+        };
+        let mut dot_dot_item = make_work_item(run_id, "dot-dot", Vec::new());
+        dot_dot_item.path_scope = opensks_contracts::PathScope {
+            workspace_relative_roots: vec!["src/../src".to_string()],
+            allow_external_write: false,
+        };
+        let mut scheduler = DurableScheduler::new(
+            run_id,
+            vec![plain_item, dot_dot_item],
+            SchedulerConfig {
+                requested_workers: 2,
+                project_max_workers: 2,
+                provider_max_workers: 2,
+                per_provider_max_workers: 2,
+                per_model_max_workers: 2,
+                worktree_max_workers: 2,
+                verification_max_workers: 1,
+                visible_lane_cap: 2,
+            },
+        );
+        let mut store = EventStore::open_memory().expect("event store");
+        let mut worker = ParallelProbeWorker::new();
+
+        let first_report = scheduler
+            .dispatch_ready_batch(&mut store, &mut worker)
+            .expect("dispatch first path-scoped batch");
+
+        // "src" and "src/../src" resolve to the same directory, so they must
+        // conflict and only one of them may be admitted into the first batch.
+        assert_eq!(first_report.completed, 1);
+        let states = scheduler
+            .work_items()
+            .into_iter()
+            .map(|item| (item.id, item.state))
+            .collect::<BTreeMap<_, _>>();
+        let completed_count = states
+            .values()
+            .filter(|state| **state == WorkState::Completed)
+            .count();
+        assert_eq!(completed_count, 1);
+        assert_eq!(
+            states.values().filter(|state| **state == WorkState::Ready).count(),
+            1,
+            "the overlapping scope must be deferred rather than admitted concurrently"
+        );
+    }
+
     #[derive(Debug, Clone)]
     struct ParallelProbeWorker {
         active: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -3757,10 +3928,10 @@ mod tests {
         let mut scheduler = DurableScheduler::new(run_id, items, SchedulerConfig::default());
         let mut store = EventStore::open_memory().expect("event store");
         scheduler
-            .lease_ready_item(&mut store, "fresh", "lease-worker")
+            .lease_ready_item(&mut store, "fresh", "lease-worker", 1_700_000_000_000)
             .expect("lease fresh");
         scheduler
-            .lease_ready_item(&mut store, "stale", "lease-worker")
+            .lease_ready_item(&mut store, "stale", "lease-worker", 1_700_000_000_000)
             .expect("lease stale");
         let fresh_lease = scheduler.active_lease("fresh").expect("fresh lease");
         let heartbeat = scheduler
@@ -3769,12 +3940,12 @@ mod tests {
                 "fresh",
                 "lease-worker",
                 &fresh_lease.id,
-                20_000,
+                1_700_000_020_000,
             )
             .expect("heartbeat fresh");
-        assert_eq!(heartbeat.expires_at_ms, 50_000);
+        assert_eq!(heartbeat.expires_at_ms, 1_700_000_050_000);
         let report = scheduler
-            .expire_stale_leases(&mut store, 45_000)
+            .expire_stale_leases(&mut store, 1_700_000_045_000)
             .expect("recover stale leases");
         assert_eq!(report.active_count, 1);
         assert_eq!(report.expired_count, 1);
@@ -3786,7 +3957,7 @@ mod tests {
         assert_eq!(fresh.state, WorkState::Leased);
         assert_eq!(
             fresh.lease.as_ref().unwrap().last_heartbeat_at_ms,
-            Some(20_000)
+            Some(1_700_000_020_000)
         );
         assert_eq!(stale.state, WorkState::Ready);
         assert!(stale.lease.is_none());
@@ -3855,7 +4026,7 @@ mod tests {
 
         // Complete one item, then a cancel arrives in the durable mailbox.
         scheduler
-            .lease_ready_item(&mut store, "done", "worker")
+            .lease_ready_item(&mut store, "done", "worker", 1_700_000_000_000)
             .expect("lease done");
         scheduler
             .transition(&mut store, "done", WorkState::Running, Vec::new())
@@ -4000,7 +4171,7 @@ mod tests {
         let mut scheduler = DurableScheduler::new(run_id, items, SchedulerConfig::default());
         let mut store = EventStore::open_memory().expect("event store");
         scheduler
-            .lease_ready_item(&mut store, "finished", "worker")
+            .lease_ready_item(&mut store, "finished", "worker", 1_700_000_000_000)
             .expect("lease finished");
         scheduler
             .transition(&mut store, "finished", WorkState::Running, Vec::new())
@@ -4084,7 +4255,7 @@ mod tests {
         let mut scheduler = DurableScheduler::new(run_id, items, SchedulerConfig::default());
         let mut store = EventStore::open_memory().expect("event store");
         scheduler
-            .lease_ready_item(&mut store, "item", "holder-a")
+            .lease_ready_item(&mut store, "item", "holder-a", 1_700_000_000_000)
             .expect("lease item");
         let error = scheduler
             .heartbeat_lease(&mut store, "item", "holder-b", 1_000)
@@ -4099,7 +4270,7 @@ mod tests {
         let mut scheduler = DurableScheduler::new(run_id, items, SchedulerConfig::default());
         let mut store = EventStore::open_memory().expect("event store");
         scheduler
-            .lease_ready_item(&mut store, "item", "holder-a")
+            .lease_ready_item(&mut store, "item", "holder-a", 1_700_000_000_000)
             .expect("lease item");
         let active = scheduler.active_lease("item").expect("active lease");
         let error = scheduler
@@ -4128,7 +4299,7 @@ mod tests {
         let mut scheduler = DurableScheduler::new(run_id, items, SchedulerConfig::default());
         let mut store = EventStore::open_memory().expect("event store");
         scheduler
-            .lease_ready_item(&mut store, "item", "holder-a")
+            .lease_ready_item(&mut store, "item", "holder-a", 1_700_000_000_000)
             .expect("lease item");
         let active = scheduler.active_lease("item").expect("active lease");
         let error = scheduler
@@ -4169,7 +4340,7 @@ mod tests {
         let mut scheduler = DurableScheduler::new(run_id, items, SchedulerConfig::default());
         let mut store = EventStore::open_memory().expect("event store");
         scheduler
-            .lease_ready_item(&mut store, "item", "worker")
+            .lease_ready_item(&mut store, "item", "worker", 1_700_000_000_000)
             .expect("first lease");
         let stale = scheduler.active_lease("item").expect("stale lease");
 
@@ -4183,7 +4354,7 @@ mod tests {
             )
             .expect("expire stale lease");
         scheduler
-            .lease_ready_item(&mut store, "item", "worker")
+            .lease_ready_item(&mut store, "item", "worker", 1_700_000_030_001)
             .expect("second lease");
         let current = scheduler.active_lease("item").expect("current lease");
         assert_ne!(stale.id, current.id);

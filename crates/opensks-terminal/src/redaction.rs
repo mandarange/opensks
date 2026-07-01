@@ -41,8 +41,15 @@ fn redact_authorization_bearer(value: &str) -> String {
     let mut result = String::with_capacity(value.len());
     for line in value.lines() {
         if let Some(index) = line.to_ascii_lowercase().find("authorization: bearer ") {
+            let prefix_len = "authorization: bearer ".len();
+            let token_start = index + prefix_len;
+            let token_end = line[token_start..]
+                .find(|ch: char| ch.is_whitespace() || ch == '"' || ch == '\'')
+                .map(|offset| token_start + offset)
+                .unwrap_or(line.len());
             result.push_str(&line[..index]);
             result.push_str("Authorization: Bearer <redacted>");
+            result.push_str(&line[token_end..]);
         } else {
             result.push_str(line);
         }
@@ -137,5 +144,15 @@ mod tests {
     #[test]
     fn digests_are_sha256_labeled() {
         assert!(digest_bytes(b"hello").starts_with("sha256:"));
+    }
+
+    #[test]
+    fn redacts_bearer_token_without_dropping_line_tail() {
+        let workspace = Path::new("/tmp/workspace");
+        let command =
+            "curl -H \"Authorization: Bearer abc123\" https://api.example.com/endpoint";
+        let redacted = redact_command(command, workspace);
+        assert!(redacted.contains("https://api.example.com/endpoint"));
+        assert!(!redacted.contains("abc123"));
     }
 }

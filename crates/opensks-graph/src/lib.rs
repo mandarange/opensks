@@ -143,6 +143,17 @@ pub fn validate_graph(graph: &PipelineGraph) -> Vec<CompileDiagnostic> {
                 "side-effect nodes require an explicit approval policy",
             ));
         }
+        if node.enabled
+            && is_external_side_effect_node(&node.kind)
+            && !graph.policies.allow_external_side_effects
+        {
+            diagnostics.push(error(
+                Some(node.id.clone()),
+                None,
+                "external_side_effects_disallowed",
+                "graph policy disallows external side effects but an enabled side-effect node is present",
+            ));
+        }
     }
 
     for edge in &graph.edges {
@@ -216,6 +227,31 @@ pub fn validate_graph(graph: &PipelineGraph) -> Vec<CompileDiagnostic> {
                     None,
                     "terminal_path_without_final_seal",
                     "terminal graph paths must end in FinalSeal, Cancelled, or Blocked",
+                ));
+            }
+        }
+    }
+
+    if graph.policies.max_parallelism > MAX_OBJECTIVE_PLAN_PARALLELISM {
+        diagnostics.push(error(
+            None,
+            None,
+            "max_parallelism_out_of_range",
+            "graph policy max_parallelism exceeds the supported bound",
+        ));
+    }
+    for node in graph.nodes.values().filter(|node| node.enabled) {
+        if let Some(role_count) = node
+            .config
+            .get("role_count")
+            .and_then(serde_json::Value::as_u64)
+        {
+            if role_count > u64::from(MAX_OBJECTIVE_PLAN_PARALLELISM) {
+                diagnostics.push(error(
+                    Some(node.id.clone()),
+                    None,
+                    "role_count_out_of_range",
+                    "node role_count exceeds the supported bound",
                 ));
             }
         }
@@ -609,8 +645,11 @@ fn planner_shard_policy(graph: &PipelineGraph, graph_hash: &str) -> Option<Plann
     if !graph_is_objective_planner(graph) {
         return None;
     }
-    let role_count = objective_graph_role_count(graph).max(1);
-    let max_parallelism = graph.policies.max_parallelism.max(1);
+    let role_count = objective_graph_role_count(graph).clamp(1, MAX_OBJECTIVE_PLAN_PARALLELISM);
+    let max_parallelism = graph
+        .policies
+        .max_parallelism
+        .clamp(1, MAX_OBJECTIVE_PLAN_PARALLELISM);
     let implementation_shard_count = role_count.min(max_parallelism).max(1);
     let verifier_shard_count = if graph
         .nodes
@@ -665,6 +704,7 @@ fn objective_graph_role_count(graph: &PipelineGraph) -> u32 {
                 .get("role_count")
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|value| u32::try_from(value).ok())
+                .map(|count| count.clamp(1, MAX_OBJECTIVE_PLAN_PARALLELISM))
         })
         .unwrap_or_else(|| {
             graph
@@ -882,6 +922,7 @@ fn compile_work_templates(
     graph: &PipelineGraph,
     shard_policy: Option<&PlannerShardPolicy>,
 ) -> Vec<WorkTemplate> {
+    let incoming = incoming_enabled_dependencies_index(graph);
     graph
         .nodes
         .values()
@@ -890,7 +931,7 @@ fn compile_work_templates(
             id: format!("work-template-{}", node.id),
             node_id: node.id.clone(),
             kind: work_kind_for_node(&node.kind),
-            dependencies: incoming_enabled_dependencies(graph, &node.id),
+            dependencies: incoming.get(&node.id).cloned().unwrap_or_default(),
             capability_requirements: capabilities_for_node(&node.kind),
             requirement_ids: requirement_ids_for_node(node),
             shard_policy_id: shard_policy.map(|policy| policy.id.clone()),
@@ -905,6 +946,7 @@ fn compile_work_templates(
 }
 
 fn dependency_index(graph: &PipelineGraph) -> DependencyIndex {
+    let incoming = incoming_enabled_dependencies_index(graph);
     let prerequisites = graph
         .nodes
         .values()
@@ -912,33 +954,52 @@ fn dependency_index(graph: &PipelineGraph) -> DependencyIndex {
         .map(|node| {
             (
                 node.id.clone(),
-                incoming_enabled_dependencies(graph, &node.id),
+                incoming.get(&node.id).cloned().unwrap_or_default(),
             )
         })
         .collect();
     DependencyIndex { prerequisites }
 }
 
-fn incoming_enabled_dependencies(graph: &PipelineGraph, node_id: &str) -> Vec<String> {
-    graph
-        .edges
-        .iter()
-        .filter(|edge| edge.to.node_id == node_id)
-        .filter(|edge| {
-            graph
-                .nodes
-                .get(&edge.from.node_id)
-                .is_some_and(|node| node.enabled)
-        })
-        .map(|edge| edge.from.node_id.clone())
-        .collect::<BTreeSet<_>>()
+/// Every enabled node's enabled predecessors, precomputed in ONE O(nodes +
+/// edges) pass. Callers that need this per-node (e.g. building a work
+/// template for every node) must build this map once and look nodes up in
+/// it — calling a per-node full-edge-scan in a loop over all nodes is
+/// O(nodes * edges), which hangs on a long chain (see `cycle_diagnostics`).
+fn incoming_enabled_dependencies_index(graph: &PipelineGraph) -> BTreeMap<String, Vec<String>> {
+    let mut incoming: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for edge in &graph.edges {
+        if !graph
+            .nodes
+            .get(&edge.from.node_id)
+            .is_some_and(|node| node.enabled)
+        {
+            continue;
+        }
+        if !graph
+            .nodes
+            .get(&edge.to.node_id)
+            .is_some_and(|node| node.enabled)
+        {
+            continue;
+        }
+        incoming
+            .entry(edge.to.node_id.clone())
+            .or_default()
+            .insert(edge.from.node_id.clone());
+    }
+    incoming
         .into_iter()
+        .map(|(node_id, deps)| (node_id, deps.into_iter().collect()))
         .collect()
 }
 
 fn resource_plan(graph: &PipelineGraph) -> ResourcePlan {
     ResourcePlan {
-        max_parallelism: graph.policies.max_parallelism.max(1),
+        max_parallelism: graph
+            .policies
+            .max_parallelism
+            .clamp(1, MAX_OBJECTIVE_PLAN_PARALLELISM),
         requires_git_worktree: graph
             .nodes
             .values()
@@ -1492,10 +1553,15 @@ fn outgoing_enabled_edges(graph: &PipelineGraph) -> BTreeMap<String, Vec<&EdgeSp
 fn cycle_diagnostics(graph: &PipelineGraph) -> Vec<CompileDiagnostic> {
     let mut diagnostics = Vec::new();
     let mut state: BTreeMap<String, VisitState> = BTreeMap::new();
-    let mut stack = Vec::new();
+    // Precomputed ONCE so `visit_for_cycle` never re-scans the full edge list
+    // per node: a linear scan per node made this O(nodes * edges), which was
+    // fine for small graphs but effectively hung on a long chain (e.g. 50k
+    // nodes = 2.5B comparisons) even after the DFS itself was made iterative
+    // to avoid a native stack overflow.
+    let outgoing = outgoing_enabled_edges(graph);
     for node in graph.nodes.values().filter(|node| node.enabled) {
         if !state.contains_key(&node.id) {
-            visit_for_cycle(graph, &node.id, &mut state, &mut stack, &mut diagnostics);
+            visit_for_cycle(&outgoing, &node.id, &mut state, &mut diagnostics);
         }
     }
     diagnostics
@@ -1508,50 +1574,73 @@ enum VisitState {
 }
 
 fn visit_for_cycle(
-    graph: &PipelineGraph,
-    node_id: &str,
+    outgoing: &BTreeMap<String, Vec<&EdgeSpec>>,
+    start_id: &str,
     state: &mut BTreeMap<String, VisitState>,
-    stack: &mut Vec<String>,
     diagnostics: &mut Vec<CompileDiagnostic>,
 ) {
-    state.insert(node_id.to_string(), VisitState::Visiting);
-    stack.push(node_id.to_string());
-    for edge in graph
-        .edges
-        .iter()
-        .filter(|edge| edge.from.node_id == node_id)
-    {
-        let Some(to) = graph.nodes.get(&edge.to.node_id) else {
-            continue;
-        };
-        if !to.enabled {
-            continue;
-        }
-        match state.get(&to.id).copied() {
-            Some(VisitState::Done) => {}
-            Some(VisitState::Visiting) => {
-                let cycle = stack
-                    .iter()
-                    .skip_while(|id| *id != &to.id)
-                    .cloned()
-                    .chain(std::iter::once(to.id.clone()))
-                    .collect::<Vec<_>>()
-                    .join(" -> ");
-                diagnostics.push(error(
-                    Some(to.id.clone()),
-                    Some(edge.id.clone()),
-                    "cycle_detected",
-                    &format!("graph must be acyclic; cycle: {cycle}"),
-                ));
+    struct Frame<'a> {
+        node_id: String,
+        edges: std::vec::IntoIter<&'a EdgeSpec>,
+    }
+
+    let mut path: Vec<String> = Vec::new();
+    let mut work: Vec<Frame> = Vec::new();
+
+    fn edges_for<'a>(outgoing: &BTreeMap<String, Vec<&'a EdgeSpec>>, id: &str) -> std::vec::IntoIter<&'a EdgeSpec> {
+        outgoing.get(id).cloned().unwrap_or_default().into_iter()
+    }
+
+    state.insert(start_id.to_string(), VisitState::Visiting);
+    path.push(start_id.to_string());
+    work.push(Frame {
+        node_id: start_id.to_string(),
+        edges: edges_for(outgoing, start_id),
+    });
+
+    while let Some(frame) = work.last_mut() {
+        match frame.edges.next() {
+            Some(edge) => {
+                match state.get(edge.to.node_id.as_str()).copied() {
+                    Some(VisitState::Done) => {}
+                    Some(VisitState::Visiting) => {
+                        let cycle = path
+                            .iter()
+                            .skip_while(|id| *id != &edge.to.node_id)
+                            .cloned()
+                            .chain(std::iter::once(edge.to.node_id.clone()))
+                            .collect::<Vec<_>>()
+                            .join(" -> ");
+                        diagnostics.push(error(
+                            Some(edge.to.node_id.clone()),
+                            Some(edge.id.clone()),
+                            "cycle_detected",
+                            &format!("graph must be acyclic; cycle: {cycle}"),
+                        ));
+                    }
+                    None => {
+                        state.insert(edge.to.node_id.clone(), VisitState::Visiting);
+                        path.push(edge.to.node_id.clone());
+                        work.push(Frame {
+                            node_id: edge.to.node_id.clone(),
+                            edges: edges_for(outgoing, &edge.to.node_id),
+                        });
+                    }
+                }
             }
-            None => visit_for_cycle(graph, &to.id, state, stack, diagnostics),
+            None => {
+                let finished = work.pop().expect("frame present in loop condition");
+                path.pop();
+                state.insert(finished.node_id, VisitState::Done);
+            }
         }
     }
-    let _ = stack.pop();
-    state.insert(node_id.to_string(), VisitState::Done);
 }
 
 fn unreachable_enabled_node_diagnostics(graph: &PipelineGraph) -> Vec<CompileDiagnostic> {
+    // Precomputed ONCE (see `cycle_diagnostics`): a linear scan of every edge
+    // per visited node made this O(nodes * edges), which hung on a long chain.
+    let outgoing = outgoing_enabled_edges(graph);
     let mut reachable = BTreeSet::new();
     let mut stack = graph
         .entry_nodes
@@ -1563,18 +1652,8 @@ fn unreachable_enabled_node_diagnostics(graph: &PipelineGraph) -> Vec<CompileDia
         if !reachable.insert(node_id.clone()) {
             continue;
         }
-        for edge in graph
-            .edges
-            .iter()
-            .filter(|edge| edge.from.node_id == node_id)
-        {
-            if graph
-                .nodes
-                .get(&edge.to.node_id)
-                .is_some_and(|node| node.enabled)
-            {
-                stack.push(edge.to.node_id.clone());
-            }
+        for edge in outgoing.get(&node_id).into_iter().flatten() {
+            stack.push(edge.to.node_id.clone());
         }
     }
     graph
@@ -1674,6 +1753,22 @@ fn is_side_effect_node(kind: &NodeKind) -> bool {
         NodeKind::GitPush
             | NodeKind::PullRequest
             | NodeKind::ApplyPatch
+            | NodeKind::RunCommand
+            | NodeKind::BrowserAction
+            | NodeKind::AppAction
+            | NodeKind::ComputerAction
+    )
+}
+
+/// Side-effect nodes that reach outside the isolated workspace/sandbox.
+/// `ApplyPatch` is deliberately excluded: it is an in-workspace integration
+/// step already covered by `side_effect_requires_approval`, not an external
+/// side effect gated by `GraphPolicies.allow_external_side_effects`.
+fn is_external_side_effect_node(kind: &NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::GitPush
+            | NodeKind::PullRequest
             | NodeKind::RunCommand
             | NodeKind::BrowserAction
             | NodeKind::AppAction
@@ -1817,6 +1912,34 @@ mod tests {
     }
 
     #[test]
+    fn side_effect_node_violates_disallowed_external_side_effects_policy() {
+        let mut graph = single_model_safe_template();
+        assert!(!graph.policies.allow_external_side_effects);
+        graph.nodes.insert(
+            "push".to_string(),
+            node("push", NodeKind::GitPush, "Git push", 320.0, 120.0),
+        );
+        if let Some(push) = graph.nodes.get_mut("push") {
+            push.approval = ApprovalPolicy::required("git_push");
+        }
+        graph
+            .edges
+            .push(control_edge("edge-seal-push", "seal", "out", "push", "in"));
+        let plan = compile_graph(&graph);
+        assert!(
+            plan.diagnostics
+                .iter()
+                .all(|item| item.reason_code != "side_effect_requires_approval")
+        );
+        assert!(
+            plan.diagnostics
+                .iter()
+                .any(|item| item.reason_code == "external_side_effects_disallowed"
+                    && item.node_id.as_deref() == Some("push"))
+        );
+    }
+
+    #[test]
     fn compiler_rejects_cycles_duplicate_edges_and_bad_entries() {
         let mut graph = single_model_safe_template();
         graph.entry_nodes = vec!["missing".to_string()];
@@ -1884,6 +2007,49 @@ mod tests {
                 .groups
                 .iter()
                 .any(|group| group.group_kind == "graph_integrity")
+        );
+    }
+
+    #[test]
+    fn cycle_detection_does_not_overflow_stack_on_deep_linear_chain() {
+        const CHAIN_LEN: usize = 50_000;
+        let mut graph = single_model_safe_template();
+        graph.entry_nodes = vec!["goal".to_string()];
+        graph.nodes.clear();
+        graph.nodes.insert(
+            "goal".to_string(),
+            node("goal", NodeKind::GoalInput, "Goal input", 0.0, 0.0),
+        );
+        let mut edges = Vec::with_capacity(CHAIN_LEN + 1);
+        let mut previous = "goal".to_string();
+        for index in 0..CHAIN_LEN {
+            let current = format!("n{index}");
+            graph.nodes.insert(
+                current.clone(),
+                node(&current, NodeKind::Delegate, "Delegate", 0.0, 0.0),
+            );
+            edges.push(control_edge(
+                &format!("edge-{index}"),
+                &previous,
+                "out",
+                &current,
+                "in",
+            ));
+            previous = current;
+        }
+        graph.nodes.insert(
+            "seal".to_string(),
+            node("seal", NodeKind::FinalSeal, "Final seal", 0.0, 0.0),
+        );
+        edges.push(control_edge("edge-final-seal", &previous, "out", "seal", "in"));
+        graph.edges = edges;
+
+        // Must return (not stack-overflow/abort) even for a deeply chained graph.
+        let plan = compile_graph(&graph);
+        assert!(
+            plan.diagnostics
+                .iter()
+                .all(|item| item.reason_code != "cycle_detected")
         );
     }
 
@@ -2115,6 +2281,44 @@ mod tests {
             shard_policy.implementation_shard_count,
             MAX_OBJECTIVE_PLAN_PARALLELISM
         );
+    }
+
+    #[test]
+    fn crafted_graph_with_out_of_range_parallelism_and_role_count_is_bounded_and_flagged() {
+        let mut graph = single_model_safe_template();
+        graph.id = "objective-plan-crafted".to_string();
+        graph.policies.max_parallelism = u32::MAX;
+        graph
+            .metadata
+            .evidence_refs
+            .push("graph:objective-planner".to_string());
+        graph.nodes.get_mut("delegate").expect("delegate").config = serde_json::json!({
+            "role_count": u32::MAX,
+        });
+
+        let plan = compile_graph(&graph);
+
+        assert!(
+            plan.diagnostics
+                .iter()
+                .any(|item| item.reason_code == "max_parallelism_out_of_range")
+        );
+        assert!(
+            plan.diagnostics
+                .iter()
+                .any(|item| item.reason_code == "role_count_out_of_range"
+                    && item.node_id.as_deref() == Some("delegate"))
+        );
+
+        assert_eq!(
+            plan.resource_plan.max_parallelism,
+            MAX_OBJECTIVE_PLAN_PARALLELISM
+        );
+        let shard_policy = plan.shard_policy.expect("planner shard policy");
+        assert!(shard_policy.implementation_shard_count <= MAX_OBJECTIVE_PLAN_PARALLELISM);
+        assert!(shard_policy.verifier_shard_count <= MAX_OBJECTIVE_PLAN_PARALLELISM);
+        assert!(shard_policy.max_parallelism <= MAX_OBJECTIVE_PLAN_PARALLELISM);
+        assert!(shard_policy.role_count <= MAX_OBJECTIVE_PLAN_PARALLELISM);
     }
 
     #[test]

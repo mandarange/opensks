@@ -3,6 +3,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const OPEN_SKSDIR: &str = ".opensks";
+const MAX_EVIDENCE_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB per JSON/JSONL artifact
+
+fn read_bounded_evidence_artifact(path: &Path) -> Result<String, std::io::Error> {
+    let metadata = fs::metadata(path)?;
+    if metadata.len() > MAX_EVIDENCE_ARTIFACT_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "evidence artifact exceeds size limit",
+        ));
+    }
+    fs::read_to_string(path)
+}
 
 #[derive(Debug, Clone)]
 pub struct NativeCollaborationEvidence {
@@ -99,10 +111,10 @@ pub fn discover_native_collaboration_evidence(cwd: &Path) -> NativeCollaboration
         let parallel_runtime_path = agents_dir.join("parallel-runtime-proof.json");
         let native_cli_proof_path = agents_dir.join("native-cli-session-proof.json");
         let codex_app_proof_path = agents_dir.join("codex-app-agent-session-proof.json");
-        let Ok(sessions) = fs::read_to_string(&sessions_path) else {
+        let Ok(sessions) = read_bounded_evidence_artifact(&sessions_path) else {
             continue;
         };
-        let Ok(consensus) = fs::read_to_string(&consensus_path) else {
+        let Ok(consensus) = read_bounded_evidence_artifact(&consensus_path) else {
             continue;
         };
         let Some((
@@ -142,8 +154,8 @@ pub fn discover_native_collaboration_evidence(cwd: &Path) -> NativeCollaboration
             native_cli_session_proof_hash,
             selected_native_session_proof_ref,
         ) = if let (Ok(agent_proof), Ok(parallel_runtime)) = (
-            fs::read_to_string(&agent_proof_path),
-            fs::read_to_string(&parallel_runtime_path),
+            read_bounded_evidence_artifact(&agent_proof_path),
+            read_bounded_evidence_artifact(&parallel_runtime_path),
         ) {
             let agent_proof_evidence_hash = stable_content_hash(&agent_proof);
             let parallel_runtime_proof_hash = stable_content_hash(&parallel_runtime);
@@ -157,7 +169,7 @@ pub fn discover_native_collaboration_evidence(cwd: &Path) -> NativeCollaboration
             let mut verified_hash = String::new();
             let mut verified_ref = String::new();
             for (proof_path, proof_ref) in proof_candidates {
-                let Ok(session_proof) = fs::read_to_string(proof_path) else {
+                let Ok(session_proof) = read_bounded_evidence_artifact(proof_path) else {
                     continue;
                 };
                 let session_proof_hash = stable_content_hash(&session_proof);
@@ -335,7 +347,7 @@ fn discover_codex_app_subagent_event_log(
             .and_then(|value| value.to_str())
             .map(str::to_string)?;
         let evidence_path = mission_dir.join("subagent-evidence.jsonl");
-        let Ok(evidence_log) = fs::read_to_string(&evidence_path) else {
+        let Ok(evidence_log) = read_bounded_evidence_artifact(&evidence_path) else {
             continue;
         };
         let Some((session_count, completed_session_count)) =
@@ -385,7 +397,8 @@ fn codex_app_subagent_event_log_for_mission(
     mission_dir: &Path,
     mission_id: &str,
 ) -> Option<(String, String)> {
-    let evidence_log = fs::read_to_string(mission_dir.join("subagent-evidence.jsonl")).ok()?;
+    let evidence_log =
+        read_bounded_evidence_artifact(&mission_dir.join("subagent-evidence.jsonl")).ok()?;
     codex_app_subagent_event_log_summary(&evidence_log)?;
     Some((
         format!(".sneakoscope/missions/{mission_id}/subagent-evidence.jsonl"),
@@ -398,7 +411,8 @@ fn codex_app_subagent_event_log_counts_match(
     min_session_count: usize,
     min_completed_session_count: usize,
 ) -> bool {
-    let Ok(evidence_log) = fs::read_to_string(mission_dir.join("subagent-evidence.jsonl")) else {
+    let Ok(evidence_log) = read_bounded_evidence_artifact(&mission_dir.join("subagent-evidence.jsonl"))
+    else {
         return false;
     };
     codex_app_subagent_event_log_source_counts_match(
@@ -1299,26 +1313,35 @@ pub fn render_native_proof_diagnostics(
 
 pub fn beta006_native_collaboration_gate_passed(cwd: &Path) -> bool {
     let bench_dir = cwd.join(OPEN_SKSDIR).join("bench");
-    let Ok(roster) = fs::read_to_string(bench_dir.join("multi-llm-roster.json")) else {
+    let Ok(roster) = read_bounded_evidence_artifact(&bench_dir.join("multi-llm-roster.json")) else {
         return false;
     };
-    let Ok(role_assignments) = fs::read_to_string(bench_dir.join("role-assignments.json")) else {
-        return false;
-    };
-    let Ok(disagreement) = fs::read_to_string(bench_dir.join("disagreement-report.json")) else {
-        return false;
-    };
-    let Ok(quorum) = fs::read_to_string(bench_dir.join("quorum-report.json")) else {
-        return false;
-    };
-    let Ok(preflight) = fs::read_to_string(bench_dir.join("collaboration-preflight.json")) else {
-        return false;
-    };
-    let Ok(execution) = fs::read_to_string(bench_dir.join("native-collaboration-execution.json"))
+    let Ok(role_assignments) =
+        read_bounded_evidence_artifact(&bench_dir.join("role-assignments.json"))
     else {
         return false;
     };
-    let Ok(events) = fs::read_to_string(bench_dir.join("native-collaboration-events.jsonl")) else {
+    let Ok(disagreement) =
+        read_bounded_evidence_artifact(&bench_dir.join("disagreement-report.json"))
+    else {
+        return false;
+    };
+    let Ok(quorum) = read_bounded_evidence_artifact(&bench_dir.join("quorum-report.json")) else {
+        return false;
+    };
+    let Ok(preflight) =
+        read_bounded_evidence_artifact(&bench_dir.join("collaboration-preflight.json"))
+    else {
+        return false;
+    };
+    let Ok(execution) =
+        read_bounded_evidence_artifact(&bench_dir.join("native-collaboration-execution.json"))
+    else {
+        return false;
+    };
+    let Ok(events) =
+        read_bounded_evidence_artifact(&bench_dir.join("native-collaboration-events.jsonl"))
+    else {
         return false;
     };
 
@@ -1610,7 +1633,7 @@ fn read_native_collaboration_source(
     {
         return None;
     }
-    let contents = fs::read_to_string(cwd.join(source_ref)).ok()?;
+    let contents = read_bounded_evidence_artifact(&cwd.join(source_ref)).ok()?;
     if stable_content_hash(&contents) == expected_hash {
         Some(contents)
     } else {
@@ -1972,8 +1995,15 @@ fn json_value_end(input: &str, start: usize) -> Option<usize> {
     }
     for (offset, ch) in input[start..].char_indices() {
         if ch == ',' || ch == '}' || ch == ']' || ch.is_whitespace() {
+            if offset == 0 {
+                // Malformed: a value cannot start with a delimiter/whitespace character.
+                return None;
+            }
             return Some(start + offset);
         }
+    }
+    if start >= input.len() {
+        return None;
     }
     Some(input.len())
 }
@@ -2416,5 +2446,20 @@ mod tests {
         );
 
         assert_eq!(codex_app_subagent_event_log_summary(log), Some((2, 2)));
+    }
+
+    #[test]
+    fn json_array_value_count_returns_promptly_on_malformed_delimiter_entries() {
+        // Regression test: these malformed inputs previously caused json_value_end to
+        // return the same index it was given, making json_array_value_count spin
+        // forever without progress. It must now return 0 promptly instead of hanging.
+        assert_eq!(json_array_value_count("[}]"), 0);
+        assert_eq!(json_array_value_count("[,]"), 0);
+    }
+
+    #[test]
+    fn json_array_value_count_still_counts_well_formed_arrays() {
+        assert_eq!(json_array_value_count("[1, 2, 3]"), 3);
+        assert_eq!(json_array_value_count(r#"["a", "b"]"#), 2);
     }
 }

@@ -868,8 +868,16 @@ fn run_mcp_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksErro
             let request = if args.len() > 2 {
                 args[2..].join(" ")
             } else {
+                const MAX_MCP_SERVE_STDIN_BYTES: u64 = 10 * 1024 * 1024;
                 let mut input = String::new();
-                io::stdin().read_to_string(&mut input)?;
+                io::stdin()
+                    .take(MAX_MCP_SERVE_STDIN_BYTES + 1)
+                    .read_to_string(&mut input)?;
+                if input.len() as u64 > MAX_MCP_SERVE_STDIN_BYTES {
+                    return Err(OpenSksError::Invalid(format!(
+                        "mcp serve --once: stdin request exceeds {MAX_MCP_SERVE_STDIN_BYTES} byte limit"
+                    )));
+                }
                 input
             };
             let response = handle_mcp_json_rpc_once(cwd, &request)?;
@@ -1138,7 +1146,7 @@ fn run_voxel_command(args: &[String], cwd: &Path) -> Result<CliOutput, OpenSksEr
         matches.len(),
         matches.join(",")
     );
-    let path = voxel_dir.join(format!("query-{}.json", stamp.compact_id()));
+    let path = voxel_dir.join("voxel-query-report.json");
     write_text_atomic(&path, &report)?;
     Ok(CliOutput {
         stdout: format!(
@@ -1660,10 +1668,11 @@ fn run_provider_mock_e2e(
     dir: &Path,
     stamp: &ClockStamp,
 ) -> Result<CliOutput, OpenSksError> {
-    let scratch = cwd
-        .join(OPEN_SKSDIR)
-        .join("runtime")
-        .join("provider-mock-e2e-scratch");
+    let scratch = cwd.join(OPEN_SKSDIR).join("runtime").join(format!(
+        "provider-mock-e2e-scratch-{}-{}",
+        stamp.compact_id(),
+        process::id()
+    ));
     match fs::remove_dir_all(&scratch) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -4834,23 +4843,23 @@ fn render_computer_browser_loop_events(
             json_string(&runtime_dir.display().to_string())
         ),
         format!(
-            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"isolated_browser_open_recorded\",\"runtime_ref\":\"isolated-browser-runtime/index.html\",\"executed\":true}}",
+            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"isolated_browser_open_recorded\",\"runtime_ref\":\"isolated-browser-runtime/index.html\",\"executed\":false}}",
             json_string(&session.id)
         ),
         format!(
-            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"isolated_browser_click_recorded\",\"element_id\":{},\"final_text\":{},\"executed\":true}}",
+            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"isolated_browser_click_recorded\",\"element_id\":{},\"final_text\":{},\"executed\":false}}",
             json_string(&session.id),
             json_string(COMPUTER_ISOLATED_LOOP_BUTTON_ID),
             json_string(COMPUTER_ISOLATED_LOOP_FINAL_TEXT)
         ),
         format!(
-            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"isolated_browser_type_recorded\",\"element_id\":{},\"typed_text\":{},\"executed\":true}}",
+            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"isolated_browser_type_recorded\",\"element_id\":{},\"typed_text\":{},\"executed\":false}}",
             json_string(&session.id),
             json_string(COMPUTER_ISOLATED_LOOP_INPUT_ID),
             json_string(COMPUTER_ISOLATED_LOOP_FINAL_TEXT)
         ),
         format!(
-            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"isolated_browser_final_state_recorded\",\"status_element_id\":{},\"final_text\":{},\"executed\":true}}",
+            "{{\"schema\":\"opensks.computer-browser-loop-event.v1\",\"session_id\":{},\"event\":\"isolated_browser_final_state_recorded\",\"status_element_id\":{},\"final_text\":{},\"executed\":false}}",
             json_string(&session.id),
             json_string(COMPUTER_ISOLATED_LOOP_STATUS_ID),
             json_string(COMPUTER_ISOLATED_LOOP_FINAL_TEXT)
@@ -7743,6 +7752,11 @@ fn render_design_qa_report(
             "  \"screenshot_diff_mode\": {},\n",
             "  \"screenshot_baseline_available\": {},\n",
             "  \"live_browser_capture_executed\": false,\n",
+            "  \"chrome_extension_evidence\": false,\n",
+            "  \"image_generation_review_executed\": false,\n",
+            "  \"gpt_image_review_executed\": false,\n",
+            "  \"product_design_visual_comparison_executed\": false,\n",
+            "  \"external_design_service_executed\": false,\n",
             "  \"surface_count\": {},\n",
             "  \"finding_count\": {},\n",
             "  \"warning_count\": {},\n",
@@ -7848,8 +7862,11 @@ fn render_design_visual_diff_report(
             "  \"screenshot_diff_mode\": {},\n",
             "  \"screenshot_diff_report_ref\": \"design-screenshot-diff-report.json\",\n",
             "  \"live_browser_capture_executed\": false,\n",
+            "  \"chrome_extension_evidence\": false,\n",
             "  \"image_generation_review_executed\": false,\n",
             "  \"gpt_image_review_executed\": false,\n",
+            "  \"product_design_visual_comparison_executed\": false,\n",
+            "  \"external_design_service_executed\": false,\n",
             "  \"live_image_or_screenshot_evidence\": false,\n",
             "  \"status\": {},\n",
             "  \"summary\": {{\"total\":{},\"changed\":{},\"added\":{},\"removed\":{},\"unchanged\":{}}},\n",
@@ -9879,7 +9896,7 @@ fn computer_loop_events_prove_isolated_open_click_type(
             "runtime_ref",
             "isolated-browser-runtime/index.html",
         )
-        && json_top_level_bool_field_equals(open_recorded, "executed", true)
+        && json_top_level_bool_field_equals(open_recorded, "executed", false)
         && json_top_level_string_field_equals(
             click_recorded,
             "element_id",
@@ -9890,7 +9907,7 @@ fn computer_loop_events_prove_isolated_open_click_type(
             "final_text",
             COMPUTER_ISOLATED_LOOP_FINAL_TEXT,
         )
-        && json_top_level_bool_field_equals(click_recorded, "executed", true)
+        && json_top_level_bool_field_equals(click_recorded, "executed", false)
         && json_top_level_string_field_equals(
             type_recorded,
             "element_id",
@@ -9901,7 +9918,7 @@ fn computer_loop_events_prove_isolated_open_click_type(
             "typed_text",
             COMPUTER_ISOLATED_LOOP_FINAL_TEXT,
         )
-        && json_top_level_bool_field_equals(type_recorded, "executed", true)
+        && json_top_level_bool_field_equals(type_recorded, "executed", false)
         && json_top_level_string_field_equals(
             final_recorded,
             "status_element_id",
@@ -9912,7 +9929,7 @@ fn computer_loop_events_prove_isolated_open_click_type(
             "final_text",
             COMPUTER_ISOLATED_LOOP_FINAL_TEXT,
         )
-        && json_top_level_bool_field_equals(final_recorded, "executed", true)
+        && json_top_level_bool_field_equals(final_recorded, "executed", false)
         && json_top_level_string_field_equals(observation, "screenshot_status", screenshot_status)
         && extract_json_top_level_raw_field(observation, "executed")
             .is_some_and(|value| value == "true" || value == "false")
@@ -10086,10 +10103,7 @@ fn design_report_forbidden_live_flags_false(report: &str) -> bool {
         "live_image_or_screenshot_evidence",
     ]
     .iter()
-    .all(|field| {
-        json_top_level_field_absent(report, field)
-            || json_top_level_bool_field_equals(report, field, false)
-    })
+    .all(|field| json_top_level_bool_field_equals(report, field, false))
 }
 
 fn design_screenshot_diff_rows_valid(
@@ -10757,8 +10771,8 @@ fn prod002_stage_overlap_target_gate_passed(cwd: &Path) -> bool {
 fn latest_stage_overlap_report_text(cwd: &Path) -> Option<String> {
     let scheduler_dir = cwd.join(OPEN_SKSDIR).join("scheduler");
     let mut reports = Vec::new();
-    for entry in fs::read_dir(&scheduler_dir).ok()? {
-        let path = entry.ok()?.path().join("stage-overlap-report.json");
+    for entry in fs::read_dir(&scheduler_dir).ok()?.filter_map(Result::ok) {
+        let path = entry.path().join("stage-overlap-report.json");
         if path.exists() {
             reports.push(path);
         }
@@ -11232,8 +11246,8 @@ fn latest_final_seal_artifact_integrity_passed(cwd: &Path) -> bool {
 fn latest_final_seal_text(cwd: &Path) -> Option<String> {
     let missions_dir = cwd.join(OPEN_SKSDIR).join("missions");
     let mut seals = Vec::new();
-    for entry in fs::read_dir(&missions_dir).ok()? {
-        let path = entry.ok()?.path().join("final-seal.json");
+    for entry in fs::read_dir(&missions_dir).ok()?.filter_map(Result::ok) {
+        let path = entry.path().join("final-seal.json");
         if path.exists() {
             seals.push(path);
         }
@@ -13466,25 +13480,7 @@ fn render_final_seal_json(
         verification.checks.len(),
         failed_checks,
         non_passed_checks,
-        json_array(&[
-            "goal-loop.json written",
-            "goal-state.jsonl written",
-            "automation-loop.json written",
-            "progress-ledger.json written",
-            "stop-policy.json written",
-            "tool-plan.json written",
-            "goal-kind-registry.json written",
-            "voxel-triwiki.json written",
-            "qa-report.json written",
-            "security-audit.json written",
-            "security-findings.jsonl written",
-            "stage-scheduler.json written",
-            "worktree-isolation.json written",
-            "patch-envelope.json written",
-            "prd-coverage.json written",
-            "requirement-coverage-gate.json written",
-            "final-seal.json written"
-        ]),
+        render_checks_json(verification.checks),
         json_string(security_status),
         json_string(&goal.risk_profile),
         if verification.security_summary.secret_findings == 0 {
@@ -13750,6 +13746,36 @@ fn extract_json_raw_field(input: &str, key: &str) -> Option<String> {
         return None;
     }
     let value_start = start + colon + 1 + after_key[colon + 1..].find(first)?;
+    if first == '{' || first == '[' {
+        let close = if first == '{' { '}' } else { ']' };
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (offset, ch) in input[value_start..].char_indices() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match ch {
+                '"' => in_string = true,
+                c if c == first => depth += 1,
+                c if c == close => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(input[value_start..value_start + offset + 1].to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
     let mut value_end = input.len();
     for (offset, ch) in input[value_start..].char_indices() {
         if ch == ',' || ch == '}' || ch == ']' || ch.is_whitespace() {

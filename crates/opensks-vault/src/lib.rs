@@ -59,6 +59,10 @@ pub enum VaultError {
     EncryptFailed,
     #[error("decryption failed")]
     DecryptFailed,
+    #[error("malformed vault: {0}")]
+    MalformedVault(String),
+    #[error("invalid conversation id: {0}")]
+    InvalidConversationId(String),
 }
 
 /// Stable error code for the CLI/JSON contract.
@@ -66,12 +70,13 @@ impl VaultError {
     pub fn code(&self) -> &'static str {
         match self {
             VaultError::BadRecipient => "bad_recipient",
-            VaultError::DecryptFailed => "decrypt_failed",
+            VaultError::DecryptFailed | VaultError::MalformedVault(_) => "decrypt_failed",
             VaultError::EncryptFailed
             | VaultError::Conversation(_)
             | VaultError::Artifact(_)
             | VaultError::Io(_)
-            | VaultError::NotFound(_) => "encrypt_failed",
+            | VaultError::NotFound(_)
+            | VaultError::InvalidConversationId(_) => "encrypt_failed",
         }
     }
 }
@@ -201,7 +206,7 @@ pub fn export_summary(
     now_ms: u64,
 ) -> Result<SummaryWrite> {
     let summary = build_summary(repo, conversation_id, now_ms)?;
-    let summary_path = summary_path_for(workspace, conversation_id);
+    let summary_path = summary_path_for(workspace, conversation_id)?;
     let json = serde_json::to_string_pretty(&summary)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     opensks_artifacts::write_text_atomic(&summary_path, &(json + "\n"))?;
@@ -211,18 +216,39 @@ pub fn export_summary(
     })
 }
 
+/// Validate that `conversation_id` is safe to embed in a filesystem path
+/// segment: non-empty, contains no path separators or `..`, and matches the
+/// hex-blob shape produced by `ConversationRepository::new_id()`.
+fn validate_conversation_id(conversation_id: &str) -> Result<()> {
+    let valid = !conversation_id.is_empty()
+        && conversation_id.len() <= 128
+        && conversation_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && !conversation_id.contains("..");
+    if valid {
+        Ok(())
+    } else {
+        Err(VaultError::InvalidConversationId(
+            conversation_id.to_string(),
+        ))
+    }
+}
+
 /// The canonical summary path for a conversation.
-pub fn summary_path_for(workspace: &Path, conversation_id: &str) -> PathBuf {
-    workspace
+pub fn summary_path_for(workspace: &Path, conversation_id: &str) -> Result<PathBuf> {
+    validate_conversation_id(conversation_id)?;
+    Ok(workspace
         .join(SUMMARIES_RELATIVE_DIR)
-        .join(format!("{conversation_id}.summary.json"))
+        .join(format!("{conversation_id}.summary.json")))
 }
 
 /// The canonical `.age` vault path for a conversation.
-pub fn vault_path_for(workspace: &Path, conversation_id: &str) -> PathBuf {
-    workspace
+pub fn vault_path_for(workspace: &Path, conversation_id: &str) -> Result<PathBuf> {
+    validate_conversation_id(conversation_id)?;
+    Ok(workspace
         .join(VAULTS_RELATIVE_DIR)
-        .join(format!("{conversation_id}.age"))
+        .join(format!("{conversation_id}.age")))
 }
 
 // ---------------------------------------------------------------------------
@@ -291,7 +317,7 @@ pub fn encrypt_transcript(
     let plaintext = transcript_bytes(repo, conversation_id)?;
     let ciphertext = encrypt_bytes(&plaintext, &recipient)?;
 
-    let vault_path = vault_path_for(workspace, conversation_id);
+    let vault_path = vault_path_for(workspace, conversation_id)?;
     // `write_text_atomic` works on UTF-8; age armor is optional, our ciphertext
     // is binary, so we do the atomic temp+fsync+rename ourselves on bytes.
     write_bytes_atomic(&vault_path, &ciphertext)?;
@@ -303,8 +329,9 @@ pub fn encrypt_transcript(
     })
 }
 
-/// Atomic binary write: temp sibling → fsync → rename. On any failure the temp
-/// file is removed so no partial output survives. Never writes plaintext.
+/// Atomic binary write: temp sibling → fsync → rename. On any failure only the
+/// temp file is removed so no partial output survives; any pre-existing file
+/// at `path` is left untouched. Never writes plaintext.
 fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "vault path has no parent")
@@ -319,9 +346,14 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         Ok(())
     })();
     if let Err(error) = write {
-        // Fail-closed: leave nothing behind.
+        // Fail-closed: clean up only the temp file this call created. `path`
+        // may already hold a valid, previously-durable vault (e.g. from an
+        // earlier successful encrypt) that has nothing to do with this
+        // failure — e.g. a transient I/O error while re-encrypting to rotate
+        // the recipient must never destroy the prior vault. `rename` is
+        // atomic, so on any error here `path` is left exactly as it was
+        // before this call started.
         let _ = std::fs::remove_file(&tmp);
-        let _ = std::fs::remove_file(path);
         return Err(VaultError::Io(error));
     }
     Ok(())
@@ -397,8 +429,18 @@ pub fn load_identities(identity_file: &Path) -> Result<Vec<Identity>> {
     parse_identities(&contents)
 }
 
+/// Cap on `.age` vault ciphertext size accepted by [`decrypt_vault`]. Vaults are
+/// conversation transcripts, not bulk data, so 64 MiB is generous headroom over
+/// any plausible export while still bounding worst-case memory use for an
+/// externally supplied (possibly malicious or corrupted) vault file.
+const MAX_VAULT_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Decrypt a `.age` vault file with an identity file and recover the transcript.
 pub fn decrypt_vault(vault_path: &Path, identity_file: &Path) -> Result<DecryptResult> {
+    let metadata = std::fs::metadata(vault_path).map_err(|_| VaultError::DecryptFailed)?;
+    if metadata.len() > MAX_VAULT_BYTES {
+        return Err(VaultError::DecryptFailed);
+    }
     let ciphertext = std::fs::read(vault_path).map_err(|_| VaultError::DecryptFailed)?;
     let identities = load_identities(identity_file)?;
     let plaintext = decrypt_bytes(&ciphertext, &identities)?;
@@ -409,7 +451,10 @@ pub fn decrypt_vault(vault_path: &Path, identity_file: &Path) -> Result<DecryptR
                 .and_then(|c| c.as_str())
                 .map(str::to_string)
         })
-        .unwrap_or_default();
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            VaultError::MalformedVault("missing or invalid conversation_id".to_string())
+        })?;
     let bytes = plaintext.len() as u64;
     Ok(DecryptResult {
         conversation_id,
@@ -722,6 +767,41 @@ mod tests {
     }
 
     #[test]
+    fn decrypt_vault_fails_closed_on_missing_conversation_id() {
+        let ws = TempWorkspace::new("malformed");
+        let identity = Identity::generate();
+        let recipient = identity.to_public();
+
+        // Ciphertext that decrypts fine, but whose plaintext JSON has no
+        // `conversation_id` field at all.
+        let plaintext = serde_json::json!({ "schema": "opensks.vault-transcript.v1" });
+        let bytes = serde_json::to_vec(&plaintext).expect("serialize");
+        let ciphertext = encrypt_bytes(&bytes, &recipient).expect("encrypt");
+        let vault_path = ws.path.join("no-id.age");
+        std::fs::write(&vault_path, &ciphertext).expect("write vault");
+
+        let identity_file = write_identity_file(&ws.path, "id.txt", &identity);
+        let err = decrypt_vault(&vault_path, &identity_file).expect_err("must fail");
+        assert!(matches!(err, VaultError::MalformedVault(_)));
+        assert_eq!(err.code(), "decrypt_failed");
+    }
+
+    #[test]
+    fn decrypt_vault_fails_closed_on_non_json_plaintext() {
+        let ws = TempWorkspace::new("nonjson");
+        let identity = Identity::generate();
+        let recipient = identity.to_public();
+
+        let ciphertext = encrypt_bytes(b"not json at all", &recipient).expect("encrypt");
+        let vault_path = ws.path.join("not-json.age");
+        std::fs::write(&vault_path, &ciphertext).expect("write vault");
+
+        let identity_file = write_identity_file(&ws.path, "id.txt", &identity);
+        let err = decrypt_vault(&vault_path, &identity_file).expect_err("must fail");
+        assert!(matches!(err, VaultError::MalformedVault(_)));
+    }
+
+    #[test]
     fn bad_recipient_writes_no_age_and_no_plaintext() {
         let ws = TempWorkspace::new("badrecipient");
         let (repo, conversation) = seed_conversation(
@@ -733,7 +813,7 @@ mod tests {
             &[],
         );
 
-        let vault_path = vault_path_for(&ws.path, &conversation);
+        let vault_path = vault_path_for(&ws.path, &conversation).expect("vault path");
         let err = encrypt_transcript(&repo, &ws.path, &conversation, "not-an-age-recipient")
             .expect_err("bad recipient must fail");
         assert_eq!(err.code(), "bad_recipient");
@@ -797,6 +877,90 @@ mod tests {
             }
         }
         false
+    }
+
+    #[test]
+    fn write_failure_does_not_destroy_pre_existing_vault() {
+        let ws = TempWorkspace::new("writefail");
+        let (repo, conversation) = seed_conversation(
+            &ws.path,
+            &[(
+                opensks_contracts::MessageRole::User,
+                "the durable vault must survive a later failed re-encrypt",
+            )],
+            &[],
+        );
+
+        let identity = Identity::generate();
+        let recipient = identity.to_public().to_string();
+        let result =
+            encrypt_transcript(&repo, &ws.path, &conversation, &recipient).expect("encrypt");
+        let original_bytes = std::fs::read(&result.vault_path).expect("read original vault");
+        assert!(!original_bytes.is_empty());
+
+        // Force the SECOND write to the same path to fail partway through by
+        // making the vault directory read-only, so `File::create(&tmp)` fails
+        // before anything is renamed over the existing `.age` file.
+        let vault_dir = result.vault_path.parent().expect("vault dir").to_path_buf();
+        let mut perms = std::fs::metadata(&vault_dir).expect("metadata").permissions();
+        let original_mode = std::os::unix::fs::PermissionsExt::mode(&perms);
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o500);
+        std::fs::set_permissions(&vault_dir, perms).expect("set readonly");
+
+        let retry_err = encrypt_transcript(&repo, &ws.path, &conversation, &recipient);
+
+        // Restore permissions before asserting so the TempWorkspace can clean
+        // up regardless of assertion outcome.
+        let mut restore_perms = std::fs::metadata(&vault_dir).expect("metadata").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut restore_perms, original_mode);
+        std::fs::set_permissions(&vault_dir, restore_perms).expect("restore perms");
+
+        assert!(retry_err.is_err(), "expected the retry write to fail");
+
+        // The ORIGINAL vault must still exist with its original bytes.
+        assert!(
+            result.vault_path.exists(),
+            "pre-existing vault was deleted by a failed re-encrypt"
+        );
+        let after_bytes = std::fs::read(&result.vault_path).expect("read vault after failure");
+        assert_eq!(
+            after_bytes, original_bytes,
+            "pre-existing vault contents changed after a failed re-encrypt"
+        );
+    }
+
+    #[test]
+    fn invalid_conversation_id_rejected_for_path_builders() {
+        let ws = TempWorkspace::new("invalidid");
+        assert!(matches!(
+            summary_path_for(&ws.path, "../../etc/passwd"),
+            Err(VaultError::InvalidConversationId(_))
+        ));
+        assert!(matches!(
+            vault_path_for(&ws.path, "a/b"),
+            Err(VaultError::InvalidConversationId(_))
+        ));
+        assert!(matches!(
+            vault_path_for(&ws.path, ""),
+            Err(VaultError::InvalidConversationId(_))
+        ));
+        // A legitimate hex-blob id is accepted.
+        assert!(summary_path_for(&ws.path, "abc123-DEF_456").is_ok());
+    }
+
+    #[test]
+    fn decrypt_vault_rejects_ciphertext_over_size_cap() {
+        let ws = TempWorkspace::new("oversize");
+        let vault_path = ws.path.join("huge.age");
+        // We don't need real age ciphertext here: the size check runs before
+        // any decryption is attempted, so a plain oversized file suffices.
+        let filler = vec![0u8; (MAX_VAULT_BYTES + 1) as usize];
+        std::fs::write(&vault_path, &filler).expect("write oversized file");
+
+        let identity = Identity::generate();
+        let identity_file = write_identity_file(&ws.path, "id.txt", &identity);
+        let err = decrypt_vault(&vault_path, &identity_file).expect_err("must fail");
+        assert_eq!(err.code(), "decrypt_failed");
     }
 
     #[test]

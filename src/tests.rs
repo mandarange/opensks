@@ -4949,11 +4949,11 @@ fn beta002_stays_partial_for_malformed_or_spoofed_computer_loop_artifacts() {
         &events_path,
         original_events.replace(
             &format!(
-                "\"final_text\":{},\"executed\":true",
+                "\"final_text\":{},\"executed\":false",
                 json_string(COMPUTER_ISOLATED_LOOP_FINAL_TEXT)
             ),
             &format!(
-                "\"final_text\":{},\"executed\":false,\"executed\":true",
+                "\"final_text\":{},\"executed\":true,\"executed\":false",
                 json_string(COMPUTER_ISOLATED_LOOP_FINAL_TEXT)
             ),
         ),

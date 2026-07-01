@@ -25,7 +25,8 @@
 //! field.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use opensks_contracts::{
     GIT_LOG_SCHEMA, GitBranchInfo, GitBranches, GitDiff, GitDiffFile, GitDiffHunk, GitLog,
@@ -51,6 +52,8 @@ pub enum GitServiceError {
     GitCommand(String),
     #[error("could not parse git output: {0}")]
     Parse(String),
+    #[error("git command timed out: {0}")]
+    Timeout(String),
 }
 
 /// Options for [`diff`].
@@ -793,11 +796,48 @@ pub fn redact_remote(value: &str) -> String {
 
 // --- shell helper -----------------------------------------------------------
 
+/// Wall-clock ceiling for a single `git` invocation. Guards against a hung
+/// subprocess (stale `index.lock`, an interactive credential prompt, a
+/// pathological repo) blocking the caller thread forever.
+const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Poll interval while waiting for the child to exit within [`GIT_TIMEOUT`].
+const GIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
 /// Run a read-only git command in `cwd`. All call sites in this crate pass only
 /// inspection verbs (`status`, `branch`, `worktree list`, `diff`, `log`,
 /// `rev-parse`).
+///
+/// Stdin is explicitly closed so a credential helper or pager can never block
+/// waiting on inherited input, and the child is killed if it does not exit
+/// within [`GIT_TIMEOUT`].
 fn git(cwd: &Path, args: &[&str]) -> Result<String, GitServiceError> {
-    let output = Command::new("git").args(args).current_dir(cwd).output()?;
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let deadline = Instant::now() + GIT_TIMEOUT;
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(GitServiceError::Timeout(format!(
+                "git {} timed out after {:?}",
+                args.join(" "),
+                GIT_TIMEOUT
+            )));
+        }
+        std::thread::sleep(GIT_POLL_INTERVAL);
+    }
+
+    let output = child.wait_with_output()?;
     if !output.status.success() {
         return Err(GitServiceError::GitCommand(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
